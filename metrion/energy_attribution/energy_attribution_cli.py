@@ -1,3 +1,10 @@
+import os
+import tempfile
+
+# Set matplotlib cache directory before importing matplotlib to avoid warnings
+if "MPLCONFIGDIR" not in os.environ:
+    os.environ["MPLCONFIGDIR"] = tempfile.gettempdir()
+
 import datetime
 import json
 from pathlib import Path

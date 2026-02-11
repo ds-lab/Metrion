@@ -53,21 +53,21 @@ METRION is a research-grade framework for attributing energy consumption. This r
 2. Launch the orchestrator with elevated privileges using the CLI:
 	```bash
 	# Run indefinitely (stop with Ctrl+C)
-	sudo .venv/bin/metrion
+	sudo .venv/bin/metrion monitor
 
 	# Run for a specific duration (e.g., 5 minutes)
-	sudo .venv/bin/metrion --timeout 5
+	sudo .venv/bin/metrion monitor --timeout 5
 
 	# Use a custom config file
-	sudo .venv/bin/metrion --config /path/to/config.yaml
+	sudo .venv/bin/metrion monitor --config /path/to/config.yaml
 
 	# Combine options
-	sudo .venv/bin/metrion -t 10 -c /path/to/config.yaml
+	sudo .venv/bin/metrion monitor -t 10 -c /path/to/config.yaml
 	```
 	Alternatively, run the orchestrator directly via Python:
 	```bash
-	sudo .venv/bin/python3.12 metrion/orchestrator.py
-	sudo .venv/bin/python3.12 metrion/orchestrator.py --timeout 5
+	sudo .venv/bin/python3.12 metrion/orchestrator.py monitor
+	sudo .venv/bin/python3.12 metrion/orchestrator.py monitor --timeout 5
 	```
 3. METRION writes measurements to a timestamped SQLite database in the project root (for example `monitor_2025_12_04_08_18_42.db`) and streams logs to stdout. Use `Ctrl+C` to stop the process gracefully.
 
@@ -79,8 +79,18 @@ METRION is a research-grade framework for attributing energy consumption. This r
 | `--help` | | Show help message and exit |
 
 ## Energy Attribution Workflow
-The analysis CLI in `metrion/energy_attribution/energy_attribution_cli.py` reconstructs CPU and DRAM per process from a run.
+The analysis CLI reconstructs CPU, DRAM, and GPU energy per process from a run.
 
+```bash
+sudo .venv/bin/metrion analyze \
+  --db-path monitor_2025_12_04_08_18_42.db \
+  --filter-cmdline "python" \
+  --start-time "2025-01-01 00:00:00" \
+  --end-time "2028-01-01 00:00:00" \
+  --type "duckdb"
+```
+
+Alternatively, you can run the CLI directly:
 ```bash
 .venv/bin/python3.12 metrion/energy_attribution/energy_attribution_cli.py \
   --db-path monitor_2025_12_04_08_18_42.db \
