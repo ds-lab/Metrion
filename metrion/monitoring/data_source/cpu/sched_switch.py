@@ -749,7 +749,6 @@ class SchedSwitchMonitor(DataSource):
         before_unique_count = len(pids_creation_time_tuple)
 
         registry_matched = 0
-        fallback_matched = 0
         unmatched = []
 
         for pid, pid_start in pids_creation_time_tuple:
@@ -786,16 +785,6 @@ class SchedSwitchMonitor(DataSource):
         unmatched_count = res.filter(pl.col("unmatched")).height
         total_events = len(data_df)
         match_rate = 100.0 * (1.0 - unmatched_count / total_events) if total_events > 0 else 100.0
-
-        logger.info(
-            f"Entity match stats - "
-            f"Unique PIDs: {before_unique_count}, "
-            f"Registry: {registry_matched}, "
-            f"Fallback: {fallback_matched}, "
-            f"Lost: {len(unmatched)}, "
-            f"Match rate: {match_rate:.2f}%, "
-            f"Registry size: {len(self._logical_entity_registry._entities)}"
-        )
 
         if unmatched_count > 0:
             logger.warning(f"Unmatched records: {unmatched_count} / {total_events} ({100.0 - match_rate:.2f}%)")
@@ -886,10 +875,6 @@ class SchedSwitchMonitor(DataSource):
         pre_rapl_df = data_df.filter(pl.col("start_group") < 0)
         in_rapl_df = data_df.filter(pl.col("start_group") >= 0)
 
-        logger.debug(
-            f"Grouping data: total={data_df.height}, pre_rapl={pre_rapl_df.height}, in_rapl={in_rapl_df.height}"
-        )
-
         ungrouped_cols = group_by_columns + ["time_start_ns", "time_end_ns"] + metric_columns
 
         if in_rapl_df.is_empty():
@@ -909,8 +894,6 @@ class SchedSwitchMonitor(DataSource):
         # Step 4: Separate groupable vs boundary events
         groupable_df = in_rapl_df.filter(pl.col("is_groupable"))
         boundary_df = in_rapl_df.filter(~pl.col("is_groupable"))
-
-        logger.debug(f"In-RAPL events: groupable={groupable_df.height}, boundary={boundary_df.height}")
 
         # Step 5: Aggregate groupable events
         if not groupable_df.is_empty():
@@ -1200,16 +1183,10 @@ class SchedSwitchMonitor(DataSource):
         ).unique()
 
         # Register entities from inline metadata (zero-loss path)
-        inline_created = self._logical_entity_registry._register_entities_from_inline_metadata(
-            raw_data_inline_metadata_df
-        )
-        if inline_created > 0:
-            logger.debug(f"Created {inline_created} entities from inline BPF metadata")
+        self._logical_entity_registry._register_entities_from_inline_metadata(raw_data_inline_metadata_df)
 
         # Update existing entities with better metadata (enrichment path)
-        updated_count = self._logical_entity_registry.update_entity_metadata_from_df(raw_data_inline_metadata_df)
-        if updated_count > 0:
-            logger.debug(f"Enriched {updated_count} entities with metadata from sched_switch")
+        self._logical_entity_registry.update_entity_metadata_from_df(raw_data_inline_metadata_df)
 
         raw_data_measurement_data_df = raw_data_df.select(
             pl.col("pid"),
@@ -1278,7 +1255,6 @@ class SchedSwitchMonitor(DataSource):
                         for the requested metrics.
         """
         measurements = []
-        logger.debug("Getting data for SchedSwitchMonitor ")
         if (
             len(self._cache_cpu_core_pid_aperf) == 0
             and len(self._cache_cpu_core_pid_mperf) == 0
@@ -1292,7 +1268,6 @@ class SchedSwitchMonitor(DataSource):
             and len(self._cache_cpu_core_pid_all_stores) == 0
             and len(self._cache_cpu_core_pid_demand_rfo_remote) == 0
         ):
-            logger.debug("Building cache of metrics")
             raw_data = self._get_raw_monitoring_data()
             self._calculate_and_cache_metrics(raw_data)
 
@@ -1317,8 +1292,6 @@ class SchedSwitchMonitor(DataSource):
                 measurements = measurements + self._cache_cpu_core_pid_load_remote
             elif metric == CPU_CORE_PID_MEM_INST_RETIRED_ALL_STORES:
                 measurements = measurements + self._cache_cpu_core_pid_all_stores
-
-        logger.debug(f"Work measurements captured: {self._total_work_data}")
 
         return DataRecord(entities=[], measurements=measurements)
 
@@ -1382,7 +1355,6 @@ class SchedSwitchMonitor(DataSource):
         # build final cache of metrics
         self._calculate_and_cache_metrics(df)
         final_data_record = self.get_data(metrics)
-        logger.debug(f"total raw events received: {self._raw_events_received}")
 
         self._rb_sched_switch.join(600)
         if self._rb_sched_switch.is_alive():
