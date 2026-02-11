@@ -15,7 +15,7 @@ from typing import Any, override
 
 import polars as pl
 import psutil
-from bcc import BPF
+from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
 from metrion.data_record import DataRecord
@@ -205,7 +205,7 @@ class TCPDataSource(DataSource):
         # Caches for measurements and entities
         self._cache_received: list[pl.DataFrame] = []
         self._cache_send: list[pl.DataFrame] = []
-        self._cache_entites: list[Entity] = []
+        self._cache_entities: list[Entity] = []
         self._cache_communication_endpoints: list[CommunicationEndpoint] = []
 
         # Ring buffer config
@@ -251,14 +251,10 @@ class TCPDataSource(DataSource):
         2. REGISTRY LOOKUP: Check the LogicalEntityRegistry for known entities.
         """
         # Step 1: Register entities from inline metadata (zero-loss path)
-        inline_created = self._logical_entity_registry._register_entities_from_inline_metadata(df)
-        if inline_created > 0:
-            logger.debug(f"TCP: Created {inline_created} entities from inline BPF metadata")
+        self._logical_entity_registry._register_entities_from_inline_metadata(df)
 
         # Step 1b: Update existing entities with better metadata (enrichment path)
-        updated_count = self._logical_entity_registry.update_entity_metadata_from_df(df)
-        if updated_count > 0:
-            logger.debug(f"TCP: Enriched {updated_count} entities with metadata")
+        self._logical_entity_registry.update_entity_metadata_from_df(df)
 
         # Step 2: Update registry (may have entities from sched_switch or task_newtask)
         self._logical_entity_registry.update()
@@ -277,7 +273,7 @@ class TCPDataSource(DataSource):
                 entity_id_list.append(entity.id)
                 pid_list.append(pid)
                 start_time_list.append(start_time_ns)
-                self._cache_entites.append(entity)
+                self._cache_entities.append(entity)
             else:
                 unmatched.append((pid, start_time_ns))
 
@@ -296,12 +292,6 @@ class TCPDataSource(DataSource):
         )
 
         result = df.join(entity_df, on=["pid", "pid_start"], how="left")
-
-        # Log match statistics
-        total = len(pids_start_times)
-        matched = len(entity_id_list)
-        match_rate = 100.0 * matched / total if total > 0 else 100.0
-        logger.info(f"TCP entity match: {matched}/{total} ({match_rate:.2f}%), inline created: {inline_created}")
 
         return result
 
@@ -420,12 +410,12 @@ class TCPDataSource(DataSource):
             elif metric.id == NETWORK_HOST_PID_TOTAL_BYTES_SENT.id:
                 measurements.extend(self._cache_send)
 
-        entities = self._cache_entites + self._cache_communication_endpoints
+        entities = self._cache_entities + self._cache_communication_endpoints
 
         # Clear caches
         self._cache_received = []
         self._cache_send = []
-        self._cache_entites = []
+        self._cache_entities = []
         self._cache_communication_endpoints = []
 
         return DataRecord(
