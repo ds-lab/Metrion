@@ -65,6 +65,11 @@ evaluation/**/*.csv
 evaluation/**/*.png
 evaluation/**/*.json
 
+# output in energy attribution
+metrion/energy_attribution/**/*.csv
+metrion/energy_attribution/**/*.png
+metrion/energy_attribution/**/*.json
+
 # byte files
 **/*-ubyte
 **/*-ubyte.gz

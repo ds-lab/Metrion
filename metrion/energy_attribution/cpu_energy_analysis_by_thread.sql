@@ -70,9 +70,9 @@ FROM
 --sqlite CREATE INDEX IF not EXISTS idx_ei_socket_end_start ON energy_interval_pkg_tmp (package_id, interval_end, interval_start);
 
 CREATE VIEW
-    IF NOT EXISTS total_energy_per_pid_view AS
+    IF NOT EXISTS total_energy_per_thread_view AS
 WITH
-    work_per_pid_per_socket AS (
+    work_per_thread_per_socket AS (
         SELECT
             ei.interval_start,
             ei.interval_end,
@@ -104,14 +104,14 @@ WITH
             package_id,
             SUM(work) AS socket_work
         FROM
-            work_per_pid_per_socket
+            work_per_thread_per_socket
         GROUP BY
             interval_start,
             interval_end,
             package_id
     ),
     -- 5 Execution time per PID & socket per time interval
-    time_per_pid AS (
+    time_per_thread AS (
         SELECT
             ei.interval_start,
             ei.interval_end,
@@ -144,14 +144,14 @@ WITH
             package_id,
             SUM(exec_time_s) AS socket_time_s
         FROM
-            time_per_pid
+            time_per_thread
         GROUP BY
             interval_start,
             interval_end,
             package_id
     ),
     -- 7 Merge metrics plus idle energy per PID and socket and time interval 
-    activity_per_pid AS (
+    activity_per_thread AS (
         SELECT
             w.interval_start,
             w.interval_end,
@@ -166,9 +166,9 @@ WITH
                 ) * 24 * 60 * 60
             ) AS idle_energy_j
         FROM
-            work_per_pid_per_socket w,
+            work_per_thread_per_socket w,
             energy_interval_pkg_tmp ei,
-            time_per_pid t,
+            time_per_thread t,
             cpu c
         WHERE
             w.interval_start = ei.interval_start
@@ -181,16 +181,16 @@ WITH
             AND c.id = w.package_id
     ),
     -- Energy attribution per PID and socket and time interval
-    energy_attribution_per_pid AS (
+    energy_attribution_per_thread AS (
         SELECT
             a.interval_start,
             a.interval_end,
             a.logical_entity_id,
             a.package_id,
-            (a.work / ws.socket_work) * (a.energy_j - a.idle_energy_j) AS dyn_energy_j,
+            (a.work / ws.socket_work) * (a.energy_j - a.idle_energy_j) AS active_energy_j,
             (a.exec_time_s / ts.socket_time_s) * a.idle_energy_j AS idle_energy_j
         FROM
-            activity_per_pid a,
+            activity_per_thread a,
             work_per_socket ws,
             time_per_socket ts
         WHERE
@@ -202,16 +202,16 @@ WITH
             AND a.package_id = ts.package_id
     ),
     -- 8 Final total energy per PID and time interval
-    total_energy_per_pid AS (
+    total_energy_per_thread AS (
         SELECT
             eap.interval_start,
             eap.interval_end,
             eap.logical_entity_id,
-            SUM(eap.dyn_energy_j) + SUM(eap.idle_energy_j) AS total_energy_j,
-            SUM(eap.dyn_energy_j) AS dyn_energy_j,
+            SUM(eap.active_energy_j) + SUM(eap.idle_energy_j) AS total_energy_j,
+            SUM(eap.active_energy_j) AS active_energy_j,
             SUM(eap.idle_energy_j) AS idle_energy_j
         FROM
-            energy_attribution_per_pid eap
+            energy_attribution_per_thread eap
         GROUP BY
             eap.interval_start,
             eap.interval_end,
@@ -222,10 +222,10 @@ SELECT
     interval_end,
     logical_entity_id,
     total_energy_j,
-    dyn_energy_j,
+    active_energy_j,
     idle_energy_j
 FROM
-    total_energy_per_pid
+    total_energy_per_thread
 ORDER BY
     interval_start,
     logical_entity_id;

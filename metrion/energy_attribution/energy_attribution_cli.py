@@ -145,11 +145,11 @@ def load_sql_queries(dialect: str) -> tuple[str, str, str, str, str, str]:
          GPU energy analysis by PID query,
          GPU energy per group query)
     """
-    cpu_energy_analysis_by_pid_path = Path(__file__).parent / "cpu_energy_analysis_by_pid.sql"
+    cpu_energy_analysis_by_thread_path = Path(__file__).parent / "cpu_energy_analysis_by_thread.sql"
     query_cpu_energy_per_group_path = Path(__file__).parent / "cpu_energy_per_group.sql"
-    dram_energy_analysis_by_pid_path = Path(__file__).parent / "dram_energy_analysis_by_pid.sql"
+    dram_energy_analysis_by_thread_path = Path(__file__).parent / "dram_energy_analysis_by_thread.sql"
     dram_energy_per_group_path = Path(__file__).parent / "dram_energy_per_group.sql"
-    gpu_energy_analysis_by_pid_path = Path(__file__).parent / "gpu_energy_analysis_by_pid.sql"
+    gpu_energy_analysis_by_thread_path = Path(__file__).parent / "gpu_energy_analysis_by_thread.sql"
     gpu_energy_per_group_path = Path(__file__).parent / "gpu_energy_per_group.sql"
 
     def _read_sql(path: Path) -> str:
@@ -171,19 +171,19 @@ def load_sql_queries(dialect: str) -> tuple[str, str, str, str, str, str]:
 
         return "\n".join(_strip_sqlite_marker(line) for line in lines) + "\n"
 
-    query_cpu_energy_analysis_by_pid = _read_sql(cpu_energy_analysis_by_pid_path)
+    query_cpu_energy_analysis_by_thread = _read_sql(cpu_energy_analysis_by_thread_path)
     query_cpu_energy_per_group = _read_sql(query_cpu_energy_per_group_path)
-    query_dram_energy_analysis_by_pid = _read_sql(dram_energy_analysis_by_pid_path)
+    query_dram_energy_analysis_by_thread = _read_sql(dram_energy_analysis_by_thread_path)
     query_dram_energy_per_group = _read_sql(dram_energy_per_group_path)
-    query_gpu_energy_analysis_by_pid = _read_sql(gpu_energy_analysis_by_pid_path)
+    query_gpu_energy_analysis_by_thread = _read_sql(gpu_energy_analysis_by_thread_path)
     query_gpu_energy_per_group = _read_sql(gpu_energy_per_group_path)
 
     return (
-        query_cpu_energy_analysis_by_pid,
+        query_cpu_energy_analysis_by_thread,
         query_cpu_energy_per_group,
-        query_dram_energy_analysis_by_pid,
+        query_dram_energy_analysis_by_thread,
         query_dram_energy_per_group,
-        query_gpu_energy_analysis_by_pid,
+        query_gpu_energy_analysis_by_thread,
         query_gpu_energy_per_group,
     )
 
@@ -241,11 +241,11 @@ def execute_queries(
     """
     # try:
     (
-        query_cpu_energy_analysis_by_pid,
+        query_cpu_energy_analysis_by_thread,
         query_cpu_energy_per_group,
-        query_dram_energy_analysis_by_pid,
+        query_dram_energy_analysis_by_thread,
         query_dram_energy_per_group,
-        query_gpu_energy_analysis_by_pid,
+        query_gpu_energy_analysis_by_thread,
         query_gpu_energy_per_group,
     ) = load_sql_queries(engine.dialect.name)
 
@@ -264,13 +264,13 @@ def execute_queries(
         raise ValueError(f"Unsupported database dialect: {dialect}")
 
     # Format the query with time parameters
-    formatted_query_cpu = query_cpu_energy_analysis_by_pid.format(
+    formatted_query_cpu = query_cpu_energy_analysis_by_thread.format(
         start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
     )
-    formatted_query_dram = query_dram_energy_analysis_by_pid.format(
+    formatted_query_dram = query_dram_energy_analysis_by_thread.format(
         start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
     )
-    formatted_query_gpu = query_gpu_energy_analysis_by_pid.format(
+    formatted_query_gpu = query_gpu_energy_analysis_by_thread.format(
         start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
     )
 
@@ -287,21 +287,21 @@ def execute_queries(
         "resource_group_name": pl.String,
         "resource_group_id": pl.Int64,
         "total_energy_j": pl.Float64,
-        "dyn_energy_j": pl.Float64,
+        "active_energy_j": pl.Float64,
         "idle_energy_j": pl.Float64,
     }
 
     # CPU
     cpu_query_statements = sqlparse.split(formatted_query_cpu)
     cpu_energy_per_group_df = _execute_group_query(
-        engine, "total_energy_per_pid_view", cpu_query_statements, formatted_query_cpu_group, force, energy_schema
+        engine, "total_energy_per_thread_view", cpu_query_statements, formatted_query_cpu_group, force, energy_schema
     )
     logger.info(f"Successfully loaded {len(cpu_energy_per_group_df)} CPU energy records")
 
     # DRAM
     dram_query_statements = sqlparse.split(formatted_query_dram)
     dram_energy_per_group_df = _execute_group_query(
-        engine, "dram_energy_per_pid_view", dram_query_statements, formatted_query_dram_group, force, energy_schema
+        engine, "dram_energy_per_thread_view", dram_query_statements, formatted_query_dram_group, force, energy_schema
     )
     logger.info(f"Successfully loaded {len(dram_energy_per_group_df)} DRAM energy records")
 
@@ -309,7 +309,7 @@ def execute_queries(
     gpu_query_statements = sqlparse.split(formatted_query_gpu)
     try:
         gpu_energy_per_group_df = _execute_group_query(
-            engine, "gpu_energy_per_pid_view", gpu_query_statements, formatted_query_gpu_group, force, energy_schema
+            engine, "gpu_energy_per_thread_view", gpu_query_statements, formatted_query_gpu_group, force, energy_schema
         )
         logger.info(f"Successfully loaded {len(gpu_energy_per_group_df)} GPU energy records")
     except Exception as e:
@@ -401,7 +401,7 @@ def collapse_time_stamps(df: pl.DataFrame | None) -> pl.DataFrame | None:
                 pl.col("interval_start").min().alias("interval_start"),
                 pl.col("interval_end").max().alias("interval_end"),
                 pl.col("total_energy_j").sum().alias("total_energy_j"),
-                pl.col("dyn_energy_j").sum().alias("dyn_energy_j"),
+                pl.col("active_energy_j").sum().alias("active_energy_j"),
                 pl.col("idle_energy_j").sum().alias("idle_energy_j"),
                 pl.col("executable_name").first().alias("executable_name"),
             ]
@@ -417,7 +417,7 @@ def collapse_time_stamps(df: pl.DataFrame | None) -> pl.DataFrame | None:
         pl.col("resource_group_name"),
         pl.col("resource_group_id"),
         pl.col("total_energy_j").cast(pl.Float64),
-        pl.col("dyn_energy_j").cast(pl.Float64),
+        pl.col("active_energy_j").cast(pl.Float64),
         pl.col("idle_energy_j").cast(pl.Float64),
     )
     return collapsed_df
@@ -1323,7 +1323,7 @@ def calculate_energy_statistics(
         # Calculate totals for this device
         total = df["total_energy_j"].sum()
         idle = df["idle_energy_j"].sum()
-        dynamic = df["dyn_energy_j"].sum()
+        dynamic = df["active_energy_j"].sum()
 
         # Convert to selected unit
         if unit == "Wh":
@@ -1667,10 +1667,15 @@ def prepare_data(
         f"gpu: {len(collapsed_df_gpu) if collapsed_df_gpu is not None else 0}"
     )
 
-    # Filter data by command line
-    filtered_df_cpu = filter_data_by_cmdline_and_comm(collapsed_df_cpu, filter_cmdline)
-    filtered_df_dram = filter_data_by_cmdline_and_comm(collapsed_df_dram, filter_cmdline)
-    filtered_df_gpu = filter_data_by_cmdline_and_comm(collapsed_df_gpu, filter_cmdline)
+    # Filter data by command line (skip if no cmdline filter provided)
+    if filter_cmdline:
+        filtered_df_cpu = filter_data_by_cmdline_and_comm(collapsed_df_cpu, filter_cmdline)
+        filtered_df_dram = filter_data_by_cmdline_and_comm(collapsed_df_dram, filter_cmdline)
+        filtered_df_gpu = filter_data_by_cmdline_and_comm(collapsed_df_gpu, filter_cmdline)
+    else:
+        filtered_df_cpu = collapsed_df_cpu
+        filtered_df_dram = collapsed_df_dram
+        filtered_df_gpu = collapsed_df_gpu
 
     filtered_dfs = []
     if filtered_df_cpu is not None and filtered_df_cpu.is_empty() is False:
@@ -1681,7 +1686,7 @@ def prepare_data(
         filtered_dfs.append(("gpu", filtered_df_gpu))
 
     if len(filtered_dfs) == 0:
-        logger.warning(f"No data found for command line filter: '{filter_cmdline}'")
+        logger.warning(f"No data found for filter: cmdline='{filter_cmdline}', sql='{filter}'")
         return
 
     all_dfs = [
@@ -1708,7 +1713,16 @@ def prepare_data(
     "--db-path", type=click.Path(exists=True, path_type=Path), required=True, help="Path to the SQLite database file"
 )
 @click.option(
-    "--filter-cmdline", type=str, default="python", help='Command line pattern to filter processes (default: "python")'
+    "--filter-cmdline",
+    type=str,
+    default="",
+    help="Command line pattern to filter processes (optional if --filter-pids is set)",
+)
+@click.option(
+    "--filter-pids",
+    type=str,
+    default="",
+    help="Comma-separated list of PIDs to filter by (e.g. '1234,5678')",
 )
 @click.option(
     "--start-time",
@@ -1725,8 +1739,8 @@ def prepare_data(
 @click.option(
     "--unit",
     type=click.Choice(["J", "Wh"], case_sensitive=False),
-    default="Wh",
-    help="Energy unit to use in plots (default: Wh)",
+    default="J",
+    help="Energy unit to use in plots (default: J)",
 )
 @click.option(
     "--force",
@@ -1737,7 +1751,7 @@ def prepare_data(
 @click.option(
     "--type",
     type=click.Choice(["sqlite", "duckdb"], case_sensitive=False),
-    default="sqlite",
+    default="duckdb",
     help="Type of database to connect to (default: duckdb)",
 )
 @click.option(
@@ -1755,6 +1769,7 @@ def prepare_data(
 def main(
     db_path: Path,
     filter_cmdline: str,
+    filter_pids: str,
     start_time: datetime.datetime,
     end_time: datetime.datetime,
     unit: Literal["J", "Wh"],
@@ -1767,7 +1782,7 @@ def main(
     Energy analysis tool for system processes.
 
     Analyzes CPU, DRAM, and GPU energy consumption from a database,
-    filtering by command line patterns and time ranges.
+    filtering by command line patterns, PIDs, and time ranges.
 
     Examples
     --------
@@ -1775,20 +1790,47 @@ def main(
 
         python analysis.py --db-path /path/to/db.db \\
             --start-time "2025-07-16 13:50:00" \\
-            --end-time "2025-07-29 14:10:00"
+            --end-time "2025-07-29 14:10:00" \\
+            --filter-cmdline "python"
 
-    Filter for specific processes with custom unit::
+    Filter by PIDs::
 
         python analysis.py --db-path /path/to/db.db \\
-            --filter-cmdline "python" --unit J \\
+            --filter-pids "1234,5678" \\
             --start-time "2025-07-16" --end-time "2025-07-29"
     """
+    # Validate that at least one filter is provided
+    if not filter_cmdline and not filter_pids:
+        raise click.UsageError("At least one of --filter-cmdline or --filter-pids must be provided.")
+
+    # Parse PIDs and build SQL filter condition
+    pid_filter_sql = ""
+    if filter_pids:
+        try:
+            pid_list = [int(p.strip()) for p in filter_pids.split(",") if p.strip()]
+        except ValueError as e:
+            raise click.BadParameter(
+                "--filter-pids must be a comma-separated list of integers", param_hint="--filter-pids"
+            ) from e
+        if pid_list:
+            pid_csv = ", ".join(str(p) for p in pid_list)
+            pid_filter_sql = f"AND le.native_pid IN ({pid_csv})"
+
+    # Build display label for reports/plots
+    filter_label_parts = []
+    if filter_cmdline:
+        filter_label_parts.append(f"cmdline='{filter_cmdline}'")
+    if filter_pids:
+        filter_label_parts.append(f"pids=[{filter_pids}]")
+    filter_label = ", ".join(filter_label_parts)
+
     prepared_data = prepare_data(
         db_path=db_path,
         filter_cmdline=filter_cmdline,
         start_time=start_time,
         end_time=end_time,
         unit=unit,
+        filter=pid_filter_sql,
         force=force,
         type=type,
     )
@@ -1801,7 +1843,7 @@ def main(
     summary_table = create_visualizations(
         filtered_dfs=filtered_dfs,
         all_dfs=all_dfs,
-        filter_cmdline=filter_cmdline,
+        filter_cmdline=filter_label,
         start_time=start_time,
         end_time=end_time,
         backend=backend,
@@ -1812,7 +1854,7 @@ def main(
     print_energy_summary(
         filtered_energy_data=filtered_dfs,
         summary_table=summary_table,
-        filter_cmdline=filter_cmdline,
+        filter_cmdline=filter_label,
         start_time=start_time,
         end_time=end_time,
         unit=unit,
@@ -1826,7 +1868,7 @@ def main(
         export_summary_to_file(
             summary_table=summary_table,
             stats=stats,
-            filter_cmdline=filter_cmdline,
+            filter_cmdline=filter_label,
             start_time=start_time,
             end_time=end_time,
             output_dir=output_dir,

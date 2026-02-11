@@ -33,7 +33,7 @@ class TestLoadSQLQueries:
         assert "energy_interval_gpu_tmp" in gpu_analysis_query
 
         # GPU group query should reference the view
-        assert "gpu_energy_per_pid_view" in gpu_group_query
+        assert "gpu_energy_per_thread_view" in gpu_group_query
 
     def test_load_sql_queries_sqlite_strips_markers(self):
         """Verify --sqlite markers are stripped for sqlite dialect."""
@@ -77,7 +77,7 @@ class TestGPUDataProcessing:
                 "resource_group_name": ["default", "default", "default"],
                 "resource_group_id": [1, 1, 1],
                 "total_energy_j": [10.0, 15.0, 12.0],
-                "dyn_energy_j": [8.0, 12.0, 10.0],
+                "active_energy_j": [8.0, 12.0, 10.0],
                 "idle_energy_j": [2.0, 3.0, 2.0],
             }
         )

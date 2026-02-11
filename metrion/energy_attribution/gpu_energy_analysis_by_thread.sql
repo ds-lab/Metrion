@@ -51,7 +51,7 @@ FROM energy_interval_gpu;
 --sqlite   ON energy_interval_gpu_tmp (gpu_id, interval_end, interval_start);
 
 -- 1) Final view: attribute energy by SM utilization ratio
-CREATE VIEW IF NOT EXISTS gpu_energy_per_pid_view AS
+CREATE TABLE IF NOT EXISTS gpu_energy_per_thread_view AS
 WITH
 -- (A) Idle/dynamic split per GPU interval
 gpu_interval_powers AS (
@@ -79,7 +79,7 @@ gpu_interval_energy_split AS (
 ),
 
 -- (B) Per-process SM utilization within each energy interval
-gpu_util_by_pid AS (
+gpu_util_by_thread AS (
     SELECT
         ei.gpu_id,
         ei.interval_start,
@@ -106,12 +106,12 @@ gpu_util_total AS (
         interval_end,
         SUM(total_util) AS total_util_all,
         SUM(sample_count) AS total_samples
-    FROM gpu_util_by_pid
+    FROM gpu_util_by_thread
     GROUP BY gpu_id, interval_start, interval_end
 ),
 
 -- (D) Utilization share per PID
-gpu_util_share_by_pid AS (
+gpu_util_share_by_thread AS (
     SELECT
         u.gpu_id,
         u.interval_start,
@@ -129,7 +129,7 @@ gpu_util_share_by_pid AS (
             WHEN t.total_samples > 0 THEN (u.sample_count / t.total_samples)
             ELSE 0.0
         END AS time_share
-    FROM gpu_util_by_pid u
+    FROM gpu_util_by_thread u
     JOIN gpu_util_total t
       ON u.gpu_id = t.gpu_id
      AND u.interval_start = t.interval_start
@@ -137,7 +137,7 @@ gpu_util_share_by_pid AS (
 ),
 
 -- (E) Attribute dynamic energy by utilization, idle by time share
-gpu_dynamic_energy_per_pid AS (
+gpu_dynamic_energy_per_thread AS (
     SELECT
         s.gpu_id,
         s.interval_start,
@@ -145,12 +145,12 @@ gpu_dynamic_energy_per_pid AS (
         sh.logical_entity_id,
         COALESCE(sh.util_share, 0.0) * s.dynamic_energy_j_total AS dynamic_energy_j
     FROM gpu_interval_energy_split s
-    LEFT JOIN gpu_util_share_by_pid sh
+    LEFT JOIN gpu_util_share_by_thread sh
       ON s.gpu_id = sh.gpu_id
      AND s.interval_start = sh.interval_start
      AND s.interval_end = sh.interval_end
 ),
-gpu_idle_energy_per_pid AS (
+gpu_idle_energy_per_thread AS (
     SELECT
         s.gpu_id,
         s.interval_start,
@@ -158,14 +158,14 @@ gpu_idle_energy_per_pid AS (
         sh.logical_entity_id,
         COALESCE(sh.time_share, 0.0) * s.idle_energy_j_total AS idle_energy_j
     FROM gpu_interval_energy_split s
-    LEFT JOIN gpu_util_share_by_pid sh
+    LEFT JOIN gpu_util_share_by_thread sh
       ON s.gpu_id = sh.gpu_id
      AND s.interval_start = sh.interval_start
      AND s.interval_end = sh.interval_end
 ),
 
 -- (F) Combine dynamic and idle energy per PID
-gpu_energy_per_pid AS (
+gpu_energy_per_thread AS (
     SELECT
         COALESCE(d.logical_entity_id, i.logical_entity_id) AS logical_entity_id,
         COALESCE(d.gpu_id, i.gpu_id) AS gpu_id,
@@ -173,8 +173,8 @@ gpu_energy_per_pid AS (
         COALESCE(d.interval_end, i.interval_end) AS interval_end,
         COALESCE(d.dynamic_energy_j, 0.0) AS dynamic_energy_j,
         COALESCE(i.idle_energy_j, 0.0) AS idle_energy_j
-    FROM gpu_dynamic_energy_per_pid d
-    FULL OUTER JOIN gpu_idle_energy_per_pid i
+    FROM gpu_dynamic_energy_per_thread d
+    FULL OUTER JOIN gpu_idle_energy_per_thread i
       ON d.logical_entity_id = i.logical_entity_id
      AND d.gpu_id = i.gpu_id
      AND d.interval_start = i.interval_start
@@ -187,7 +187,7 @@ SELECT
     logical_entity_id,
     gpu_id,
     dynamic_energy_j + idle_energy_j AS total_energy_j,
-    dynamic_energy_j,
+    dynamic_energy_j as active_energy_j,
     idle_energy_j
-FROM gpu_energy_per_pid
+FROM gpu_energy_per_thread
 ORDER BY interval_start, logical_entity_id;
