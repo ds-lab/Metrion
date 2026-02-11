@@ -1,0 +1,17 @@
+[package]
+name = "metrion_rust"
+version = "0.1.1"
+edition = "2024"
+
+[lib]
+name = "metrion_rust"
+
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.26", features = ["extension-module"] }
+polars = { version = "0.52", features = ["lazy", "temporal", "timezones"] }
+pyo3-polars = "0.25"                                           
+anyhow = "1"                                                   
+log = "0.4"           
+rayon = "1.10"                                         

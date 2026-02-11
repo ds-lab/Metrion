@@ -1,0 +1,932 @@
+from __future__ import annotations
+
+import multiprocessing as mp
+import os
+import queue as q
+import threading
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, override
+
+import polars as pl
+import psutil
+from bcc import BPF  # ty:ignore[unresolved-import]
+from loguru import logger
+
+from metrion.entity.logical_entity import LogicalEntity
+from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
+from metrion.monitoring.data_source.cpu.utils import (
+    get_cgroup_v2_path,
+    get_pid_starttime_ns,
+    read_starttime_from_stat_file_in_ns,
+)
+from metrion.util import build_cgroup_id_map, read_temp_ipc
+
+
+class LogicalEntityRegistryBpfProcess(EbpfRingBufferProcess):
+    @override
+    def _create_bpf(self):
+        base_dir = Path(__file__).resolve().parent
+        helpers_dir = base_dir.parent / "monitoring" / "data_source" / "helpers"
+        logger.warning(f"Using helpers dir: {helpers_dir}")
+        c_file_path = base_dir / "logical_entity_registry.c"
+
+        bpf = BPF(
+            src_file=str(c_file_path),
+            cflags=[
+                "-I%s" % str(helpers_dir),  # noqa: UP031
+            ],
+        )
+        return bpf
+
+    @override
+    def _attach_ringbuf(self) -> None:
+        assert self._bpf is not None
+        self._bpf["events"].open_ring_buffer(self._handle_ring_event)
+
+    @override
+    def _event_to_record(self, event: Any) -> dict[str, Any]:
+        return {
+            "tid": int(event.tid),
+            "tgid": int(event.tgid),
+            "tid_start_time": int(event.tid_start_ns),
+            "tgid_start_time": int(event.tgid_start_ns),
+            "parent_tid": int(event.parent_tid),
+            "parent_tgid": int(event.parent_tgid),
+            "parent_tid_start_time": int(event.parent_tid_start_ns),
+            "parent_tgid_start_time": int(event.parent_tgid_start_ns),
+            "event_type": int(event.event_type),
+            "uid": int(event.uid),
+            "gid": int(event.gid),
+            "cgroup_id": int(event.cgroup_id),
+            "old_tid": int(event.old_tid),  # PID before migration
+            "comm": event.comm.decode("utf-8", errors="replace"),
+            "cmdline": event.cmdline.decode("utf-8", errors="replace").strip(),
+        }
+
+
+class LogicalEntityRegistry:
+    """
+    Registry for logical entities (processes/threads).
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    # Event type constants matching BPF program
+    EVENT_TYPE_DATA_ONLY = 0
+    EVENT_TYPE_WITH_METADATA = 1
+
+    def __new__(cls, *args, **kwargs):
+        # Thread-safe singleton construction
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+
+        self._entities: dict[tuple[int, int], LogicalEntity] = {}  # (tid, start_time_ns) -> Entity
+        self._entities_by_pid: dict[int, list[LogicalEntity]] = {}  # tid -> [Entity]
+        self._bucket_index: dict[tuple[int, int], list[tuple[int, int]]] = {}  # (pid, bucket) -> [tid, start_time_ns]
+
+        self._queue: mp.Queue = mp.Queue()
+        self._stop_event: mp.Event = mp.Event()  # ty:ignore[invalid-type-form]
+
+        self._config = RingBufferConfig(
+            buffer_flush_threshold=100,
+            buffer_flush_time_threshold=0.5,
+            output_queue=self._queue,
+            stop_event=self._stop_event,
+            df_schema={
+                "tid": pl.UInt64,
+                "tgid": pl.UInt64,
+                "tid_start_time": pl.UInt64,
+                "tgid_start_time": pl.UInt64,
+                "parent_tid": pl.UInt64,
+                "parent_tgid": pl.UInt64,
+                "parent_tid_start_time": pl.UInt64,
+                "parent_tgid_start_time": pl.UInt64,
+                "event_type": pl.UInt64,
+                "uid": pl.UInt64,
+                "gid": pl.UInt64,
+                "cgroup_id": pl.UInt64,
+                "old_tid": pl.UInt64,  # PID before migration (for EXEC events)
+                "comm": pl.String,
+                "cmdline": pl.String,  # Command line from BPF
+            },
+        )
+
+        # Boot time for converting ticks to ns
+        self._boot_time_s = psutil.boot_time()
+        self._boot_time_dt = datetime.fromtimestamp(self._boot_time_s, tz=UTC)
+        self._clk_tck = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
+
+        # REORDERED: Scan /proc FIRST, before BPF starts
+        # This eliminates the race window where BPF sees tasks before /proc
+        logger.info("Scanning /proc before starting BPF...")
+        self._scan_proc()
+        self._cgroup_id_map = build_cgroup_id_map()
+        logger.info(f"Initial scan found {len(self._entities)} entities")
+
+        # NOW start BPF process (after /proc scan)
+        logger.info("Starting BPF process...")
+        self._bpf_process = LogicalEntityRegistryBpfProcess.start_singleton(self._config)
+
+        # Process any events that arrived during startup
+        logger.info("Processing initial BPF events...")
+        self.update()  # Drain queue once
+
+        # debug
+        self._no_match_count = 0
+
+        # new entity reporting
+        self._reported_entites_keys: set[tuple[int, int]] = set()
+        # Track entities that were updated (metadata enriched) - should also be reported as "new"
+        self._updated_entity_keys: set[tuple[int, int]] = set()
+
+    @classmethod
+    def get_instance(cls) -> LogicalEntityRegistry:
+        return cls()
+
+    def stop(self) -> list[LogicalEntity]:
+        self._bpf_process.stop()
+        # drain queue until sentinel
+
+        df_paths = []
+        while True:
+            try:
+                item = self._queue.get_nowait()
+                if item == self._config.sentinel:
+                    break
+                df_paths.append(item)
+            except q.Empty:
+                continue
+
+        self._cgroup_id_map = build_cgroup_id_map()
+        for item in df_paths:
+            df = read_temp_ipc(item)
+            self._process_events(df)
+
+        self._bpf_process.join(timeout=5)
+
+        return self.get_new_entities()
+
+    def update(self):
+        """Consume events from queue and update registry."""
+        df_paths = []
+        timeout = 0.01  # 10ms timeout for non-blocking behavior
+        max_iterations = 1000  # Prevent infinite loop
+
+        for _ in range(max_iterations):
+            try:
+                item = self._queue.get(timeout=timeout)
+                if item == self._config.sentinel:
+                    break
+                df_paths.append(item)
+            except q.Empty:
+                # Queue is empty, done draining
+                break
+
+        if len(df_paths) == 0:
+            return
+
+        self._cgroup_id_map = build_cgroup_id_map()
+        dfs = []
+        for item in df_paths:
+            df = read_temp_ipc(item)
+            dfs.append(df)
+
+        total_df = pl.concat(dfs, how="vertical").unique()
+        self._process_events(total_df)
+
+    def _process_events(self, df: pl.DataFrame):
+        # EVENT_TYPES: 1=NEW, 2=EXEC, 3=RENAME, 4=EXIT
+        for row in df.iter_rows(named=True):
+            event_type = row["event_type"]
+
+            if event_type == 1:  # NEW
+                self._add_entity(row)
+            elif event_type == 2:  # EXEC
+                self._update_exec(row)
+            elif event_type == 3:  # RENAME
+                self._update_rename(row)
+            elif event_type == 4:  # EXIT
+                self._handle_exit(row)
+
+    def _scan_proc(self):
+        """Scan /proc to populate initial entities."""
+        logger.info("Scanning /proc for initial entities...")
+        access_denied = 0
+        no_such = 0
+        thread_access_denied = 0
+        thread_no_such = 0
+        for proc in psutil.process_iter(["pid"]):
+            try:
+                # Process itself (main thread)
+                self._add_psutil_process(proc)
+
+                # Threads
+                try:
+                    for thread in proc.threads():
+                        self._add_psutil_thread(proc, thread)
+                except psutil.NoSuchProcess:
+                    thread_no_such += 1
+                    continue
+                except psutil.AccessDenied:
+                    thread_access_denied += 1
+                    continue
+
+            except psutil.NoSuchProcess:
+                no_such += 1
+                continue
+            except psutil.AccessDenied:
+                access_denied += 1
+                continue
+        logger.info(
+            f"Initial scan complete. Registered {len(self._entities)} entities. AccessDenied={access_denied} "
+            f"NoSuchProcess={no_such} ThreadAccessDenied={thread_access_denied} ThreadNoSuchProcess={thread_no_such}"
+        )
+
+    def _resolve_parent_start_times(
+        self, parent_pid: int, parent_tid: int, fallback_parent_pid_start_ns: int, fallback_parent_tid_start_ns: int
+    ) -> tuple[int, int]:
+        """
+        Resolve parent start times by looking up existing entities in the registry.
+
+        Strategy:
+        1. First check if the exact (pid, fallback_start_ns) key exists - if so, use it directly
+        2. Otherwise, try to find the latest entity for that pid and use its start time
+        3. Fall back to the provided estimate if nothing found
+
+        Parameters
+        ----------
+        parent_pid : int
+            Parent process ID (tgid)
+        parent_tid : int
+            Parent thread ID
+        fallback_parent_pid_start_ns : int
+            Estimated parent process start time (ns since boot) if not found
+        fallback_parent_tid_start_ns : int
+            Estimated parent thread start time (ns since boot) if not found
+
+        Returns
+        -------
+        tuple[int, int]
+            (resolved_parent_pid_start_ns, resolved_parent_tid_start_ns)
+        """
+        resolved_parent_pid_start_ns = fallback_parent_pid_start_ns
+        resolved_parent_tid_start_ns = fallback_parent_tid_start_ns
+
+        # Try to resolve parent process
+        if parent_pid > 0:
+            # First: check if exact key exists
+            exact_key = (parent_pid, fallback_parent_pid_start_ns)
+            if exact_key in self._entities:
+                # Exact match found, use the fallback (it's correct)
+                resolved_parent_pid_start_ns = fallback_parent_pid_start_ns
+            else:
+                # No exact match, try latest entity for this pid
+                parent_entity = self._get_latest_entity(parent_pid)
+                if parent_entity is not None:
+                    parent_start_dt = parent_entity.start_time
+                    if parent_start_dt is not None:
+                        delta = parent_start_dt - self._boot_time_dt
+                        resolved_parent_pid_start_ns = int(delta.total_seconds() * 1_000_000_000)
+
+        # Try to resolve parent thread (may be different from parent_pid for threads)
+        if parent_tid > 0 and parent_tid != parent_pid:
+            # First: check if exact key exists
+            exact_key = (parent_tid, fallback_parent_tid_start_ns)
+            if exact_key in self._entities:
+                resolved_parent_tid_start_ns = fallback_parent_tid_start_ns
+            else:
+                parent_tid_entity = self._get_latest_entity(parent_tid)
+                if parent_tid_entity is not None:
+                    parent_tid_start_dt = parent_tid_entity.start_time
+                    if parent_tid_start_dt is not None:
+                        delta = parent_tid_start_dt - self._boot_time_dt
+                        resolved_parent_tid_start_ns = int(delta.total_seconds() * 1_000_000_000)
+        else:
+            # parent_tid == parent_pid, use the same resolved value
+            resolved_parent_tid_start_ns = resolved_parent_pid_start_ns
+
+        return resolved_parent_pid_start_ns, resolved_parent_tid_start_ns
+
+    def _add_psutil_process(self, proc: psutil.Process):
+        pid = proc.pid
+        try:
+            ppid = proc.ppid()
+        except Exception:
+            ppid = 0
+
+        # start time: read /proc stat directly (robust + works for kernel threads)
+        try:
+            start_ns = get_pid_starttime_ns(pid)
+            start_dt = self._ns_to_datetime(start_ns)
+        except Exception:
+            # if we can't get a start time, don't poison the registry with 0
+            return
+
+        # optional fields: best-effort
+        try:
+            name = proc.name()
+        except Exception:
+            name = "unknown"
+
+        try:
+            cmdline = " ".join(proc.cmdline())
+        except Exception:
+            cmdline = ""
+
+        try:
+            u = proc.uids().real
+        except Exception:
+            u = -1
+
+        try:
+            g = proc.gids().real
+        except Exception:
+            g = -1
+
+        try:
+            cgroup = get_cgroup_v2_path(pid)
+        except Exception:
+            cgroup = "unknown"
+
+        # parent start times: best-effort
+        try:
+            ppid_start_ns = get_pid_starttime_ns(ppid) if ppid > 0 else 0
+        except Exception:
+            ppid_start_ns = 0
+
+        # Resolve parent start times from registry if available
+        fallback_ppid_start_ns = ppid_start_ns
+        resolved_parent_pid_ns, resolved_parent_tid_ns = self._resolve_parent_start_times(
+            parent_pid=ppid,
+            parent_tid=ppid,
+            fallback_parent_pid_start_ns=fallback_ppid_start_ns,
+            fallback_parent_tid_start_ns=fallback_ppid_start_ns,
+        )
+
+        logical_entity = LogicalEntity(
+            native_thread_id=pid,
+            native_pid=pid,
+            native_parent_pid=ppid,
+            native_parent_thread_id=ppid,
+            executable_name=name,
+            cmdline=cmdline,
+            start_time=start_dt,
+            pid_start_time=self._ns_to_datetime(start_ns),
+            parent_pid_start_time=self._ns_to_datetime(resolved_parent_pid_ns)
+            if resolved_parent_pid_ns
+            else self._boot_time_dt,
+            parent_tid_start_time=self._ns_to_datetime(resolved_parent_tid_ns)
+            if resolved_parent_tid_ns
+            else self._boot_time_dt,
+            resource_group_id=None,
+            resource_group_name=cgroup,
+            user_id=u,
+            group_id=g,
+        )
+
+        self._store_entity(logical_entity, pid, start_ns)
+
+    def _add_psutil_thread(self, p: psutil.Process, t: Any):
+        tid = t.id
+        stat_file = Path(f"/proc/{p.pid}/task/{tid}/stat")
+        start_time_ns = read_starttime_from_stat_file_in_ns(stat_file)
+        start_ts = self._ns_to_datetime(start_time_ns)
+
+        # Threads share cgroup, uid, gid with process usually
+        cgroup_path = get_cgroup_v2_path(p.pid)
+        pid_starttime_ns = get_pid_starttime_ns(p.pid)
+        ppid = p.ppid()
+        try:
+            ppid_start_ns = get_pid_starttime_ns(ppid) if ppid > 0 else 0
+        except Exception:
+            ppid_start_ns = 0
+
+        # Resolve parent start times from registry if available
+        resolved_parent_pid_ns, resolved_parent_tid_ns = self._resolve_parent_start_times(
+            parent_pid=ppid,
+            parent_tid=ppid,
+            fallback_parent_pid_start_ns=ppid_start_ns,
+            fallback_parent_tid_start_ns=ppid_start_ns,
+        )
+
+        entity = LogicalEntity(
+            native_thread_id=tid,
+            native_pid=p.pid,
+            native_parent_pid=ppid,
+            native_parent_thread_id=ppid,
+            executable_name=p.name(),  # Threads share name usually
+            cmdline=" ".join(p.cmdline()),
+            start_time=start_ts,
+            pid_start_time=self._ns_to_datetime(pid_starttime_ns),
+            parent_tid_start_time=self._ns_to_datetime(resolved_parent_tid_ns)
+            if resolved_parent_tid_ns
+            else self._boot_time_dt,
+            parent_pid_start_time=self._ns_to_datetime(resolved_parent_pid_ns)
+            if resolved_parent_pid_ns
+            else self._boot_time_dt,
+            resource_group_id=None,
+            resource_group_name=cgroup_path,
+            user_id=p.uids().real,
+            group_id=p.gids().real,
+        )
+
+        # Store
+        self._store_entity(entity, tid, start_time_ns)
+
+    def _add_entity(self, row: dict[str, Any]) -> None:
+        # Use cmdline from BPF event, fall back to /proc only if empty
+        cmdline = row.get("cmdline", "").strip()
+        if not cmdline or cmdline == row["comm"]:
+            # BPF cmdline is empty or same as comm (fallback case), try /proc
+            cmdline = self._get_cmdline(row["tgid"])
+        # Final fallback to comm if still empty
+        if not cmdline:
+            cmdline = row["comm"]
+
+        # Resolve parent start times from registry if available
+        resolved_parent_pid_ns, resolved_parent_tid_ns = self._resolve_parent_start_times(
+            parent_pid=row["parent_tgid"],
+            parent_tid=row["parent_tid"],
+            fallback_parent_pid_start_ns=row["parent_tgid_start_time"],
+            fallback_parent_tid_start_ns=row["parent_tid_start_time"],
+        )
+
+        entity = LogicalEntity(
+            native_thread_id=row["tid"],
+            native_pid=row["tgid"],
+            native_parent_pid=row["parent_tgid"],
+            native_parent_thread_id=row["parent_tid"],
+            executable_name=row["comm"],
+            cmdline=cmdline,
+            start_time=self._ns_to_datetime(row["tid_start_time"]),
+            pid_start_time=self._ns_to_datetime(row["tgid_start_time"]),
+            parent_tid_start_time=self._ns_to_datetime(resolved_parent_tid_ns),
+            parent_pid_start_time=self._ns_to_datetime(resolved_parent_pid_ns),
+            resource_group_id=row.get("cgroup_id"),
+            resource_group_name=self._cgroup_id_map.get(row["cgroup_id"], "unknown"),
+            user_id=row.get("uid"),
+            group_id=row.get("gid"),
+        )
+
+        self._store_entity(entity, row["tid"], row["tid_start_time"])
+
+    def _update_exec(self, row: dict[str, Any]) -> None:
+        """
+        EXEC: Update existing entity or migrate from old_tid.
+        Handles PID migration during exec by looking up old_tid if new tid not found.
+        """
+        tid = row["tid"]
+        old_tid = row["old_tid"]
+        tid_start_ns = row["tid_start_time"]
+
+        # Try to find entity by new tid first
+        key = (tid, tid_start_ns)
+        entity = self._entities.get(key)
+
+        # If not found and old_tid differs, look up by old_tid and migrate
+        if entity is None and old_tid != 0 and old_tid != tid:
+            old_key = (old_tid, tid_start_ns)
+            entity = self._entities.get(old_key)
+
+            if entity is not None:
+                # Migrate entity to new tid key
+                # 1. Remove old key
+                del self._entities[old_key]
+
+                # 2. Update entity's native_thread_id and regenerate thread_id
+                entity._native_thread_id = tid
+                entity._thread_id = entity._generate_thread_id()
+
+                # 3. Store under new key
+                self._entities[key] = entity
+
+                # 4. Update secondary indices
+                if tid not in self._entities_by_pid:
+                    self._entities_by_pid[tid] = []
+                self._entities_by_pid[tid].append(entity)
+
+                # 5. Update bucket index
+                bucket = tid_start_ns // (1_000_000_000 // self._clk_tck)
+                if (tid, bucket) not in self._bucket_index:
+                    self._bucket_index[(tid, bucket)] = []
+                self._bucket_index[(tid, bucket)].append(key)
+
+                # 6. Clean up old indices
+                if old_tid in self._entities_by_pid:
+                    if entity in self._entities_by_pid[old_tid]:
+                        self._entities_by_pid[old_tid].remove(entity)
+
+                old_bucket = tid_start_ns // (1_000_000_000 // self._clk_tck)
+                if (old_tid, old_bucket) in self._bucket_index:
+                    if old_key in self._bucket_index[(old_tid, old_bucket)]:
+                        self._bucket_index[(old_tid, old_bucket)].remove(old_key)
+
+        # If still not found, create new entity
+        if entity is None:
+            self._add_entity(row)
+            return
+
+        # Update metadata (comm, cmdline may have changed during exec)
+        entity.executable_name = row["comm"]
+        # Use cmdline from BPF event, fall back to /proc only if empty
+        cmdline = row.get("cmdline", "").strip()
+        if not cmdline or cmdline == row["comm"]:
+            cmdline = self._get_cmdline(entity.native_pid)
+        if cmdline:
+            entity.cmdline = cmdline
+
+        # Ensure entity is stored under correct key
+        self._entities[key] = entity
+
+    def _update_rename(self, row: dict[str, Any]) -> None:
+        """
+        RENAME: update comm only (cmdline does NOT change). Identify entity via (tid, tid_start_time) key.
+        """
+        tid = row["tid"]
+        tid_start_ns = row["tid_start_time"]
+
+        # Prefer exact match to avoid PID reuse confusion
+        key = (tid, tid_start_ns)
+        entity = self._entities.get(key)
+
+        # Fallback: latest entity for tid
+        if entity is None:
+            return
+
+        # Update comm/executable name
+        comm = row["comm"]
+        entity.executable_name = comm
+
+        # Use cmdline from BPF event, fall back to /proc only if empty
+        cmdline = row.get("cmdline", "").strip()
+        if not cmdline or cmdline == row["comm"]:
+            cmdline = self._get_cmdline(entity.native_pid)
+        if cmdline:
+            entity.cmdline = cmdline
+
+        if key is not None:
+            self._entities[key] = entity
+
+    def _handle_exit(self, row):
+        pass
+
+    def _get_cmdline(self, pid: int) -> str:
+        try:
+            cmdline_file = Path(f"/proc/{pid}/cmdline")
+            with cmdline_file.open() as f:
+                content = f.read()
+                # cmdline is null-separated
+                res = content.replace("\0", " ").strip()
+                return res
+        except Exception:
+            return ""
+
+    def _get_task_starttime_ns(self, tid: int, tgid: int) -> int | None:
+        """
+        Best-effort lookup of a thread's start time in ns since boot.
+        Prefer /proc/<tgid>/task/<tid>/stat, fall back to /proc/<tid>/stat.
+        """
+        stat_paths = [Path(f"/proc/{tgid}/task/{tid}/stat")]
+        if tid != tgid:
+            stat_paths.append(Path(f"/proc/{tid}/stat"))
+
+        for stat_path in stat_paths:
+            try:
+                return read_starttime_from_stat_file_in_ns(stat_path)
+            except FileNotFoundError:
+                continue
+            except Exception:
+                return None
+        return None
+
+    def _store_entity(self, entity: LogicalEntity, tid: int, start_ns: int):
+        key = (tid, start_ns)
+        self._entities[key] = entity
+        if tid not in self._entities_by_pid:
+            self._entities_by_pid[tid] = []
+        self._entities_by_pid[tid].append(entity)
+
+        # Add to bucket index
+        bucket = start_ns // (1_000_000_000 // self._clk_tck)
+        if (tid, bucket) not in self._bucket_index:
+            self._bucket_index[(tid, bucket)] = []
+        self._bucket_index[(tid, bucket)].append(key)
+
+    def _get_latest_entity(self, tid: int) -> LogicalEntity | None:
+        if tid not in self._entities_by_pid:
+            return None
+        return self._entities_by_pid[tid][-1]
+
+    def _ns_to_datetime(self, ns: int) -> datetime:
+        # ns is since boot
+        return self._boot_time_dt + timedelta(seconds=ns / 1e9)
+
+    def _ticks_to_datetime(self, ticks: int) -> datetime:
+        return self._ns_to_datetime(int(ticks * 1e9 / self._clk_tck))
+
+    def get_logical_entity(
+        self,
+        pid: int,
+        start_time: int | datetime,
+    ) -> LogicalEntity | None:
+        """
+        Lookup by canonical identity (pid/tid, start_ns_since_boot).
+
+        - If start_time is datetime: interpret as UTC wall-clock and convert to ns since boot.
+        - If start_time is int: interpret as ns since boot.
+
+        Lookup strategy:
+        1) Exact: (pid, start_ns)
+        2) Fuzzy: search bucket ±2 ticks and pick nearest valid key
+        3) Fallback: latest entity for pid (best effort)
+        """
+        # ---- normalize start_time -> ns since boot ----
+        if isinstance(start_time, datetime):
+            dt = start_time
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            else:
+                dt = dt.astimezone(UTC)
+
+            delta = dt - self._boot_time_dt
+            start_ns = int(delta.total_seconds() * 1_000_000_000)
+        else:
+            start_ns = int(start_time)
+
+        if start_ns < 0:
+            logger.warning(f"Invalid start_time {start_time} for pid {pid}, using latest entity")
+            return self._get_latest_entity(pid)
+
+        # ---- exact lookup ----
+        key = (pid, start_ns)
+        ent = self._entities.get(key)
+        if ent is not None:
+            return ent
+
+        # ---- fuzzy lookup using tick buckets ----
+        tick_ns = 1_000_000_000 // self._clk_tck
+        bucket = start_ns // tick_ns
+        tolerance = 6  # buckets
+
+        best_key: tuple[int, int] | None = None
+        best_delta: int | None = None
+
+        for b in range(bucket - tolerance, bucket + tolerance + 1):
+            for cand_key in self._bucket_index.get((pid, b), []):
+                # cand_key is (pid, cand_start_ns)
+                cand_start_ns = cand_key[1]
+                delta = abs(cand_start_ns - start_ns)
+
+                # Optional: enforce that it's within the tolerance window in ns
+                if delta > tolerance * tick_ns:
+                    continue
+
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best_key = cand_key
+
+        if best_key is not None:
+            ent = self._entities.get(best_key)
+            if ent is not None:
+                return ent
+
+        # no match found
+        self._no_match_count += 1
+        # logger.debug(f"No entity for pid {pid} (start_ns={start_ns}) - PID not in registry and not alive")
+        return None
+
+    def get_all_entities_df(self) -> pl.DataFrame:
+        """Return all entities as a DataFrame."""
+
+        data = []
+        for entity in self._entities.values():
+            data.append(entity._to_df())
+
+        return pl.concat([df for df in data], how="vertical")
+
+    def _add_entity_from_bpf_metadata(self, pid: int, pid_start: int, meta: dict[str, Any]) -> LogicalEntity:
+        # Resolve parent start times from registry if available
+        resolved_parent_pid_ns, resolved_parent_tid_ns = self._resolve_parent_start_times(
+            parent_pid=meta["parent_tgid"],
+            parent_tid=meta["parent_tid"],
+            fallback_parent_pid_start_ns=meta["start_time_parent_tgid"],
+            fallback_parent_tid_start_ns=meta["start_time_parent"],
+        )
+
+        le = LogicalEntity(
+            native_thread_id=pid,
+            native_pid=meta["tgid"],
+            native_parent_pid=meta["parent_tgid"],
+            native_parent_thread_id=meta["parent_tid"],
+            executable_name=meta["comm"],
+            cmdline=meta["cmdline"] or meta["comm"],
+            start_time=self._ns_to_datetime(pid_start),
+            pid_start_time=self._ns_to_datetime(meta["start_time_tgid"]),
+            parent_tid_start_time=self._ns_to_datetime(resolved_parent_tid_ns),
+            parent_pid_start_time=self._ns_to_datetime(resolved_parent_pid_ns),
+            resource_group_id=meta.get("cgroup_id"),
+            user_id=meta.get("uid"),
+            group_id=meta.get("gid"),
+        )
+
+        self._store_entity(le, pid, pid_start)
+        return le
+
+    def _register_entities_from_inline_metadata(self, df: pl.DataFrame) -> int:
+        """
+        Register logical entities from inline metadata embedded in ring buffer events.
+
+        This is the key to zero-loss matching: events with event_type=1 contain
+        full process metadata. We create LogicalEntity objects inline before
+        attempting to match.
+
+        Returns the count of entities created from inline metadata.
+        """
+        # Filter to events with inline metadata
+        metadata_events = df.filter(pl.col("event_type") == self.EVENT_TYPE_WITH_METADATA)
+
+        if metadata_events.is_empty():
+            return 0
+
+        # Get unique (pid, pid_start) combinations with metadata
+        unique_metadata = metadata_events.select(
+            [
+                "pid",
+                "pid_start",
+                "tgid",
+                "tgid_start",
+                "parent_tid",
+                "parent_tgid",
+                "parent_tid_start",
+                "parent_tgid_start",
+                "cgroup_id",
+                "uid",
+                "gid",
+                "comm",
+                "cmdline",
+            ]
+        ).unique(subset=["pid", "pid_start"])
+
+        created_count = 0
+        for row in unique_metadata.iter_rows(named=True):
+            pid = row["pid"]
+            pid_start = row["pid_start"]
+
+            # Skip if entity already exists in registry
+            existing = self.get_logical_entity(pid=pid, start_time=pid_start)
+            if existing is not None:
+                continue
+
+            # Build metadata dict and register entity
+            meta = {
+                "tgid": row["tgid"],
+                "start_time": pid_start,
+                "start_time_tgid": row["tgid_start"],
+                "parent_tid": row["parent_tid"],
+                "parent_tgid": row["parent_tgid"],
+                "start_time_parent": row["parent_tid_start"],
+                "start_time_parent_tgid": row["parent_tgid_start"],
+                "cgroup_id": row["cgroup_id"],
+                "uid": row["uid"],
+                "gid": row["gid"],
+                "comm": row["comm"] or "",
+                "cmdline": row["cmdline"] or row["comm"] or "",
+            }
+            self._add_entity_from_bpf_metadata(pid, pid_start, meta)
+            created_count += 1
+
+        return created_count
+
+    def update_entity_metadata_from_df(self, df: pl.DataFrame) -> int:
+        """
+        Update existing entities with better metadata from monitoring dataframes.
+
+        This is called by sched_switch and tcp_monitor to enrich entities that
+        may have been created with incomplete metadata (e.g., from inline metadata
+        where comm/cmdline was empty or from /proc scan of short-lived processes).
+
+        The DataFrame is expected to have at minimum:
+        - pid: int (thread ID)
+        - pid_start: int (start time in ns since boot)
+
+        And optionally for enrichment:
+        - comm: str (process command name from BPF)
+        - cmdline: str (command line from BPF)
+        - tgid: int (process group ID)
+        - tgid_start: int (process group start time)
+        - cgroup_id: int
+        - uid: int
+        - gid: int
+
+        Returns the count of entities that were updated with new metadata.
+        """
+        if df.is_empty():
+            return 0
+
+        # Check what columns are available for enrichment
+        available_cols = set(df.columns)
+        has_comm = "comm" in available_cols
+        has_cmdline = "cmdline" in available_cols
+
+        if not has_comm and not has_cmdline:
+            return 0  # Nothing to enrich with
+
+        # Get unique (pid, pid_start) combinations that have metadata to offer
+        select_cols = ["pid", "pid_start"]
+        if has_comm:
+            select_cols.append("comm")
+        if has_cmdline:
+            select_cols.append("cmdline")
+
+        # Filter to rows with non-empty comm or cmdline
+        filter_expr = pl.lit(False)
+        if has_comm:
+            filter_expr = filter_expr | (pl.col("comm").is_not_null() & (pl.col("comm") != ""))
+        if has_cmdline:
+            filter_expr = filter_expr | (pl.col("cmdline").is_not_null() & (pl.col("cmdline") != ""))
+
+        enrichment_df = df.select(select_cols).filter(filter_expr).unique(subset=["pid", "pid_start"])
+
+        if enrichment_df.is_empty():
+            return 0
+
+        updated_count = 0
+
+        for row in enrichment_df.iter_rows(named=True):
+            pid = row["pid"]
+            pid_start = row["pid_start"]
+            comm = row.get("comm", "") or ""
+            cmdline = row.get("cmdline", "") or ""
+
+            # Skip if no enrichment data
+            if not comm and not cmdline:
+                continue
+
+            # Find the entity
+            entity = self.get_logical_entity(pid=pid, start_time=pid_start)
+            if entity is None:
+                continue
+
+            # Check if entity needs enrichment
+            needs_update = False
+            current_name = entity.executable_name or ""
+            current_cmdline = entity.cmdline or ""
+
+            # Update executable_name if current is empty/None and we have comm
+            if comm and (not current_name or current_name == "unknown"):
+                entity.executable_name = comm
+                needs_update = True
+
+            # Update cmdline if current is empty/None/same-as-comm and we have better cmdline
+            if cmdline and cmdline != comm:
+                # We have a real cmdline (not just comm)
+                if not current_cmdline or current_cmdline == current_name or current_cmdline == "unknown":
+                    entity.cmdline = cmdline
+                    needs_update = True
+            elif comm and (not current_cmdline or current_cmdline == "unknown"):
+                # At least use comm as cmdline fallback
+                entity.cmdline = comm
+                needs_update = True
+
+            if needs_update:
+                # Find the key for this entity to mark as updated
+                key = (pid, pid_start)
+                if key in self._entities:
+                    self._updated_entity_keys.add(key)
+                    updated_count += 1
+                else:
+                    # Try to find via bucket lookup
+                    tick_ns = 1_000_000_000 // self._clk_tck
+                    bucket = pid_start // tick_ns
+                    for cand_key in self._bucket_index.get((pid, bucket), []):
+                        if self._entities.get(cand_key) is entity:
+                            self._updated_entity_keys.add(cand_key)
+                            updated_count += 1
+                            break
+
+        if updated_count > 0:
+            logger.debug(f"Updated metadata for {updated_count} entities from monitoring data")
+
+        return updated_count
+
+    def get_new_entities(self) -> list[LogicalEntity]:
+        """Return all entities that have been added or updated since the last call."""
+        # Include both newly added entities and entities with updated metadata
+        new_entity_keys = (
+            self._entities.keys() - self._reported_entites_keys
+        ) | self._updated_entity_keys  # set union via |
+        new_entities = [self._entities[key] for key in new_entity_keys if key in self._entities]
+        self._reported_entites_keys = set(self._entities.keys())
+        self._updated_entity_keys.clear()  # Reset updated set after reporting
+        return new_entities
