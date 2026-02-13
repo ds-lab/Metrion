@@ -394,7 +394,7 @@ class HardwareDetection:
                 package_id = cpu_data["package_id"]
 
                 # Get power config from agent config
-                power_config = self._config.get_subcomponent_power_config("cpu", f"package-{package_id}")
+                power_config = self._config.get_subcomponent_power_config("cpu", package_id)
 
                 # Use config values if not "auto", otherwise use detected values
                 idle_power_package = (
@@ -579,7 +579,7 @@ class HardwareDetection:
                 total_memory = sum(module.get("total_memory", 0) for module in ram_modules)
 
                 # Get power config from agent config
-                power_config = self._config.get_subcomponent_power_config("dram", f"package-{package_id}")
+                power_config = self._config.get_subcomponent_power_config("dram", package_id)
 
                 # Use config value if not "auto", otherwise use detected value
                 dram_idle_power = (
