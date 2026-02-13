@@ -13,63 +13,73 @@ METRION is a research-grade framework for attributing energy consumption. This r
 - `src/` Rust crates compiled into the Python package via `maturin`.
 - `evaluation/` evaluation automation to determine the accuracy of METRION and compare against other tools (Scaphandre, EnergAt).
 - `tests/` unit and integration tests for the Python and Rust components.
-- `target/`, `wheels/` build artefacts produced by Cargo and maturin (ignored by version control in normal workflows).
+- `target/`, `wheels/` build artifacts produced by Cargo and maturin (ignored by version control in normal workflows).
 
 ## Prerequisites
-- Ubuntu 22.04 or newer with systemd (the evaluation scripts rely on `systemd-run`).
-- Python 3.12 and the [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager.
+- A Linux system, e.g., Ubuntu 22.04 or newer with systemd (the evaluation scripts rely on `systemd-run`).
+- Python 3.12 and optionally a package manager like [uv](https://docs.astral.sh/uv/getting-started/installation/).
 - Rust toolchain (2024 edition) with `cargo` available in `PATH`.
-- BCC (BPF Compiler Collection) 0.35 or newer for the eBPF monitors.
+- [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc/blob/master/INSTALL.md) 0.35 or newer for the eBPF monitors.
 - Root privileges to access eBPF, perf, and RAPL counters (`sudo` is required for most workflows).
-- sudo apt-get update && sudo apt-get install linux-headers-$(uname -r)
+- Linux Headers, for Ubuntu: `sudo apt-get update && sudo apt-get install linux-headers-$(uname -r)`
 
-## Environment Setup
+## Usage Setup
+1. Clone the project
+	```bash
+	git clone <repository-url>
+	````
+2. Install it via pip: 
+	```bash
+	pip install -e .
+	```
+
+## Development Setup with uv
 1. Clone the project and create a Python 3.12 virtual environment with uv:
 	```bash
 	git clone <repository-url>
 	cd metrion
-	uv venv --python 3.12
+	uv venv --python 3.12 --system-site-packages
 	source .venv/bin/activate
 	```
 2. Install the Python dependencies (core, extras, and notebooks used in the evaluation):
 	```bash
 	uv sync --all-extras
 	```
-3. Expose the system-installed BCC package to the virtual environment (adjust the path if your distribution stores BCC elsewhere):
-	```bash
-	echo "$(ls /usr/lib/python3/dist-packages/bcc-*.egg | head -1)" > .venv/lib/python3.12/site-packages/bcc-egg.pth
-	```
-4. Build and install the Rust extensions into the environment:
+3. Build and install the Rust extensions into the environment:
 	```bash
 	maturin develop
 	```
-5. (Optional) Enable developer tooling:
+4. Enable developer tooling:
 	```bash
 	pre-commit install
 	```
 
 ## Running the Framework
 1. Review `configs/config.yaml` and adjust metric allowlists, idle power hints, or storage settings as required.
-2. Launch the orchestrator with elevated privileges using the CLI:
+2. Launch the orchestrator with elevated privileges using the CLI. Since `sudo` typically resets the environment, locate the executable first:
 	```bash
+	# Identify where metrion is installed
+	METRION_BIN=$(which metrion)
+
 	# Run indefinitely (stop with Ctrl+C)
-	sudo .venv/bin/metrion monitor
+	sudo "$METRION_BIN" monitor
 
 	# Run for a specific duration (e.g., 5 minutes)
-	sudo .venv/bin/metrion monitor --timeout 5
+	sudo "$METRION_BIN" monitor --timeout 5
 
 	# Use a custom config file
-	sudo .venv/bin/metrion monitor --config /path/to/config.yaml
+	sudo "$METRION_BIN" monitor --config /path/to/config.yaml
 
 	# Combine options
-	sudo .venv/bin/metrion monitor -t 10 -c /path/to/config.yaml
+	sudo "$METRION_BIN" monitor -t 10 -c /path/to/config.yaml
 	```
-	Alternatively, run the orchestrator directly via Python:
+	Alternatively, run the orchestrator directly via Python (adjust paths as needed):
 	```bash
-	sudo .venv/bin/python3.12 metrion/orchestrator.py monitor
-	sudo .venv/bin/python3.12 metrion/orchestrator.py monitor --timeout 5
+	PYTHON_BIN=$(which python)
+	sudo "$PYTHON_BIN" metrion/orchestrator.py monitor
+	sudo "$PYTHON_BIN" metrion/orchestrator.py monitor --timeout 5
 	```
-3. METRION writes measurements to a timestamped SQLite database in the project root (for example `monitor_2025_12_04_08_18_42.db`) and streams logs to stdout. Use `Ctrl+C` to stop the process gracefully.
+3. METRION writes measurements to a timestamped SQLite database in the project root (e.g., `monitor_2025_12_04_08_18_42.db`) and streams logs to stdout. Use `Ctrl+C` to stop the process gracefully.
 
 ### CLI Options
 | Option | Short | Description |
@@ -79,32 +89,32 @@ METRION is a research-grade framework for attributing energy consumption. This r
 | `--help` | | Show help message and exit |
 
 ## Energy Attribution Workflow
-The analysis CLI reconstructs CPU, DRAM, and GPU energy per process from a run.
+The analysis CLI reconstructs CPU, DRAM, and GPU energy per process from a monitoring session.
 
 ```bash
-sudo .venv/bin/metrion analyze \
+METRION_BIN=$(which metrion)
+sudo "$METRION_BIN" analyze \
   --db-path monitor_2025_12_04_08_18_42.db \
   --filter-cmdline "python" \
   --start-time "2025-01-01 00:00:00" \
-  --end-time "2028-01-01 00:00:00" \
-  --type "duckdb"
+  --end-time "2028-01-01 00:00:00"
 ```
 
 Alternatively, you can run the CLI directly:
 ```bash
-.venv/bin/python3.12 metrion/energy_attribution/energy_attribution_cli.py \
+PYTHON_BIN=$(which python)
+sudo "$PYTHON_BIN" metrion/energy_attribution/energy_attribution_cli.py \
   --db-path monitor_2025_12_04_08_18_42.db \
   --filter-cmdline "python" \
   --start-time "2025-01-01 00:00:00" \
-  --end-time "2026-01-01 00:00:00" \
-  --type "duckdb"
+  --end-time "2026-01-01 00:00:00"
 ```
 
 - The script expects timestamps in UTC as stored in the database.
 - Set `--force true` to rebuild materialized views when the schema or queries change.
 - Generated HTML reports are written to `metrion/energy_attribution/output/` by default.
 
-## Benchmark Evaluation
+## Evaluation
 The evaluation workflow reproduces the experiments from the paper and compares METRION with Scaphandre and EnergAt.
 
 ```bash
@@ -113,11 +123,13 @@ sudo evaluation/run_evaluation.sh
 
 - Run the script from the repository root; it resolves workload scripts relative to the current directory.
 - Each profiler run is executed inside its own transient systemd service to isolate cgroups and captures logs in `evaluation/data/logs/`.
-- Energy measurements land in `evaluation/data/measurements/<tool>/` according to the wrapper that produced them.
+- Energy measurements are saved in `evaluation/data/measurements/<tool>/` corresponding to the tool that produced them.
 
-## Tipps and Tricks 
-Delete pycache files. 
+## Tips and Tricks 
+Delete pycache files:
+```bash
 find . \( -type d -name "__pycache__" -o -type f \( -name "*.pyc" -o -name "*.pyo" \) \) -exec rm -rf {} +
+```
 
 
 ## Citation
