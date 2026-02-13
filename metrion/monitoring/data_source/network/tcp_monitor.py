@@ -26,6 +26,7 @@ from metrion.entity.network_interface import NetworkInterface, NetworkInterfaceR
 from metrion.metric import NETWORK_HOST_PID_TOTAL_BYTES_RECEIVED, NETWORK_HOST_PID_TOTAL_BYTES_SENT, Metric
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.data_source_base import DataSource
+from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
 from metrion.util import check_entity_type, read_temp_ipc
 
 
@@ -91,7 +92,7 @@ class TCPMonitorBpfProcess(EbpfRingBufferProcess):
         """Load and compile the eBPF v2 program with inline metadata support."""
         base_dir = Path(__file__).resolve().parent
         # Use v2 BPF program with inline metadata for zero-loss entity matching
-        c_file_path = base_dir / "tcp_monitor_v2.c"
+        c_file_path = base_dir / "tcp_monitor.c"
 
         bpf = BPF(src_file=str(c_file_path))
 
@@ -221,6 +222,8 @@ class TCPDataSource(DataSource):
         # Start the eBPF ring buffer process
         self._bpf_process = TCPMonitorBpfProcess.start_singleton(self._ring_config, daemon=True)
 
+        self._boot_time_s = psutil.boot_time()
+        self._clock_validated = False
         self._initialized = True
 
     def _get_raw_events(self) -> pl.DataFrame:
@@ -359,12 +362,21 @@ class TCPDataSource(DataSource):
 
         return res
 
+    def _validate_bpf_clock_domain(self, df: pl.DataFrame) -> None:
+        """One-time check: compare converted BPF timestamp against wall clock."""
+        if self._clock_validated or df.is_empty():
+            return
+        res = _validate_bpf_clock_domain(df, col_name="time_ns")
+        self._clock_validated = True if res else False
+
     def _build_cache(self) -> None:
         """Build cache from eBPF ring buffer data."""
         raw_df = self._get_raw_events()
 
         if raw_df.is_empty():
             return
+
+        self._validate_bpf_clock_domain(raw_df)
 
         # Filter valid start times and add logical entity IDs
         valid_df = raw_df.filter(pl.col("pid_start") > 0)

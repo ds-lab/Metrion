@@ -40,6 +40,7 @@ from metrion.monitoring.data_source.cpu.utils import (
     resolve_with_strace,
 )
 from metrion.monitoring.data_source.data_source_base import DataSource
+from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
 from metrion.monitoring.timing_context import TimingContext, TimingContextRegistry
 from metrion.util import check_entity_type, read_temp_ipc, split_large_df
 
@@ -179,7 +180,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         base_dir = Path(__file__).resolve().parent
         helpers_dir = base_dir.parent / "helpers"
         # Use v2 BPF program with inline metadata for zero-loss entity matching
-        c_file_path = base_dir / "sched_switch_v2.c"
+        c_file_path = base_dir / "sched_switch.c"
 
         bpf = BPF(
             src_file=str(c_file_path),
@@ -699,6 +700,7 @@ class SchedSwitchMonitor(DataSource):
             # debug counters
             self._total_work_data = 0
             self._raw_events_received = 0
+            self._clock_validated = False
 
     def _core_entities_to_df(self) -> tuple[pl.DataFrame, list[Any]]:
         ids_cpu_cores = []
@@ -1159,10 +1161,20 @@ class SchedSwitchMonitor(DataSource):
             pid_work_measurements_df,
         )
 
+    def _validate_bpf_clock_domain(self, df: pl.DataFrame) -> None:
+        """One-time check: compare converted BPF timestamp against wall clock."""
+        if self._clock_validated or df.is_empty():
+            return
+
+        res = _validate_bpf_clock_domain(df, col_name="time_end")
+
+        self._clock_validated = True if res else False
+
     def _calculate_and_cache_metrics(self, raw_data_df: pl.DataFrame) -> None:
         if raw_data_df.is_empty():
             return
 
+        self._validate_bpf_clock_domain(raw_data_df)
         self._raw_events_received += raw_data_df.height
 
         raw_data_inline_metadata_df = raw_data_df.select(
