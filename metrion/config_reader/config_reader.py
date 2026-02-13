@@ -6,7 +6,7 @@ convert them into validated AgentConfig objects using Pydantic.
 """
 
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from loguru import logger
@@ -99,7 +99,7 @@ class ConfigReader:
         """
         # Add timestamp to database path in debug mode
         original_path = Path(config.general.database.path)
-        timestamp = datetime.now().strftime("_%Y_%m_%d_%H_%M_%S")
+        timestamp = datetime.now(UTC).strftime("_%Y_%m_%d_%H_%M_%S")
         new_path = original_path.with_stem(original_path.stem + timestamp)
 
         # Create a new config with the modified path

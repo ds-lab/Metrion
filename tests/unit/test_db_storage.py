@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 import polars as pl
 import pytest
@@ -228,7 +228,7 @@ def test_metadata_persisted_for_endpoint(storage):
 
 
 def test_logical_entity_upsert_enriches_metadata(storage):
-    now = datetime.now()
+    now = datetime.now(UTC)
     base_entity = LogicalEntity(
         native_thread_id=101,
         native_pid=101,
@@ -290,7 +290,7 @@ def test_measurement_df_without_id_persisted(storage):
     pytest.importorskip(driver_module)
 
     host = Host("df-host", HostType.SERVER, "Linux")
-    now = datetime.now()
+    now = datetime.now(UTC)
     measurement_df = pl.DataFrame(
         {
             "value": [2.5],
@@ -328,7 +328,7 @@ def test_measurement_df_with_id_persisted(storage):
     pytest.importorskip(driver_module)
 
     host = Host("df-host", HostType.SERVER, "Linux")
-    now = datetime.now()
+    now = datetime.now(UTC)
     measurement = Measurement(
         value=1.45,
         metric_id=CPU_CORE_PID_TIME.name,

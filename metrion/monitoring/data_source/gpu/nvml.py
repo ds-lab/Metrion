@@ -161,7 +161,7 @@ class NVMLDataSource(DataSource):
             try:
                 handle = self._handles[gpu.uuid]
                 memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                now = datetime.now()
+                now = datetime.now(UTC)
 
                 measurements.append(
                     Measurement(
@@ -210,7 +210,7 @@ class NVMLDataSource(DataSource):
                         metric_id=GPU_DEVICE_TOTAL_ENERGY.name,
                         physical_entity_id=gpu.id,
                         logical_entity_id=None,
-                        start_ts=datetime.now(),
+                        start_ts=datetime.now(UTC),
                     )
                 )
             except (pynvml.NVMLError, KeyError):
@@ -263,7 +263,7 @@ class NVMLDataSource(DataSource):
                         metric_id=metric_id,
                         physical_entity_id=gpu.id,
                         logical_entity_id=None,
-                        start_ts=datetime.now(),
+                        start_ts=datetime.now(UTC),
                     )
                 )
             except (pynvml.NVMLError, KeyError):
@@ -279,7 +279,7 @@ class NVMLDataSource(DataSource):
             try:
                 handle = self._handles[gpu.uuid]
                 device_utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                now = datetime.now()
+                now = datetime.now(UTC)
 
                 measurements.append(
                     Measurement(
@@ -318,7 +318,7 @@ class NVMLDataSource(DataSource):
                         metric_id=GPU_DEVICE_TOTAL_TEMPERATURE.name,
                         physical_entity_id=gpu.id,
                         logical_entity_id=None,
-                        start_ts=datetime.now(),
+                        start_ts=datetime.now(UTC),
                     )
                 )
             except (pynvml.NVMLError, KeyError):
@@ -352,7 +352,7 @@ class NVMLDataSource(DataSource):
                                 metric_id=GPU_DEVICE_PID_MEMORY.name,
                                 physical_entity_id=gpu.id,
                                 logical_entity_id=logical_entity.id,
-                                start_ts=datetime.now(),
+                                start_ts=datetime.now(UTC),
                             )
                         )
                         entities.append(logical_entity)
@@ -370,7 +370,7 @@ class NVMLDataSource(DataSource):
         """
         measurements = []
         entities = []
-        now = datetime.now()
+        now = datetime.now(UTC)
         for gpu in self.gpu_entities:
             try:
                 handle = self._handles[gpu.uuid]

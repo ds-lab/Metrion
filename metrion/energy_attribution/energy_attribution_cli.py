@@ -7,6 +7,7 @@ if "MPLCONFIGDIR" not in os.environ:
 
 import datetime
 import json
+from datetime import UTC
 from pathlib import Path
 from typing import Literal
 
@@ -480,7 +481,7 @@ def generate_html_report(
     if output_path is None:
         output_dir = Path(__file__).parent / "output"
         output_dir.mkdir(exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        timestamp = datetime.datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
         output_path = str(output_dir / f"energy_analysis_report_{timestamp}.html")
 
     html_content = f"""
@@ -599,7 +600,7 @@ def generate_html_report(
                     to {end_time.strftime("%Y-%m-%d %H:%M:%S.%f")}</li>
                 <li><strong>Duration:</strong> {end_time - start_time}</li>
                 <li><strong>Process Filter:</strong> "{filter_cmdline}"</li>
-                <li><strong>Generated:</strong> {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")}</li>
+                <li><strong>Generated:</strong> {datetime.datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")}</li>
             </ul>
         </div>
     """
@@ -1496,7 +1497,7 @@ def export_summary_to_file(
     - summary_TIMESTAMP.csv: Per-process breakdown
     - stats_TIMESTAMP.json: Device totals and statistics
     """
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     # Export CSV
     csv_path = output_dir / f"energy_summary_{timestamp}.csv"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from datetime import UTC
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -81,7 +82,7 @@ class MeasurementBuffer:
         to_spill = sorted_df.head(half)
         self._memory_df = sorted_df.tail(self._memory_df.height - half)
 
-        spill_path = self._spill_dir / f"spill_{dt.datetime.now().timestamp()}.parquet"
+        spill_path = self._spill_dir / f"spill_{dt.datetime.now(UTC).timestamp()}.parquet"
         to_spill.write_parquet(spill_path)
         self._spill_files.append(spill_path)
         logger.debug(f"Spilled {half} measurement rows to {spill_path}")
@@ -1330,7 +1331,7 @@ class DyncamicEnergyAttributionModel:
         self._dram_df = pl.DataFrame()
         self._gpu_df = pl.DataFrame()
 
-        self._last_cutoff_check = dt.datetime.now()
+        self._last_cutoff_check = dt.datetime.now(UTC)
         # Cross-batch continuity: cache last energy sample per (metric, entity)
         self._last_energy_samples: dict[tuple[str, str], tuple[dt.datetime, float]] = {}
 
@@ -1412,7 +1413,7 @@ class DyncamicEnergyAttributionModel:
         tuple[pl.DataFrame, dict[str, datetime | None]]
             (measurements, bounds_dict) where bounds_dict maps metric to bound.
         """
-        now = dt.datetime.now()
+        now = dt.datetime.now(UTC)
         measurements_df = self._buffer.get_all()
         empty_bounds = {self._CPU_METRIC: None, self._DRAM_METRIC: None, self._GPU_METRIC: None}
 
