@@ -258,7 +258,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         missing_events = self._get_drop_count()
         if missing_events > self._missing_events:
             delta = missing_events - self._missing_events
-            logger.warning(f"[{self.name}] Missed events: {delta} (Total missing events {missing_events})")
+            logger.debug(f"[{self.name}] Missed events: {delta} (Total missing events {missing_events})")
             self._missing_events = missing_events
 
     # -----------------------------
@@ -271,8 +271,8 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         try:
             self._flush_to_queue()
             self._ipc_writer.close()
-            logger.warning(f"[{self.name}] Total missed events: {self._missing_events}")
-            logger.warning(f"[{self.name}] Total processed events: {self._total_events}")
+            logger.debug(f"[{self.name}] Total missed events: {self._missing_events}")
+            logger.debug(f"[{self.name}] Total processed events: {self._total_events}")
         except Exception:
             # best-effort shutdown
             pass

@@ -21,10 +21,10 @@ energy_model:
       power: auto
       # Or specify per-subcomponent power:
       # power:
-      #   - id: package-0
+      #   - id: 0
       #     idle_power: 1.5  # in watts or "auto"
       #     max_power: 95.0  # in watts or "auto"
-      #   - id: package-1
+      #   - id: 1
       #     idle_power: auto
       #     max_power: auto
       # Metrics to collect: "*" for all metrics, or list of specific metric names
@@ -54,7 +54,7 @@ energy_model:
       power: auto
       # Or specify per-subcomponent power:
       # power:
-      #   - id: package-0
+      #   - id: 0
       #     idle_power: 1.0
       #     max_power: 5.0
       # Metrics to collect: "*" for all metrics, or list of specific metric names

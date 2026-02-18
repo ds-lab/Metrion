@@ -5,7 +5,7 @@ import re
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import override
 
 import polars as pl
@@ -252,7 +252,7 @@ class ProcNuma(DataSource):
 
         measurements: list[Measurement | pl.DataFrame] = []
         entities: list[Entity] = []
-        measurement_timepoint = datetime.now()
+        measurement_timepoint = datetime.now(UTC)
 
         max_workers = 2
 

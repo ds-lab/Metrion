@@ -1,6 +1,6 @@
 """Unit tests for GPU power collection in NVML data source."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -178,10 +178,10 @@ class TestGPUPowerCollection:
         mock_pynvml.nvmlDeviceGetHandleByUUID.return_value = mock_handle
         mock_pynvml.nvmlDeviceGetPowerUsage.return_value = 100000
 
-        before = datetime.now()
+        before = datetime.now(UTC)
         data_source = NVMLDataSource([gpu_ampere])
         result = data_source._read_device_power()
-        after = datetime.now()
+        after = datetime.now(UTC)
 
         assert before <= result.measurements[0].start_ts <= after
 

@@ -16,7 +16,7 @@ ENERGY_DATA_SCHEMA = pl.Schema(
         "cgroup": pl.String,
         "cgroup_id": pl.Int64,
         "total_energy_j": pl.Float32,
-        "dyn_energy_j": pl.Float32,
+        "active_energy_j": pl.Float32,
         "idle_energy_j": pl.Float32,
     }
 )
@@ -213,7 +213,7 @@ def combine_energy_data(energy_data_dbs: list[EnergyData], schema: dict[str, Any
                 row["duration_s"] = max(row.get("duration_s", 0.0), duration)
 
             row[f"{component_key}_energy_idle_j"] = df.select(pl.col("idle_energy_j").sum()).item()
-            row[f"{component_key}_energy_active_j"] = df.select(pl.col("dyn_energy_j").sum()).item()
+            row[f"{component_key}_energy_active_j"] = df.select(pl.col("active_energy_j").sum()).item()
             row[f"{component_key}_energy_total_j"] = df.select(pl.col("total_energy_j").sum()).item()
 
         result_rows.append(row)

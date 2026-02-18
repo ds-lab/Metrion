@@ -6,11 +6,11 @@ SELECT
   le.resource_group_name,
   le.resource_group_id,
   SUM(e.total_energy_j) AS total_energy_j,
-  SUM(e.dyn_energy_j) AS dyn_energy_j,
+  SUM(e.active_energy_j) AS active_energy_j,
   SUM(e.idle_energy_j) AS idle_energy_j
 FROM
   logical_entity le,
-  total_energy_per_pid_view e
+  total_energy_per_thread_view e
 WHERE
   le.id = e.logical_entity_id
   AND le.cmdline IS NOT NULL

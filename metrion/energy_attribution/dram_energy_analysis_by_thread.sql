@@ -47,7 +47,7 @@ FROM energy_interval_dram;
 --sqlite   ON energy_interval_dram_tmp (dram_id, cpu_id, interval_end, interval_start);
 
 -- 1) Final view: active via reads, idle via PID count
-CREATE VIEW IF NOT EXISTS dram_energy_per_pid_view AS
+CREATE VIEW IF NOT EXISTS dram_energy_per_thread_view AS
 WITH
 -- (A) Idle/active split per DRAM interval
 dram_interval_powers AS (
@@ -77,14 +77,14 @@ dram_interval_energy_split AS (
 ),
 
 -- (B) PIDs present on DRAM (used for IDLE equal split). Presence = has memory in the interval.
-dram_memory_usage_by_pid AS (
+dram_memory_usage_by_thread AS (
     SELECT
         dei.dram_id,
         dei.cpu_id,
         dei.interval_start,
         dei.interval_end,
         m.logical_entity_id,
-        SUM(m.value) AS total_memory_usage_by_pid
+        SUM(m.value) AS total_memory_usage_by_thread
     FROM energy_interval_dram_tmp AS dei
     JOIN measurement AS m
       ON m.physical_entity_id = dei.dram_id
@@ -96,24 +96,24 @@ dram_memory_usage_by_pid AS (
     GROUP BY
         dei.dram_id, dei.cpu_id, dei.interval_start, dei.interval_end, m.logical_entity_id
 ),
-dram_pids_present_on_dram AS (
+dram_threads_present_on_dram AS (
     SELECT DISTINCT
         dram_id, cpu_id, interval_start, interval_end, logical_entity_id
-    FROM dram_memory_usage_by_pid
-    WHERE total_memory_usage_by_pid > 0
+    FROM dram_memory_usage_by_thread
+    WHERE total_memory_usage_by_thread > 0
 ),
-active_pids_on_dram AS (
+active_threads_on_dram AS (
     SELECT
         dram_id, cpu_id, interval_start, interval_end,
-        COUNT(DISTINCT logical_entity_id) AS pid_count
-    FROM dram_pids_present_on_dram
+        COUNT(DISTINCT logical_entity_id) AS thread_count
+    FROM dram_threads_present_on_dram
     GROUP BY
         dram_id, cpu_id, interval_start, interval_end
 ),
 
 -- (C) DRAM access counts per PID from core PMU metrics (drives ACTIVE split)
 --     Local reads: cores on this CPU reading this CPU's DRAM.
-dram_local_reads_by_pid AS (
+dram_local_reads_by_thread AS (
     SELECT
         dei.dram_id,                -- target DRAM
         dei.cpu_id,
@@ -136,7 +136,7 @@ dram_local_reads_by_pid AS (
 ),
 
 --     Remote reads: cores on other CPUs -> this DRAM (accurate for 2-socket)
-dram_remote_reads_by_pid AS (
+dram_remote_reads_by_thread AS (
     SELECT
         dei.dram_id,                -- target DRAM (remote to those cores)
         dei.cpu_id,
@@ -158,11 +158,11 @@ dram_remote_reads_by_pid AS (
         dei.dram_id, dei.cpu_id, dei.interval_start, dei.interval_end, m.logical_entity_id
 ),
 dram_accesses_all AS (
-    SELECT * FROM dram_local_reads_by_pid
+    SELECT * FROM dram_local_reads_by_thread
     UNION ALL
-    SELECT * FROM dram_remote_reads_by_pid
+    SELECT * FROM dram_remote_reads_by_thread
 ),
-dram_accesses_by_pid AS (
+dram_accesses_by_thread AS (
     SELECT
         dram_id, cpu_id, interval_start, interval_end, logical_entity_id,
         SUM(accesses) AS total_accesses
@@ -173,14 +173,14 @@ dram_accesses_total_on_dram AS (
     SELECT
         dram_id, cpu_id, interval_start, interval_end,
         SUM(total_accesses) AS total_accesses_on_dram
-    FROM dram_accesses_by_pid
+    FROM dram_accesses_by_thread
     GROUP BY dram_id, cpu_id, interval_start, interval_end
 ),
-dram_access_share_by_pid AS (
+dram_access_share_by_thread AS (
     SELECT
         a.dram_id, a.cpu_id, a.interval_start, a.interval_end, a.logical_entity_id,
         (a.total_accesses * 1.0 / NULLIF(t.total_accesses_on_dram, 0)) AS access_share
-    FROM dram_accesses_by_pid a
+    FROM dram_accesses_by_thread a
     JOIN dram_accesses_total_on_dram t
       ON a.dram_id       = t.dram_id
      AND a.cpu_id        = t.cpu_id
@@ -189,31 +189,31 @@ dram_access_share_by_pid AS (
 ),
 
 -- 4) Allocate per-DRAM active energy by access share; idle energy equally by PID count
-dram_active_energy_per_pid_per_dram AS (
+dram_active_energy_per_thread_per_dram AS (
     SELECT
         s.dram_id, s.cpu_id, s.interval_start, s.interval_end, sh.logical_entity_id,
-        COALESCE(sh.access_share, 0.0) * s.active_energy_j_total AS active_energy_per_dram_per_pid_j
+        COALESCE(sh.access_share, 0.0) * s.active_energy_j_total AS active_energy_per_dram_per_thread_j
     FROM dram_interval_energy_split s
-    LEFT JOIN dram_access_share_by_pid sh
+    LEFT JOIN dram_access_share_by_thread sh
       ON s.dram_id = sh.dram_id
      AND s.cpu_id  = sh.cpu_id
      AND s.interval_start = sh.interval_start
      AND s.interval_end   = sh.interval_end
 ),
-dram_idle_energy_per_pid_per_dram AS (
+dram_idle_energy_per_thread_per_dram AS (
     SELECT
         s.dram_id, s.cpu_id, s.interval_start, s.interval_end, p.logical_entity_id,
-        CASE WHEN ap.pid_count > 0
-             THEN s.idle_energy_j_total * 1.0 / ap.pid_count
+        CASE WHEN ap.thread_count > 0
+             THEN s.idle_energy_j_total * 1.0 / ap.thread_count
              ELSE 0.0
-        END AS idle_energy_per_dram_per_pid_j
+        END AS idle_energy_per_dram_per_thread_j
     FROM dram_interval_energy_split s
-    JOIN active_pids_on_dram ap
+    JOIN active_threads_on_dram ap
       ON ap.dram_id = s.dram_id
      AND ap.cpu_id  = s.cpu_id
      AND ap.interval_start = s.interval_start
      AND ap.interval_end   = s.interval_end
-    JOIN dram_pids_present_on_dram p
+    JOIN dram_threads_present_on_dram p
       ON p.dram_id = s.dram_id
      AND p.cpu_id  = s.cpu_id
      AND p.interval_start = s.interval_start
@@ -221,15 +221,15 @@ dram_idle_energy_per_pid_per_dram AS (
 ),
 
 -- 5) Sum per-DRAM allocations to per-PID totals per interval
-dram_energy_per_pid AS (
+dram_energy_per_thread AS (
     SELECT
         COALESCE(a.logical_entity_id, i.logical_entity_id) AS logical_entity_id,
         COALESCE(a.interval_start, i.interval_start) AS interval_start,
         COALESCE(a.interval_end,   i.interval_end)   AS interval_end,
-        SUM(COALESCE(a.active_energy_per_dram_per_pid_j, 0.0)) AS active_energy_j,
-        SUM(COALESCE(i.idle_energy_per_dram_per_pid_j,   0.0)) AS idle_energy_j
-    FROM dram_active_energy_per_pid_per_dram a
-    FULL OUTER JOIN dram_idle_energy_per_pid_per_dram i
+        SUM(COALESCE(a.active_energy_per_dram_per_thread_j, 0.0)) AS active_energy_j,
+        SUM(COALESCE(i.idle_energy_per_dram_per_thread_j,   0.0)) AS idle_energy_j
+    FROM dram_active_energy_per_thread_per_dram a
+    FULL OUTER JOIN dram_idle_energy_per_thread_per_dram i
       ON a.logical_entity_id = i.logical_entity_id
      AND a.dram_id = i.dram_id
      AND a.cpu_id  = i.cpu_id
@@ -244,5 +244,5 @@ SELECT
     active_energy_j + idle_energy_j AS total_energy_j,
     active_energy_j,
     idle_energy_j
-FROM dram_energy_per_pid
+FROM dram_energy_per_thread
 ORDER BY interval_start, logical_entity_id;

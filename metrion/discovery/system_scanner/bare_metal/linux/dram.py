@@ -54,15 +54,6 @@ def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int,
 
         resolved[pkg_id] = {"idle": idle_val, "max": max_val}
 
-    if idle_auto is None:
-        idle_auto = _auto_idle_power_data()
-    if max_auto is None:
-        max_auto = _auto_max_power_data()
-
-    auto_only_ids = (set(idle_auto.keys()) | set(max_auto.keys())) - set(resolved.keys())
-    for pkg_id in auto_only_ids:
-        resolved[pkg_id] = {"idle": idle_auto.get(pkg_id, 0.0), "max": max_auto.get(pkg_id, 0.0)}
-
     return "manual", resolved
 
 
@@ -193,6 +184,11 @@ def get_info(config: dict) -> list[dict]:
             if isinstance(package_id, str) and package_id.isdigit():
                 pkg_idx = int(package_id)
                 package_power = power_data.get(pkg_idx, {"idle": 0.0, "max": 0.0})
+                if power_mode == "manual" and pkg_idx not in power_data:
+                    logger.warning(
+                        f"DRAM package {pkg_idx} discovered on hardware but not in manual power config. "
+                        "Defaulting idle_power=0.0 and max_power=0.0."
+                    )
 
             if manufacturer != "Unknown":
                 ram_modules.append(

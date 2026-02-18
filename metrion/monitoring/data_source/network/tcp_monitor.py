@@ -15,7 +15,7 @@ from typing import Any, override
 
 import polars as pl
 import psutil
-from bcc import BPF
+from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
 from metrion.data_record import DataRecord
@@ -26,6 +26,7 @@ from metrion.entity.network_interface import NetworkInterface, NetworkInterfaceR
 from metrion.metric import NETWORK_HOST_PID_TOTAL_BYTES_RECEIVED, NETWORK_HOST_PID_TOTAL_BYTES_SENT, Metric
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.data_source_base import DataSource
+from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
 from metrion.util import check_entity_type, read_temp_ipc
 
 
@@ -91,7 +92,7 @@ class TCPMonitorBpfProcess(EbpfRingBufferProcess):
         """Load and compile the eBPF v2 program with inline metadata support."""
         base_dir = Path(__file__).resolve().parent
         # Use v2 BPF program with inline metadata for zero-loss entity matching
-        c_file_path = base_dir / "tcp_monitor_v2.c"
+        c_file_path = base_dir / "tcp_monitor.c"
 
         bpf = BPF(src_file=str(c_file_path))
 
@@ -205,7 +206,7 @@ class TCPDataSource(DataSource):
         # Caches for measurements and entities
         self._cache_received: list[pl.DataFrame] = []
         self._cache_send: list[pl.DataFrame] = []
-        self._cache_entites: list[Entity] = []
+        self._cache_entities: list[Entity] = []
         self._cache_communication_endpoints: list[CommunicationEndpoint] = []
 
         # Ring buffer config
@@ -221,6 +222,8 @@ class TCPDataSource(DataSource):
         # Start the eBPF ring buffer process
         self._bpf_process = TCPMonitorBpfProcess.start_singleton(self._ring_config, daemon=True)
 
+        self._boot_time_s = psutil.boot_time()
+        self._clock_validated = False
         self._initialized = True
 
     def _get_raw_events(self) -> pl.DataFrame:
@@ -251,14 +254,10 @@ class TCPDataSource(DataSource):
         2. REGISTRY LOOKUP: Check the LogicalEntityRegistry for known entities.
         """
         # Step 1: Register entities from inline metadata (zero-loss path)
-        inline_created = self._logical_entity_registry._register_entities_from_inline_metadata(df)
-        if inline_created > 0:
-            logger.debug(f"TCP: Created {inline_created} entities from inline BPF metadata")
+        self._logical_entity_registry._register_entities_from_inline_metadata(df)
 
         # Step 1b: Update existing entities with better metadata (enrichment path)
-        updated_count = self._logical_entity_registry.update_entity_metadata_from_df(df)
-        if updated_count > 0:
-            logger.debug(f"TCP: Enriched {updated_count} entities with metadata")
+        self._logical_entity_registry.update_entity_metadata_from_df(df)
 
         # Step 2: Update registry (may have entities from sched_switch or task_newtask)
         self._logical_entity_registry.update()
@@ -277,7 +276,7 @@ class TCPDataSource(DataSource):
                 entity_id_list.append(entity.id)
                 pid_list.append(pid)
                 start_time_list.append(start_time_ns)
-                self._cache_entites.append(entity)
+                self._cache_entities.append(entity)
             else:
                 unmatched.append((pid, start_time_ns))
 
@@ -296,12 +295,6 @@ class TCPDataSource(DataSource):
         )
 
         result = df.join(entity_df, on=["pid", "pid_start"], how="left")
-
-        # Log match statistics
-        total = len(pids_start_times)
-        matched = len(entity_id_list)
-        match_rate = 100.0 * matched / total if total > 0 else 100.0
-        logger.info(f"TCP entity match: {matched}/{total} ({match_rate:.2f}%), inline created: {inline_created}")
 
         return result
 
@@ -369,12 +362,21 @@ class TCPDataSource(DataSource):
 
         return res
 
+    def _validate_bpf_clock_domain(self, df: pl.DataFrame) -> None:
+        """One-time check: compare converted BPF timestamp against wall clock."""
+        if self._clock_validated or df.is_empty():
+            return
+        res = _validate_bpf_clock_domain(df, col_name="time_ns")
+        self._clock_validated = True if res else False
+
     def _build_cache(self) -> None:
         """Build cache from eBPF ring buffer data."""
         raw_df = self._get_raw_events()
 
         if raw_df.is_empty():
             return
+
+        self._validate_bpf_clock_domain(raw_df)
 
         # Filter valid start times and add logical entity IDs
         valid_df = raw_df.filter(pl.col("pid_start") > 0)
@@ -420,12 +422,12 @@ class TCPDataSource(DataSource):
             elif metric.id == NETWORK_HOST_PID_TOTAL_BYTES_SENT.id:
                 measurements.extend(self._cache_send)
 
-        entities = self._cache_entites + self._cache_communication_endpoints
+        entities = self._cache_entities + self._cache_communication_endpoints
 
         # Clear caches
         self._cache_received = []
         self._cache_send = []
-        self._cache_entites = []
+        self._cache_entities = []
         self._cache_communication_endpoints = []
 
         return DataRecord(

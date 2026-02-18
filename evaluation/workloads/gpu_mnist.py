@@ -1,11 +1,27 @@
 import argparse
+import os
 
+import psutil
 import torch
 import torch.nn as nn
 import torch.nn.functional as F  # noqa: N812
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 from torchvision import datasets, transforms
+
+# Global set to track all observed PIDs
+all_pids: set[int] = set()
+
+
+def collect_child_pids():
+    """Collect current process PID and all child process PIDs."""
+    try:
+        current_process = psutil.Process(os.getpid())
+        all_pids.add(current_process.pid)
+        for child in current_process.children(recursive=True):
+            all_pids.add(child.pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
 
 
 class Net(nn.Module):
@@ -37,6 +53,8 @@ class Net(nn.Module):
 def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
+        # Collect child PIDs (captures DataLoader worker processes)
+        collect_child_pids()
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
@@ -134,6 +152,19 @@ def main():
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
+
+    # Final collection and print all observed PIDs
+    collect_child_pids()
+    print(f"\n{'=' * 50}")
+    print("All PIDs used during execution:")
+    print(f"  Main process PID: {os.getpid()}")
+    child_pids = sorted(all_pids - {os.getpid()})
+    if child_pids:
+        print(f"  Child process PIDs: {child_pids}")
+    else:
+        print("  No child processes spawned")
+    print(f"  All PIDs: {sorted(all_pids)}")
+    print(f"{'=' * 50}")
 
 
 if __name__ == "__main__":

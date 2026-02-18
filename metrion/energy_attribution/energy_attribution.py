@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from datetime import UTC
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -81,7 +82,7 @@ class MeasurementBuffer:
         to_spill = sorted_df.head(half)
         self._memory_df = sorted_df.tail(self._memory_df.height - half)
 
-        spill_path = self._spill_dir / f"spill_{dt.datetime.now().timestamp()}.parquet"
+        spill_path = self._spill_dir / f"spill_{dt.datetime.now(UTC).timestamp()}.parquet"
         to_spill.write_parquet(spill_path)
         self._spill_files.append(spill_path)
         logger.debug(f"Spilled {half} measurement rows to {spill_path}")
@@ -400,34 +401,34 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
             )
         )
 
-        work_per_pid = work_measurements.group_by(
+        work_per_thread = work_measurements.group_by(
             ["interval_start", "interval_end", "logical_entity_id", "package_id"]
         ).agg(pl.col("work_value").sum().alias("work"))
 
-        work_per_socket = work_per_pid.group_by(["interval_start", "interval_end", "package_id"]).agg(
+        work_per_socket = work_per_thread.group_by(["interval_start", "interval_end", "package_id"]).agg(
             pl.col("work").sum().alias("socket_work")
         )
 
-        time_per_pid = (
+        time_per_thread = (
             time_measurements.with_columns((pl.col("exec_time_ms") / 1000.0).alias("exec_time_s"))
             .group_by(["interval_start", "interval_end", "logical_entity_id", "package_id"])
             .agg(pl.col("exec_time_s").sum())
         )
 
-        time_per_socket = time_per_pid.group_by(["interval_start", "interval_end", "package_id"]).agg(
+        time_per_socket = time_per_thread.group_by(["interval_start", "interval_end", "package_id"]).agg(
             pl.col("exec_time_s").sum().alias("socket_time_s")
         )
 
         cpu_idle = cpu_df.select([pl.col("id").alias("package_id"), "idle_power_package"])
 
         activity = (
-            work_per_pid.join(
+            work_per_thread.join(
                 energy_intervals,
                 on=["package_id", "interval_start", "interval_end"],
                 how="inner",
             )
             .join(
-                time_per_pid,
+                time_per_thread,
                 on=["package_id", "interval_start", "interval_end", "logical_entity_id"],
             )
             .join(cpu_idle, on="package_id")
@@ -463,7 +464,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                     .otherwise(
                         (pl.col("work") / pl.col("socket_work")) * (pl.col("energy_j") - pl.col("idle_energy_j"))
                     )
-                    .alias("dyn_energy_j"),
+                    .alias("active_energy_j"),
                     pl.when(pl.col("socket_time_s") <= 0)
                     .then(0.0)
                     .otherwise((pl.col("exec_time_s") / pl.col("socket_time_s")) * pl.col("idle_energy_j"))
@@ -476,11 +477,11 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
             attribution.group_by(["interval_start", "interval_end", "logical_entity_id", "package_id"])
             .agg(
                 [
-                    pl.col("dyn_energy_j").sum(),
+                    pl.col("active_energy_j").sum(),
                     pl.col("idle_energy_share_j").sum().alias("idle_energy_j"),
                 ]
             )
-            .with_columns((pl.col("dyn_energy_j") + pl.col("idle_energy_j")).alias("total_energy_j"))
+            .with_columns((pl.col("active_energy_j") + pl.col("idle_energy_j")).alias("total_energy_j"))
             .select(
                 [
                     "interval_start",
@@ -488,7 +489,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                     "logical_entity_id",
                     "package_id",
                     "total_energy_j",
-                    "dyn_energy_j",
+                    "active_energy_j",
                     "idle_energy_j",
                 ]
             )
@@ -517,7 +518,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
             pl.lit(CPU_PKG_PID_DYNAMIC_ENERGY.name).alias("metric_id"),
             pl.col("package_id").alias("physical_entity_id"),
             pl.col("logical_entity_id"),
-            pl.col("dyn_energy_j").alias("value"),
+            pl.col("active_energy_j").alias("value"),
             pl.col("interval_start").alias("start_ts"),
             pl.col("interval_end").alias("end_ts"),
         )
@@ -670,11 +671,11 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.max_horizontal(
                     pl.lit(0.0),
                     pl.col("energy_j") - (pl.col("idle_power") * pl.col("interval_duration_s")),
-                ).alias("dyn_energy_j"),
+                ).alias("active_energy_j"),
             ]
         )
 
-        dram_memory_usage_by_pid = (
+        dram_memory_usage_by_thread = (
             energy_intervals.join_where(
                 measurement_lf.filter(
                     (pl.col("metric_id") == "DRAM_SOCKET_PID_MEMORY") & pl.col("value").is_not_null()
@@ -683,7 +684,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 (pl.col("start_ts") >= pl.col("interval_start")) & (pl.col("end_ts") <= pl.col("interval_end")),
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
-            .agg(pl.col("value").sum().alias("total_memory_usage_by_pid"))
+            .agg(pl.col("value").sum().alias("total_memory_usage_by_thread"))
             .select(
                 [
                     "dram_id",
@@ -691,13 +692,13 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                     "interval_start",
                     "interval_end",
                     "logical_entity_id",
-                    "total_memory_usage_by_pid",
+                    "total_memory_usage_by_thread",
                 ]
             )
         )
 
         dram_pids_present_on_dram = (
-            dram_memory_usage_by_pid.filter(pl.col("total_memory_usage_by_pid") > 0)
+            dram_memory_usage_by_thread.filter(pl.col("total_memory_usage_by_thread") > 0)
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
             .unique()
         )
@@ -727,7 +728,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
 
         measurement_core_remote = measurement_core.rename({"parent_id": "source_cpu_id"})
 
-        dram_local_reads_by_pid = (
+        dram_local_reads_by_thread = (
             energy_intervals.join_where(
                 measurement_core.filter(
                     (pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM") & pl.col("value").is_not_null()
@@ -740,7 +741,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id", "reads"])
         )
 
-        dram_remote_reads_by_pid = (
+        dram_remote_reads_by_thread = (
             energy_intervals.join_where(
                 measurement_core_remote.filter(pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"),
                 pl.col("source_cpu_id") != pl.col("cpu_id"),
@@ -751,22 +752,22 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id", "reads"])
         )
 
-        dram_all_reads = pl.concat([dram_local_reads_by_pid, dram_remote_reads_by_pid])
+        dram_all_reads = pl.concat([dram_local_reads_by_thread, dram_remote_reads_by_thread])
 
-        dram_reads_by_pid = (
+        dram_reads_by_thread = (
             dram_all_reads.group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"]).agg(
                 pl.col("reads").sum().alias("pid_total_reads")
             )
         ).select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id", "pid_total_reads"])
 
         dram_reads_total_on_dram = (
-            dram_reads_by_pid.group_by(["dram_id", "cpu_id", "interval_start", "interval_end"])
+            dram_reads_by_thread.group_by(["dram_id", "cpu_id", "interval_start", "interval_end"])
             .agg(pl.col("pid_total_reads").sum().alias("total_reads_on_dram"))
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "total_reads_on_dram"])
         )
 
-        dram_read_share_by_pid = (
-            dram_reads_by_pid.join(
+        dram_read_share_by_thread = (
+            dram_reads_by_thread.join(
                 dram_reads_total_on_dram,
                 on=["dram_id", "cpu_id", "interval_start", "interval_end"],
             )
@@ -788,15 +789,15 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 ]
             )
         )
-        dram_active_energy_per_pid_per_dram = (
+        dram_active_energy_per_thread_per_dram = (
             dram_interval_energy_split.join(
-                dram_read_share_by_pid,
+                dram_read_share_by_thread,
                 on=["dram_id", "cpu_id", "interval_start", "interval_end"],
                 how="left",
             )
             .with_columns(
                 [
-                    (pl.col("pid_read_share").fill_null(0.0) * pl.col("dyn_energy_j")).alias("dyn_energy_j"),
+                    (pl.col("pid_read_share").fill_null(0.0) * pl.col("active_energy_j")).alias("active_energy_j"),
                 ]
             )
             .select(
@@ -804,14 +805,14 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                     pl.lit(DRAM_SOCKET_PID_DYNAMIC_ENERGY.name).alias("metric_id"),
                     pl.col("dram_id").alias("physical_entity_id"),
                     "logical_entity_id",
-                    pl.col("dyn_energy_j").alias("value"),
+                    pl.col("active_energy_j").alias("value"),
                     pl.col("interval_start").alias("start_ts"),
                     pl.col("interval_end").alias("end_ts"),
                 ]
             )
         )
 
-        dram_idle_energy_per_pid_per_dram = (
+        dram_idle_energy_per_thread_per_dram = (
             dram_interval_energy_split.join(
                 active_pids_on_dram, on=["dram_id", "cpu_id", "interval_start", "interval_end"]
             )
@@ -829,7 +830,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             )
         )
 
-        total_from_active = dram_active_energy_per_pid_per_dram.select(
+        total_from_active = dram_active_energy_per_thread_per_dram.select(
             [
                 "logical_entity_id",
                 "physical_entity_id",
@@ -839,7 +840,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             ]
         )
 
-        total_from_idle = dram_idle_energy_per_pid_per_dram.select(
+        total_from_idle = dram_idle_energy_per_thread_per_dram.select(
             [
                 "logical_entity_id",
                 "physical_entity_id",
@@ -849,7 +850,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             ]
         )
 
-        total_dram_energy_per_pid_per_dram = (
+        total_dram_energy_per_thread_per_dram = (
             total_from_active.join(
                 total_from_idle,
                 on=["logical_entity_id", "physical_entity_id", "start_ts", "end_ts"],
@@ -884,9 +885,9 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
         )
 
         return (
-            total_dram_energy_per_pid_per_dram.collect(),
-            dram_idle_energy_per_pid_per_dram.collect(),
-            dram_active_energy_per_pid_per_dram.collect(),
+            total_dram_energy_per_thread_per_dram.collect(),
+            dram_idle_energy_per_thread_per_dram.collect(),
+            dram_active_energy_per_thread_per_dram.collect(),
         )
 
 
@@ -1120,7 +1121,7 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
             return self._empty_result()
 
         # Aggregate utilization per process per interval with sample count
-        util_per_pid = process_utilization.group_by(
+        util_per_thread = process_utilization.group_by(
             ["gpu_id", "interval_start", "interval_end", "logical_entity_id"]
         ).agg(
             pl.col("sm_util").mean().alias("avg_sm_util"),
@@ -1128,14 +1129,14 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
         )
 
         # Total utilization and sample counts per interval
-        util_per_interval = util_per_pid.group_by(["gpu_id", "interval_start", "interval_end"]).agg(
+        util_per_interval = util_per_thread.group_by(["gpu_id", "interval_start", "interval_end"]).agg(
             pl.col("avg_sm_util").sum().alias("total_sm_util"),
             pl.col("sample_count").sum().alias("total_samples"),
         )
 
         # Join and calculate attribution
         attribution = (
-            util_per_pid.join(
+            util_per_thread.join(
                 energy_intervals,
                 on=["gpu_id", "interval_start", "interval_end"],
                 how="inner",
@@ -1330,7 +1331,7 @@ class DyncamicEnergyAttributionModel:
         self._dram_df = pl.DataFrame()
         self._gpu_df = pl.DataFrame()
 
-        self._last_cutoff_check = dt.datetime.now()
+        self._last_cutoff_check = dt.datetime.now(UTC)
         # Cross-batch continuity: cache last energy sample per (metric, entity)
         self._last_energy_samples: dict[tuple[str, str], tuple[dt.datetime, float]] = {}
 
@@ -1412,7 +1413,7 @@ class DyncamicEnergyAttributionModel:
         tuple[pl.DataFrame, dict[str, datetime | None]]
             (measurements, bounds_dict) where bounds_dict maps metric to bound.
         """
-        now = dt.datetime.now()
+        now = dt.datetime.now(UTC)
         measurements_df = self._buffer.get_all()
         empty_bounds = {self._CPU_METRIC: None, self._DRAM_METRIC: None, self._GPU_METRIC: None}
 

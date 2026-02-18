@@ -39,7 +39,7 @@ class Measurement:
         start_ts: datetime | None = None,
         end_ts: datetime | None = None,
     ):
-        now = datetime.now()
+        now = datetime.now(UTC)
 
         self._value = value
         self._metric_id = metric_id

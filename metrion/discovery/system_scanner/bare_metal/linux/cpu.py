@@ -200,7 +200,16 @@ def _resolve_power_data(
 
     resolved: dict[int, dict[str, float]] = {}
     for pkg_id in cpus_by_socket.keys():
-        manual = manual_entries.get(pkg_id) or {}
+        manual = manual_entries.get(pkg_id)
+
+        if manual is None:
+            # Socket exists on hardware but not in manual config — default to 0.0
+            logger.warning(
+                f"CPU package {pkg_id} discovered on hardware but not in manual power config. "
+                "Defaulting idle_power=0.0 and max_power=0.0."
+            )
+            resolved[pkg_id] = {"idle": 0.0, "max": 0.0}
+            continue
 
         idle_val = manual.get("idle", "auto")
         if idle_val == "auto" or idle_val is None:

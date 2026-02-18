@@ -703,7 +703,6 @@ class LogicalEntityRegistry:
 
         # no match found
         self._no_match_count += 1
-        # logger.debug(f"No entity for pid {pid} (start_ns={start_ns}) - PID not in registry and not alive")
         return None
 
     def get_all_entities_df(self) -> pl.DataFrame:
@@ -914,9 +913,6 @@ class LogicalEntityRegistry:
                             self._updated_entity_keys.add(cand_key)
                             updated_count += 1
                             break
-
-        if updated_count > 0:
-            logger.debug(f"Updated metadata for {updated_count} entities from monitoring data")
 
         return updated_count
 

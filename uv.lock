@@ -561,15 +561,6 @@ wheels = [
 ]
 
 [[package]]
-name = "kafka-python"
-version = "2.2.15"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/67/1434436f3cb409443f72a4843b877ac2d9bf586a31a0e966cf1dc4dc9a94/kafka_python-2.2.15.tar.gz", hash = "sha256:e0f480a45f3814cb0eb705b8b4f61069e1be61dae0d8c69d0f1f2da33eea1bd5", size = 347870, upload-time = "2025-07-01T17:37:53.686Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/35/e8bfed5425e8fe685bd03ec3f5135ee8b88c11558baa59c0d12fbd2a20ae/kafka_python-2.2.15-py2.py3-none-any.whl", hash = "sha256:84c0993cd4f7f2f01e92d8104ea9bdf631aff72fc5e6ea62eb3bdf1d56528fc3", size = 309751, upload-time = "2025-07-01T17:37:51.87Z" },
-]
-
-[[package]]
 name = "kaleido"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -804,50 +795,43 @@ dependencies = [
     { name = "duckdb" },
     { name = "duckdb-engine" },
     { name = "ipykernel" },
-    { name = "kafka-python" },
     { name = "kaleido" },
     { name = "loguru" },
     { name = "matplotlib" },
-    { name = "memray" },
     { name = "nbformat" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "plotly" },
     { name = "polars" },
-    { name = "pre-commit" },
-    { name = "protobuf" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pynvml" },
     { name = "pyside6" },
-    { name = "pytest" },
     { name = "rich" },
     { name = "snowflake-id" },
     { name = "sqlalchemy" },
     { name = "sqlparse" },
-    { name = "torch" },
-    { name = "torchvision" },
     { name = "tqdm" },
     { name = "typing-extensions" },
-    { name = "vulture" },
 ]
 
 [package.optional-dependencies]
 dev = [
+    { name = "maturin" },
+    { name = "memray" },
+    { name = "patchelf" },
     { name = "pre-commit" },
+    { name = "pytest" },
     { name = "ruff" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "vulture" },
 ]
 docs = [
     { name = "mkdocs" },
     { name = "mkdocs-material" },
     { name = "mkdocstrings", extra = ["python"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "maturin" },
-    { name = "patchelf" },
 ]
 
 [package.metadata]
@@ -858,46 +842,39 @@ requires-dist = [
     { name = "duckdb", specifier = ">=1.4.1" },
     { name = "duckdb-engine", specifier = ">=0.17.0" },
     { name = "ipykernel", specifier = ">=6.29.5" },
-    { name = "kafka-python", specifier = ">=2.1.5" },
     { name = "kaleido", specifier = ">=1.0.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "matplotlib", specifier = ">=3.10.3" },
-    { name = "memray", specifier = ">=1.19.1" },
+    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.9.1" },
+    { name = "memray", marker = "extra == 'dev'", specifier = ">=1.19.1" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.6.1" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.6.14" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.29.1" },
     { name = "nbformat", specifier = ">=5.10.4" },
     { name = "numpy", specifier = ">=2.3.4" },
     { name = "pandas", specifier = ">=2.2.3,<3.0.0" },
+    { name = "patchelf", marker = "extra == 'dev'", specifier = ">=0.17.2.2" },
     { name = "plotly", specifier = ">=6.2.0" },
     { name = "polars", specifier = ">=1.30.0" },
-    { name = "pre-commit", specifier = ">=4.2.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.2.0" },
-    { name = "protobuf", specifier = ">=6.30.2" },
     { name = "psutil", specifier = ">=7.0.0,<8.0.0" },
     { name = "pyarrow", specifier = ">=20.0.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pynvml", specifier = ">=12.0.0,<13.0.0" },
     { name = "pyside6", specifier = ">=6.9.1" },
-    { name = "pytest", specifier = ">=8.4.1" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.3" },
     { name = "snowflake-id", specifier = ">=1.0.2" },
     { name = "sqlalchemy", specifier = ">=2.0.40,<3.0.0" },
     { name = "sqlparse", specifier = ">=0.5.3" },
-    { name = "torch", specifier = ">=2.6.0,<3.0.0" },
-    { name = "torchvision", specifier = ">=0.24.1" },
+    { name = "torch", marker = "extra == 'dev'", specifier = ">=2.6.0,<3.0.0" },
+    { name = "torchvision", marker = "extra == 'dev'", specifier = ">=0.24.1" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5.0.0" },
-    { name = "vulture", specifier = ">=2.14" },
+    { name = "vulture", marker = "extra == 'dev'", specifier = ">=2.14" },
 ]
 provides-extras = ["dev", "docs"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "maturin", specifier = ">=1.9.1" },
-    { name = "patchelf", specifier = ">=0.17.2.2" },
-]
 
 [[package]]
 name = "mkdocs"
@@ -1450,21 +1427,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a1/96/06e01a7b38dce6fe1db213e061a4602dd6032a8a97ef6c1a862537732421/prompt_toolkit-3.0.52.tar.gz", hash = "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855", size = 434198, upload-time = "2025-08-27T15:24:02.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/84/03/0d3ce49e2505ae70cf43bc5bb3033955d2fc9f932163e84dc0779cc47f48/prompt_toolkit-3.0.52-py3-none-any.whl", hash = "sha256:9aac639a3bbd33284347de5ad8d68ecc044b91a762dc39b7c21095fcd6a19955", size = 391431, upload-time = "2025-08-27T15:23:59.498Z" },
-]
-
-[[package]]
-name = "protobuf"
-version = "6.33.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/19/ff/64a6c8f420818bb873713988ca5492cba3a7946be57e027ac63495157d97/protobuf-6.33.0.tar.gz", hash = "sha256:140303d5c8d2037730c548f8c7b93b20bb1dc301be280c378b82b8894589c954", size = 443463, upload-time = "2025-10-15T20:39:52.159Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/ee/52b3fa8feb6db4a833dfea4943e175ce645144532e8a90f72571ad85df4e/protobuf-6.33.0-cp310-abi3-win32.whl", hash = "sha256:d6101ded078042a8f17959eccd9236fb7a9ca20d3b0098bbcb91533a5680d035", size = 425593, upload-time = "2025-10-15T20:39:40.29Z" },
-    { url = "https://files.pythonhosted.org/packages/7b/c6/7a465f1825872c55e0341ff4a80198743f73b69ce5d43ab18043699d1d81/protobuf-6.33.0-cp310-abi3-win_amd64.whl", hash = "sha256:9a031d10f703f03768f2743a1c403af050b6ae1f3480e9c140f39c45f81b13ee", size = 436882, upload-time = "2025-10-15T20:39:42.841Z" },
-    { url = "https://files.pythonhosted.org/packages/e1/a9/b6eee662a6951b9c3640e8e452ab3e09f117d99fc10baa32d1581a0d4099/protobuf-6.33.0-cp39-abi3-macosx_10_9_universal2.whl", hash = "sha256:905b07a65f1a4b72412314082c7dbfae91a9e8b68a0cc1577515f8df58ecf455", size = 427521, upload-time = "2025-10-15T20:39:43.803Z" },
-    { url = "https://files.pythonhosted.org/packages/10/35/16d31e0f92c6d2f0e77c2a3ba93185130ea13053dd16200a57434c882f2b/protobuf-6.33.0-cp39-abi3-manylinux2014_aarch64.whl", hash = "sha256:e0697ece353e6239b90ee43a9231318302ad8353c70e6e45499fa52396debf90", size = 324445, upload-time = "2025-10-15T20:39:44.932Z" },
-    { url = "https://files.pythonhosted.org/packages/e6/eb/2a981a13e35cda8b75b5585aaffae2eb904f8f351bdd3870769692acbd8a/protobuf-6.33.0-cp39-abi3-manylinux2014_s390x.whl", hash = "sha256:e0a1715e4f27355afd9570f3ea369735afc853a6c3951a6afe1f80d8569ad298", size = 339159, upload-time = "2025-10-15T20:39:46.186Z" },
-    { url = "https://files.pythonhosted.org/packages/21/51/0b1cbad62074439b867b4e04cc09b93f6699d78fd191bed2bbb44562e077/protobuf-6.33.0-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:35be49fd3f4fefa4e6e2aacc35e8b837d6703c37a2168a55ac21e9b1bc7559ef", size = 323172, upload-time = "2025-10-15T20:39:47.465Z" },
-    { url = "https://files.pythonhosted.org/packages/07/d1/0a28c21707807c6aacd5dc9c3704b2aa1effbf37adebd8caeaf68b17a636/protobuf-6.33.0-py3-none-any.whl", hash = "sha256:25c9e1963c6734448ea2d308cfa610e692b801304ba0908d7bfa564ac5132995", size = 170477, upload-time = "2025-10-15T20:39:51.311Z" },
 ]
 
 [[package]]

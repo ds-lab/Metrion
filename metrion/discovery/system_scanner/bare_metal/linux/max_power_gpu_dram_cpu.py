@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
 
@@ -45,7 +45,7 @@ class RaplPackageCaps:
 
 def now_iso() -> str:
     """Return current timestamp in ISO format (seconds precision)."""
-    return datetime.now().isoformat(
+    return datetime.now(UTC).isoformat(
         timespec="seconds",
     )
 

@@ -47,7 +47,7 @@ def pkg_expected_frames() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
 
     expected_active_df = expected_df.select(
         pl.col("logical_entity_id"),
-        pl.col("dyn_energy_j").alias("value"),
+        pl.col("active_energy_j").alias("value"),
         pl.lit(CPU_PKG_PID_DYNAMIC_ENERGY.name).alias("metric_id"),
         pl.col("package_id").alias("physical_entity_id"),
         pl.col("interval_start").alias("start_ts"),
@@ -56,7 +56,7 @@ def pkg_expected_frames() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
 
     expected_total_df = expected_df.select(
         pl.col("logical_entity_id"),
-        (pl.col("idle_energy_j") + pl.col("dyn_energy_j")).alias("value"),
+        (pl.col("idle_energy_j") + pl.col("active_energy_j")).alias("value"),
         pl.lit(CPU_PKG_PID_TOTAL_ENERGY.name).alias("metric_id"),
         pl.col("package_id").alias("physical_entity_id"),
         pl.col("interval_start").alias("start_ts"),
