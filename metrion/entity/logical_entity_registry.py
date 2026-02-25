@@ -28,7 +28,6 @@ class LogicalEntityRegistryBpfProcess(EbpfRingBufferProcess):
     def _create_bpf(self):
         base_dir = Path(__file__).resolve().parent
         helpers_dir = base_dir.parent / "monitoring" / "data_source" / "helpers"
-        logger.warning(f"Using helpers dir: {helpers_dir}")
         c_file_path = base_dir / "logical_entity_registry.c"
 
         bpf = BPF(
