@@ -59,7 +59,7 @@ class HardwareTreeBuilder:
             logger.debug(f"Module not found: {module_path}: {e}")
             return "Not available"
         except Exception as e:
-            logger.debug(f"Error loading {module_path}: {e}")
+            logger.opt(exception=True).warning(f"Error loading {module_path}: {e}")
             return "Error"
 
     def build_tree(self, components=None):

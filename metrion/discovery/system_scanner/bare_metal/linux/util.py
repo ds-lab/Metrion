@@ -78,6 +78,24 @@ def run_rapl_idle_measurement(dwell_time=60, extra_units=None):
             "or is running inside a container without systemd access."
         )
 
+    if not script_path.exists():
+        raise FileNotFoundError(f"freeze-idle-rapl.sh not found at expected path: {script_path}")
+
+    # Probe D-Bus / systemd availability before launching the long-running command
+    try:
+        probe = subprocess.run(
+            ["sudo", "systemctl", "is-system-running"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        logger.debug(f"systemd state: '{probe.stdout.strip()}' (rc={probe.returncode})")
+    except Exception as probe_exc:
+        logger.warning(
+            f"systemd health probe failed — D-Bus may be unavailable: {probe_exc} "
+            f"(errno={getattr(probe_exc, 'errno', None)})"
+        )
+
     log_folder.mkdir(exist_ok=True)
     log_file = log_folder / "rapl-idle.log"
 
@@ -105,16 +123,36 @@ def run_rapl_idle_measurement(dwell_time=60, extra_units=None):
         cmd.extend(["kubepods.slice", "k3s.service", "containerd.service"])
 
     timeout = dwell_time + 120
-    logger.debug(f"Starting RAPL idle measurement for {dwell_time}s (timeout {timeout}s)")
+    logger.debug(f"Starting RAPL idle measurement for {dwell_time}s (timeout {timeout}s), cmd: {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, check=True, timeout=timeout)
+        result = subprocess.run(cmd, check=True, timeout=timeout, capture_output=True, text=True)
         logger.debug("RAPL idle measurement completed successfully.")
+        if result.stdout:
+            logger.debug(f"systemd-run stdout: {result.stdout.strip()}")
+        if result.stderr:
+            logger.debug(f"systemd-run stderr: {result.stderr.strip()}")
         return result
     except subprocess.TimeoutExpired:
-        logger.error(f"Timed out after {timeout}s")
+        logger.error(f"Timed out after {timeout}s waiting for RAPL idle measurement")
         raise
     except subprocess.CalledProcessError as e:
-        logger.error(f"systemd-run failed with exit code {e.returncode}")
+        logger.error(
+            f"systemd-run failed (exit code {e.returncode})\n"
+            f"  stdout: {e.stdout.strip() if e.stdout else '(empty)'}\n"
+            f"  stderr: {e.stderr.strip() if e.stderr else '(empty)'}"
+        )
+        raise
+    except OSError as e:
+        import errno as errno_mod
+
+        hints = {
+            errno_mod.ENODATA: "D-Bus socket has no data, systemd may not be running or the session bus is unavailable",
+            errno_mod.ENOENT: "sudo or systemd-run binary not found at runtime despite PATH check",
+            errno_mod.EACCES: "Permission denied, check sudo rules for systemd-run",
+            errno_mod.EPERM: "Operation not permitted, cgroup or namespace restrictions may be blocking systemd-run",
+        }
+        hint = hints.get(e.errno, "unexpected OS error")
+        logger.error(f"OSError launching systemd-run (errno={e.errno}): {e}\n  Hint: {hint}")
         raise
 
 
