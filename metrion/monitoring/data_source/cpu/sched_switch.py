@@ -950,7 +950,7 @@ class SchedSwitchMonitor(DataSource):
 
     def _calculate_memory_metrics(self, raw_data_df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         rapl_dram_ctx = TimingContextRegistry.instance().get("intel_rapl_dram")
-        if raw_data_df.is_empty():
+        if raw_data_df.is_empty() or rapl_dram_ctx is None:
             return (pl.DataFrame(), pl.DataFrame(), pl.DataFrame())
 
         # Memory measurements
