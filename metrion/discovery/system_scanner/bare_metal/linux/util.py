@@ -1,5 +1,6 @@
 import pathlib
 import re
+import shutil
 import subprocess
 
 from loguru import logger
@@ -69,6 +70,14 @@ def run_rapl_idle_measurement(dwell_time=60, extra_units=None):
     current_dir = pathlib.Path(__file__).parent.absolute()
     log_folder = current_dir / "log"
     script_path = current_dir / "freeze-idle-rapl.sh"
+
+    if not shutil.which("systemd-run"):
+        raise RuntimeError(
+            "systemd-run not found. The idle RAPL measurement requires systemd. "
+            "This system may be using a non-systemd init (OpenRC, runit, SysVinit, etc.) "
+            "or is running inside a container without systemd access."
+        )
+
     log_folder.mkdir(exist_ok=True)
     log_file = log_folder / "rapl-idle.log"
 

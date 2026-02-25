@@ -234,7 +234,13 @@ def _resolve_power_data(
 
 def _auto_idle_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:
     """Auto-detect idle package power using RAPL."""
-    rapl_data = get_cpu_idle_power_data()
+    try:
+        rapl_data = get_cpu_idle_power_data()
+    except Exception as exc:
+        logger.warning(
+            f"Could not measure idle power via RAPL (errno {getattr(exc, 'errno', None)}): {exc}. Defaulting to 0.0 W."
+        )
+        return {pkg_id: 0.0 for pkg_id in cpus_by_socket.keys()}
     idle_power: dict[int, float] = {}
     for pkg_id in cpus_by_socket.keys():
         socket_data = rapl_data.get(pkg_id, {})
