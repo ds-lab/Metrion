@@ -14,11 +14,25 @@ from metrion.data_collector import DataCollector
 from metrion.data_record import DataRecord
 from metrion.discovery.hardware_detection import HardwareDetection
 from metrion.energy_attribution.energy_attribution_cli import main as analyze_command
+from metrion.entity.cpu import CPU
+from metrion.entity.dram import DRAM
+from metrion.entity.gpu import GPU
 from metrion.entity.host import Host
 from metrion.entity.logical_entity_registry import LogicalEntityRegistry
+from metrion.entity.network_interface import NetworkInterface
 from metrion.entity.physical_entity import PhysicalEntity
 from metrion.metric import Metric
 from metrion.monitoring.entity_monitor import EntityTypeMonitor
+
+# Maps entity types to the config key used in the energy_model.components dict.
+# This avoids relying on class.__name__.lower() which diverges for NetworkInterface → "network".
+_ENTITY_TYPE_TO_CONFIG_KEY: dict[type, str] = {
+    CPU: "cpu",
+    GPU: "gpu",
+    DRAM: "dram",
+    NetworkInterface: "network",
+    Host: "host",
+}
 
 
 class Orchestrator:
@@ -183,20 +197,20 @@ class Orchestrator:
         assert self._config is not None, "Config must be loaded before creating entity monitors."
 
         for entity_type, entities in self._entities.items():
-            entity_type_name = entity_type.__name__.lower()
+            config_key = _ENTITY_TYPE_TO_CONFIG_KEY.get(entity_type, entity_type.__name__.lower())
             # Host is always included
             if entity_type is Host:
                 desired_metrics = self._get_metrics_for_component(entity_type)
-            elif self._config.energy_model.is_component_included(entity_type_name):
+            elif self._config.energy_model.is_component_included(config_key):
                 desired_metrics = self._get_metrics_for_component(entity_type)
             else:
-                logger.debug(f"Skipping {entity_type_name} monitoring (excluded in config)")
+                logger.debug(f"Skipping {config_key} monitoring (excluded in config)")
                 continue
 
             if len(desired_metrics) > 0:
                 self._entity_monitors.append(EntityTypeMonitor(entities, desired_metrics))
                 logger.debug(
-                    f"Created monitor for {entity_type_name} with metrics: {[m.name for m in desired_metrics]}"
+                    f"Created monitor for {entity_type.__name__} with metrics: {[m.name for m in desired_metrics]}"
                 )
 
     def _get_metrics_for_component(self, entity_type: type) -> list[Metric]:
@@ -216,7 +230,7 @@ class Orchestrator:
         assert self._config is not None, "Config must be loaded before getting metrics."
 
         # Get all metrics that match this component prefix
-        entity_name = entity_type.__name__.lower()
+        entity_name = _ENTITY_TYPE_TO_CONFIG_KEY.get(entity_type, entity_type.__name__.lower())
         all_metrics = Metric.get_all_metrics()
 
         # Get the metrics configuration for this component
