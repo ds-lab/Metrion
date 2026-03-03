@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${SCRIPT_DIR}/../../../../../.venv/bin/python3"
+
 COOLDOWN_SEC="${1:-60}"   # wait time after killing GPU users
 MEASURE_SEC="${2:-60}"    # measurement dwell time
 LOG_FOLDER="${3:-/var/log}"
@@ -32,7 +35,7 @@ if ! command -v nvidia-smi >/dev/null 2>&1; then
 	exit 1
 fi
 
-if ! python3 -c "import pynvml" 2>/dev/null; then
+if ! "$PYTHON" -c "import pynvml" 2>/dev/null; then
 	echo "Error  : pynvml Python library not found. Install with: pip install pynvml"
 	exit 1
 fi
@@ -51,7 +54,7 @@ done
 
 read_all_power(){
 	# Instantaneous power draw in Watts using pynvml
-	python3 << 'PYEOF'
+	"$PYTHON" << 'PYEOF'
 import pynvml
 pynvml.nvmlInit()
 count = pynvml.nvmlDeviceGetCount()
@@ -65,7 +68,7 @@ PYEOF
 
 read_all_energy(){
 	# Total energy counter in millijoules (mJ) since driver load using pynvml
-	python3 << 'PYEOF'
+	"$PYTHON" << 'PYEOF'
 import pynvml
 try:
     pynvml.nvmlInit()

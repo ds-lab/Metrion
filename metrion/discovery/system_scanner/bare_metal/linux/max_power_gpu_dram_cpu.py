@@ -119,7 +119,7 @@ def read_power_uw(file_path: Path) -> str:
     """Read a power value in microwatts and return watts as a string."""
     try:
         micro_watts = float(file_path.read_text().strip())
-    except (FileNotFoundError, ValueError):
+    except (OSError, ValueError):
         return "N/A"
     return f"{micro_watts / 1e6:.4f}"
 

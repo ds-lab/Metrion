@@ -79,7 +79,7 @@ class DataSaver:
                 time.sleep(0.5)
 
             except Exception as e:
-                logger.error(f"Error in data saving loop: {e}")
+                logger.opt(exception=True).warning(f"Error in data saving loop: {e}")
                 time.sleep(1)
 
         self._stop()
