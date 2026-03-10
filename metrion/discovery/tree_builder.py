@@ -84,7 +84,10 @@ class HardwareTreeBuilder:
         logger.debug("Starting to construct hardware tree for: " + ", ".join(c["NAME"] for c in components))
 
         env_type = detect_environment()
+        # TODO: fix this better
         os_type = detect_os()
+        if env_type == "container" and os_type == "linux":
+            env_type = "bare_metal"
         hostname = os.uname().nodename
         self.tree = {hostname: {"env_type": env_type, "os_type": os_type}}
 

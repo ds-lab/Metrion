@@ -125,15 +125,23 @@ def read_power_uw(file_path: Path) -> str:
 
 
 def scan_rapl_packages() -> list[Path]:
-    """Find RAPL package domains with energy counters."""
+    """Find RAPL package (CPU socket) domains with energy counters."""
     if not BASE_RAPL.is_dir():
         return []
-    return [pkg for pkg in BASE_RAPL.glob("intel-rapl:[0-9]*") if (pkg / "energy_uj").is_file()]
+    pkgs = []
+    for pkg in BASE_RAPL.glob("intel-rapl:[0-9]*"):
+        if not (pkg / "energy_uj").is_file():
+            continue
+        name_file = pkg / "name"
+        if not name_file.is_file() or not name_file.read_text().strip().startswith("package-"):
+            continue
+        pkgs.append(pkg)
+    return pkgs
 
 
 def rapl_package_caps(pkg: Path) -> RaplPackageCaps:
     """Build package-level RAPL caps for a package path."""
-    pkg_num = pkg.name.split(":", 1)[-1]
+    pkg_num = (pkg / "name").read_text().strip().removeprefix("package-")
     return RaplPackageCaps(
         package=pkg_num,
         path=pkg,
