@@ -225,6 +225,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         self._last_flush_time = time.time()
 
         df = pl.DataFrame(records, schema=self._df_schema, strict=True)
+        self._total_events += df.height
         self._ipc_writer.enqueue(df)
 
     def _flush_raw_to_queue(self) -> None:
