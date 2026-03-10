@@ -18,18 +18,18 @@ energy_model:
         - CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM
         - CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM
     dram:
-      mode: exclude
+      mode: include
       power: auto
       metrics:
         - DRAM_SOCKET_TOTAL_ENERGY
         - DRAM_SOCKET_PID_MEMORY
     gpu:
-      mode: exclude
+      mode: include
       power: auto
       metrics:
         - GPU_DEVICE_TOTAL_ENERGY
         - GPU_DEVICE_PID_COMPUTE_UTILIZATION
     network:
-      mode: exclude
+      mode: include
       power: auto
       metrics: "*"
