@@ -166,6 +166,7 @@ def get_info(config: dict) -> list[dict]:
             match_size = re.search(r"Size:\s*(\d+)\s*(GB|MB)", module)
             match_serial = re.search(r"Serial Number:\s*(\S+)", module)
             match_socket = re.search(r"(?:Bank Locator):\s*(P\d)", module)
+            match_locator = re.search(r"Locator:\s*(\S+)", module)
 
             if match_manufacturer:
                 manufacturer = match_manufacturer.group(1)
@@ -180,6 +181,19 @@ def get_info(config: dict) -> list[dict]:
                 # Extract only the digit(s) from a locator like 'P0' or 'P10'
                 digits = re.search(r"\d+", match_socket.group(1))
                 package_id = digits.group(0) if digits else "Unknown"
+            if match_locator and package_id == "Unknown":
+                full_locator = match_locator.group(1)  # e.g., "A1" or "CPU1_DIMM_A1"
+                # Heuristic A: Look for explicit "P0" or "CPU1" in the string
+                if "P0" in full_locator or "CPU0" in full_locator:
+                    package_id = "0"
+                elif "P1" in full_locator or "CPU1" in full_locator:
+                    package_id = "1"
+                # Heuristic B: Mapping based on prefix letter (A=0, B=1)
+                # This matches your specific hardware output where A1-A8 and B1-B8 are used.
+                else:
+                    prefix = full_locator[0].upper()
+                    if prefix.isalpha():
+                        package_id = str(ord(prefix) - ord("A"))
 
             if isinstance(package_id, str) and package_id.isdigit():
                 pkg_idx = int(package_id)
