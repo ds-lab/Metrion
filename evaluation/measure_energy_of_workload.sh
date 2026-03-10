@@ -79,10 +79,14 @@ BASE_RAPL_PATH=/sys/devices/virtual/powercap/intel-rapl
 declare -a PKG_PATHS
 declare -a DRAM_PATHS
 
-# Find all package directories (e.g., intel-rapl:0, intel-rapl:1)
-for pkg_dir in "$BASE_RAPL_PATH"/intel-rapl:[0-9]; do
+# Find all package directories (e.g., intel-rapl:0, intel-rapl:2)
+# Only domains whose name file reads "package-N" are CPU socket packages;
+# platform domains like "psys" are skipped.
+for pkg_dir in "$BASE_RAPL_PATH"/intel-rapl:[0-9]*; do
     # Ensure it's a directory and the energy file is readable
-    if [[ -d "$pkg_dir" && -r "${pkg_dir}/energy_uj" ]]; then
+    if [[ -d "$pkg_dir" && -r "${pkg_dir}/energy_uj" ]] \
+       && [[ -f "${pkg_dir}/name" ]] \
+       && [[ $(<"${pkg_dir}/name") == package-* ]]; then
         PKG_PATHS+=("${pkg_dir}/energy_uj")
 
         # Look for a corresponding DRAM sub-domain within the package directory

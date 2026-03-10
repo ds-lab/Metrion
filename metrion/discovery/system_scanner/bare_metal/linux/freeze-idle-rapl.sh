@@ -88,21 +88,30 @@ echo "Begin  : $(date --iso=seconds)"
 ###############################################################################
 BASE=/sys/devices/virtual/powercap/intel-rapl
 declare -a PKG_PATHS
+declare -a PKG_NUMS
 declare -A CPU_PATHS
 declare -A GPU_PATHS
 declare -A DRAM_PATHS
 
 # Find all package domains and their sub-domains
+# Only directories whose name file reads "package-N" are CPU socket packages;
+# platform domains like "psys" are skipped.
 while IFS= read -r -d '' pkg_path; do
+    name_file="$pkg_path/name"
+    [[ -f "$name_file" ]] || continue
+    domain_name=$(<"$name_file")
+    [[ "$domain_name" == package-* ]] || continue
+
+    pkg_num="${domain_name#package-}"   # "package-0" → "0"
     PKG_PATHS+=("$pkg_path")
-    pkg_num=$(basename "${pkg_path}" | cut -d: -f2)
+    PKG_NUMS+=("$pkg_num")
 
     # Dynamically find all sub-domains (cpu, gpu, dram)
     while IFS= read -r -d '' sub_path; do
         name_file="$sub_path/name"
         if [[ -f "$name_file" ]]; then
-            domain_name=$(<"$name_file")
-            case "$domain_name" in
+            sub_name=$(<"$name_file")
+            case "$sub_name" in
                 core|cores|cpu)
                     CPU_PATHS[$pkg_num]="$sub_path"
                     ;;
@@ -125,8 +134,8 @@ fi
 
 echo "Found  : ${#PKG_PATHS[@]} package domain(s)"
 for i in "${!PKG_PATHS[@]}"; do
-    pkg_num=$(basename "${PKG_PATHS[i]}" | cut -d: -f2)
-    
+    pkg_num="${PKG_NUMS[i]}"
+
     # Show what domains are available for this package
     domains="Package"
     [[ -n "${CPU_PATHS[$pkg_num]:-}" ]] && domains+=", CPU cores"
@@ -141,7 +150,7 @@ read_all_rapl() {
     local output=""
     for i in "${!PKG_PATHS[@]}"; do
         local pkg cpu gpu dram
-        pkg_num=$(basename "${PKG_PATHS[i]}" | cut -d: -f2)
+        pkg_num="${PKG_NUMS[i]}"
         
         # Package total
         pkg=$(<"${PKG_PATHS[i]}/energy_uj")
@@ -256,7 +265,7 @@ read -a energy1 < <(read_all_rapl)
 
 # Calculate and display power consumption for each package
 for i in "${!PKG_PATHS[@]}"; do
-    pkg_num=$(basename "${PKG_PATHS[i]}" | cut -d: -f2)
+    pkg_num="${PKG_NUMS[i]}"
     echo "=== Package $pkg_num ==="
     
     # Each package has 4 values: pkg, cpu, gpu, dram
