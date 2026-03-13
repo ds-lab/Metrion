@@ -206,8 +206,8 @@ def _execute_group_query(
 ) -> pl.DataFrame:
     with engine.connect() as conn:
         if force:
-            logger.debug(f"Creating view {view_name} (force={force})")
-            conn.execute(text(f"DROP VIEW {view_name}"))
+            logger.debug(f"Recreating table {view_name} (force={force})")
+            conn.execute(text(f"DROP TABLE IF EXISTS {view_name}"))
         for create_view_sql_statement in create_view_sql_statements:
             conn.execute(text(create_view_sql_statement))
         result = conn.execute(text(group_query_sql))
@@ -1536,6 +1536,7 @@ def create_visualizations(
     end_time: datetime.datetime,
     backend: Literal["matplotlib", "plotly"] = "matplotlib",
     unit: Literal["J", "Wh"] = "J",
+    no_plots: bool = False,
 ) -> pl.DataFrame | None:
     """
     Create visualizations for both filtered and all data and generate an HTML report.
@@ -1547,7 +1548,14 @@ def create_visualizations(
         start_time: Analysis start time
         end_time: Analysis end time
         backend: Plotting backend to use ('matplotlib' or 'plotly')
+        no_plots: If True, skip plot and HTML report generation (summary table still computed)
     """
+    if no_plots:
+        _, bar_table = plot_energy_bar_chart_and_table(
+            filtered_dfs, f"Total Energy by Process (containing '{filter_cmdline}')", backend=backend, unit=unit
+        )
+        return bar_table
+
     filtered_figures = []
     all_figures = []
 
@@ -1774,6 +1782,18 @@ def prepare_data(
     default=False,
     help="Export summary to CSV and JSON files",
 )
+@click.option(
+    "--no-plots",
+    is_flag=True,
+    default=False,
+    help="Skip plot and HTML report generation",
+)
+@click.option(
+    "--export-raw-data",
+    is_flag=True,
+    default=False,
+    help="Export raw filtered interval data to CSV files (one per device: cpu, dram, gpu)",
+)
 def main(
     db_path: Path,
     filter_cmdline: str,
@@ -1785,6 +1805,8 @@ def main(
     type: Literal["sqlite", "duckdb"] = "duckdb",
     backend: Literal["matplotlib", "plotly"] = "plotly",
     export_summary: bool = False,
+    no_plots: bool = False,
+    export_raw_data: bool = False,
 ) -> None:
     """
     Energy analysis tool for system processes.
@@ -1847,6 +1869,16 @@ def main(
         return
     filtered_dfs, all_dfs = prepared_data
 
+    # Export raw filtered data if requested
+    if export_raw_data:
+        output_dir = Path(__file__).parent / "output"
+        output_dir.mkdir(exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        for device, df in filtered_dfs:
+            csv_path = output_dir / f"raw_{device}_{timestamp}.csv"
+            df.write_csv(csv_path)
+            logger.info(f"Raw {device.upper()} data exported to {csv_path}")
+
     # Create visualizations
     summary_table = create_visualizations(
         filtered_dfs=filtered_dfs,
@@ -1856,6 +1888,7 @@ def main(
         end_time=end_time,
         backend=backend,
         unit=unit,
+        no_plots=no_plots,
     )
 
     # Print professional summary

@@ -69,7 +69,7 @@ FROM
 
 --sqlite CREATE INDEX IF not EXISTS idx_ei_socket_end_start ON energy_interval_pkg_tmp (package_id, interval_end, interval_start);
 
-CREATE VIEW
+CREATE TABLE
     IF NOT EXISTS total_energy_per_thread_view AS
 WITH
     work_per_thread_per_socket AS (

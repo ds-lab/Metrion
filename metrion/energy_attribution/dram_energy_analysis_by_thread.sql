@@ -47,7 +47,7 @@ FROM energy_interval_dram;
 --sqlite   ON energy_interval_dram_tmp (dram_id, cpu_id, interval_end, interval_start);
 
 -- 1) Final view: active via reads, idle via PID count
-CREATE VIEW IF NOT EXISTS dram_energy_per_thread_view AS
+CREATE TABLE IF NOT EXISTS dram_energy_per_thread_view AS
 WITH
 -- (A) Idle/active split per DRAM interval
 dram_interval_powers AS (
