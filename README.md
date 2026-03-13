@@ -110,9 +110,24 @@ sudo "$PYTHON_BIN" metrion/energy_attribution/energy_attribution_cli.py \
   --end-time "2026-01-01 00:00:00"
 ```
 
+### Analysis CLI Options
+| Option | Description |
+|--------|-------------|
+| `--db-path` | Path to the database file (required) |
+| `--filter-cmdline` | Filter processes by command line substring |
+| `--filter-pids` | Filter by comma-separated PIDs (e.g. `1234,5678`) |
+| `--start-time` | Analysis window start (`YYYY-MM-DD HH:MM:SS`) |
+| `--end-time` | Analysis window end (`YYYY-MM-DD HH:MM:SS`) |
+| `--unit` | Energy unit: `J` (default) or `Wh` |
+| `--backend` | Plotting backend: `plotly` (default) or `matplotlib` |
+| `--no-plots` | Skip plot and HTML report generation (summary still printed) |
+| `--export-summary` | Export per-process summary to CSV and JSON |
+| `--export-raw-data` | Export raw filtered interval data to CSV per device (`raw_cpu_*.csv`, `raw_dram_*.csv`, `raw_gpu_*.csv`) |
+| `--force` | Force recreation of materialised tables when queries change |
+| `--type` | Database type: `duckdb` (default) or `sqlite` |
+
 - The script expects timestamps in UTC as stored in the database.
-- Set `--force true` to rebuild materialized views when the schema or queries change.
-- Generated HTML reports are written to `metrion/energy_attribution/output/` by default.
+- Generated HTML reports and exported files are written to `metrion/energy_attribution/output/` by default.
 
 ## Evaluation
 The evaluation workflow reproduces the experiments from the paper and compares METRION with Scaphandre and EnergAt.
