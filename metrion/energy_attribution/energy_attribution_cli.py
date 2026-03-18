@@ -327,6 +327,146 @@ def execute_queries(
     return cpu_energy_per_group_df, dram_energy_per_group_df, gpu_energy_per_group_df
 
 
+def get_energy_for_pids(
+    engine: Engine,
+    pids: list[int],
+    start_time: datetime.datetime,
+    end_time: datetime.datetime,
+    force: bool = False,
+) -> pl.DataFrame:
+    """
+    Get energy attribution for a list of PIDs as a wide-format DataFrame.
+
+    Parameters
+    ----------
+    engine : sqlalchemy.engine.Engine
+        SQLAlchemy Engine connected to the database.
+    pids : list[int]
+        OS-native PIDs to include in the result.
+    start_time : datetime.datetime
+        Start datetime for the analysis window.
+    end_time : datetime.datetime
+        End datetime for the analysis window.
+    force : bool, optional
+        If True, recreate intermediate views even if they already exist.
+
+    Returns
+    -------
+    polars.DataFrame
+        Wide-format DataFrame with one row per (native_pid, interval). Columns:
+        native_pid, cmdline, executable_name, interval_start, interval_end,
+        cpu_total_energy_j, cpu_active_energy_j, cpu_idle_energy_j,
+        dram_total_energy_j, dram_active_energy_j, dram_idle_energy_j,
+        gpu_total_energy_j, gpu_active_energy_j, gpu_idle_energy_j,
+        total_energy_j, total_active_energy_j, total_idle_energy_j.
+    """
+    if not pids:
+        return pl.DataFrame()
+
+    pid_list = ", ".join(str(p) for p in pids)
+    filter_condition = f"AND le.native_pid IN ({pid_list})"
+
+    (
+        query_cpu_energy_analysis_by_thread,
+        _,
+        query_dram_energy_analysis_by_thread,
+        _,
+        query_gpu_energy_analysis_by_thread,
+        _,
+    ) = load_sql_queries(engine.dialect.name)
+
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+    dialect = engine.dialect.name
+
+    if dialect == "sqlite":
+        date_method = "julianday"
+        max_func = "MAX"
+    elif dialect == "duckdb":
+        date_method = "julian"
+        max_func = "greatest"
+    else:
+        raise ValueError(f"Unsupported database dialect: {dialect}")
+
+    formatted_query_cpu = query_cpu_energy_analysis_by_thread.format(
+        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
+    )
+    formatted_query_dram = query_dram_energy_analysis_by_thread.format(
+        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
+    )
+    formatted_query_gpu = query_gpu_energy_analysis_by_thread.format(
+        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
+    )
+
+    sql_dir = Path(__file__).parent
+    query_cpu_per_pid = (sql_dir / "cpu_energy_per_pid.sql").read_text(encoding="utf-8").format(
+        filter_condition=filter_condition
+    )
+    query_dram_per_pid = (sql_dir / "dram_energy_per_pid.sql").read_text(encoding="utf-8").format(
+        filter_condition=filter_condition
+    )
+    query_gpu_per_pid = (sql_dir / "gpu_energy_per_pid.sql").read_text(encoding="utf-8").format(
+        filter_condition=filter_condition
+    )
+
+    per_pid_schema = {
+        "interval_start": pl.Datetime if dialect == "duckdb" else pl.String,
+        "interval_end": pl.Datetime if dialect == "duckdb" else pl.String,
+        "native_pid": pl.Int64,
+        "cmdline": pl.String,
+        "total_energy_j": pl.Float64,
+        "active_energy_j": pl.Float64,
+        "idle_energy_j": pl.Float64,
+    }
+
+    join_keys = ["native_pid", "cmdline", "interval_start", "interval_end"]
+
+    cpu_df = _execute_group_query(
+        engine, "total_energy_per_thread_view", sqlparse.split(formatted_query_cpu), query_cpu_per_pid, force, per_pid_schema
+    ).rename({"total_energy_j": "cpu_total_energy_j", "active_energy_j": "cpu_active_energy_j", "idle_energy_j": "cpu_idle_energy_j"})
+
+    dram_df = _execute_group_query(
+        engine, "dram_energy_per_thread_view", sqlparse.split(formatted_query_dram), query_dram_per_pid, force, per_pid_schema
+    ).rename({"total_energy_j": "dram_total_energy_j", "active_energy_j": "dram_active_energy_j", "idle_energy_j": "dram_idle_energy_j"})
+
+    try:
+        gpu_df = _execute_group_query(
+            engine, "gpu_energy_per_thread_view", sqlparse.split(formatted_query_gpu), query_gpu_per_pid, force, per_pid_schema
+        ).rename({"total_energy_j": "gpu_total_energy_j", "active_energy_j": "gpu_active_energy_j", "idle_energy_j": "gpu_idle_energy_j"})
+    except Exception as e:
+        logger.warning(f"GPU energy query failed (may not have GPU data): {e}")
+        gpu_df = pl.DataFrame()
+
+    result = cpu_df.join(dram_df, on=join_keys, how="full", coalesce=True)
+    if not gpu_df.is_empty():
+        result = result.join(gpu_df, on=join_keys, how="full", coalesce=True)
+
+    energy_cols = [
+        "cpu_total_energy_j", "cpu_active_energy_j", "cpu_idle_energy_j",
+        "dram_total_energy_j", "dram_active_energy_j", "dram_idle_energy_j",
+        "gpu_total_energy_j", "gpu_active_energy_j", "gpu_idle_energy_j",
+    ]
+
+    for col in energy_cols:
+        if col not in result.columns:
+            result = result.with_columns(pl.lit(0.0).alias(col))
+
+    result = result.with_columns(pl.col(col).fill_null(0.0) for col in energy_cols)
+
+    result = (
+        result.group_by(["native_pid", "cmdline"])
+        .agg(pl.col(energy_cols).sum())
+    )
+
+    result = result.with_columns(
+        (pl.col("cpu_total_energy_j") + pl.col("dram_total_energy_j") + pl.col("gpu_total_energy_j")).alias("total_energy_j"),
+        (pl.col("cpu_active_energy_j") + pl.col("dram_active_energy_j") + pl.col("gpu_active_energy_j")).alias("total_active_energy_j"),
+        (pl.col("cpu_idle_energy_j") + pl.col("dram_idle_energy_j") + pl.col("gpu_idle_energy_j")).alias("total_idle_energy_j"),
+    )
+
+    return result
+
+
 def filter_data_by_cmdline_and_comm(df: pl.DataFrame | None, filter_cmdline: str) -> pl.DataFrame | None:
     """
     Filter the energy data by command line pattern.
