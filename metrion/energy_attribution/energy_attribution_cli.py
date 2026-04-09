@@ -399,14 +399,14 @@ def get_energy_for_pids(
     )
 
     sql_dir = Path(__file__).parent
-    query_cpu_per_pid = (sql_dir / "cpu_energy_per_pid.sql").read_text(encoding="utf-8").format(
-        filter_condition=filter_condition
+    query_cpu_per_pid = (
+        (sql_dir / "cpu_energy_per_pid.sql").read_text(encoding="utf-8").format(filter_condition=filter_condition)
     )
-    query_dram_per_pid = (sql_dir / "dram_energy_per_pid.sql").read_text(encoding="utf-8").format(
-        filter_condition=filter_condition
+    query_dram_per_pid = (
+        (sql_dir / "dram_energy_per_pid.sql").read_text(encoding="utf-8").format(filter_condition=filter_condition)
     )
-    query_gpu_per_pid = (sql_dir / "gpu_energy_per_pid.sql").read_text(encoding="utf-8").format(
-        filter_condition=filter_condition
+    query_gpu_per_pid = (
+        (sql_dir / "gpu_energy_per_pid.sql").read_text(encoding="utf-8").format(filter_condition=filter_condition)
     )
 
     per_pid_schema = {
@@ -422,17 +422,50 @@ def get_energy_for_pids(
     join_keys = ["native_pid", "cmdline", "interval_start", "interval_end"]
 
     cpu_df = _execute_group_query(
-        engine, "total_energy_per_thread_view", sqlparse.split(formatted_query_cpu), query_cpu_per_pid, force, per_pid_schema
-    ).rename({"total_energy_j": "cpu_total_energy_j", "active_energy_j": "cpu_active_energy_j", "idle_energy_j": "cpu_idle_energy_j"})
+        engine,
+        "total_energy_per_thread_view",
+        sqlparse.split(formatted_query_cpu),
+        query_cpu_per_pid,
+        force,
+        per_pid_schema,
+    ).rename(
+        {
+            "total_energy_j": "cpu_total_energy_j",
+            "active_energy_j": "cpu_active_energy_j",
+            "idle_energy_j": "cpu_idle_energy_j",
+        }
+    )
 
     dram_df = _execute_group_query(
-        engine, "dram_energy_per_thread_view", sqlparse.split(formatted_query_dram), query_dram_per_pid, force, per_pid_schema
-    ).rename({"total_energy_j": "dram_total_energy_j", "active_energy_j": "dram_active_energy_j", "idle_energy_j": "dram_idle_energy_j"})
+        engine,
+        "dram_energy_per_thread_view",
+        sqlparse.split(formatted_query_dram),
+        query_dram_per_pid,
+        force,
+        per_pid_schema,
+    ).rename(
+        {
+            "total_energy_j": "dram_total_energy_j",
+            "active_energy_j": "dram_active_energy_j",
+            "idle_energy_j": "dram_idle_energy_j",
+        }
+    )
 
     try:
         gpu_df = _execute_group_query(
-            engine, "gpu_energy_per_thread_view", sqlparse.split(formatted_query_gpu), query_gpu_per_pid, force, per_pid_schema
-        ).rename({"total_energy_j": "gpu_total_energy_j", "active_energy_j": "gpu_active_energy_j", "idle_energy_j": "gpu_idle_energy_j"})
+            engine,
+            "gpu_energy_per_thread_view",
+            sqlparse.split(formatted_query_gpu),
+            query_gpu_per_pid,
+            force,
+            per_pid_schema,
+        ).rename(
+            {
+                "total_energy_j": "gpu_total_energy_j",
+                "active_energy_j": "gpu_active_energy_j",
+                "idle_energy_j": "gpu_idle_energy_j",
+            }
+        )
     except Exception as e:
         logger.warning(f"GPU energy query failed (may not have GPU data): {e}")
         gpu_df = pl.DataFrame()
@@ -442,9 +475,15 @@ def get_energy_for_pids(
         result = result.join(gpu_df, on=join_keys, how="full", coalesce=True)
 
     energy_cols = [
-        "cpu_total_energy_j", "cpu_active_energy_j", "cpu_idle_energy_j",
-        "dram_total_energy_j", "dram_active_energy_j", "dram_idle_energy_j",
-        "gpu_total_energy_j", "gpu_active_energy_j", "gpu_idle_energy_j",
+        "cpu_total_energy_j",
+        "cpu_active_energy_j",
+        "cpu_idle_energy_j",
+        "dram_total_energy_j",
+        "dram_active_energy_j",
+        "dram_idle_energy_j",
+        "gpu_total_energy_j",
+        "gpu_active_energy_j",
+        "gpu_idle_energy_j",
     ]
 
     for col in energy_cols:
@@ -453,18 +492,170 @@ def get_energy_for_pids(
 
     result = result.with_columns(pl.col(col).fill_null(0.0) for col in energy_cols)
 
-    result = (
-        result.group_by(["native_pid", "cmdline"])
-        .agg(pl.col(energy_cols).sum())
-    )
+    result = result.group_by(["native_pid", "cmdline"]).agg(pl.col(energy_cols).sum())
 
     result = result.with_columns(
-        (pl.col("cpu_total_energy_j") + pl.col("dram_total_energy_j") + pl.col("gpu_total_energy_j")).alias("total_energy_j"),
-        (pl.col("cpu_active_energy_j") + pl.col("dram_active_energy_j") + pl.col("gpu_active_energy_j")).alias("total_active_energy_j"),
-        (pl.col("cpu_idle_energy_j") + pl.col("dram_idle_energy_j") + pl.col("gpu_idle_energy_j")).alias("total_idle_energy_j"),
+        (pl.col("cpu_total_energy_j") + pl.col("dram_total_energy_j") + pl.col("gpu_total_energy_j")).alias(
+            "total_energy_j"
+        ),
+        (pl.col("cpu_active_energy_j") + pl.col("dram_active_energy_j") + pl.col("gpu_active_energy_j")).alias(
+            "total_active_energy_j"
+        ),
+        (pl.col("cpu_idle_energy_j") + pl.col("dram_idle_energy_j") + pl.col("gpu_idle_energy_j")).alias(
+            "total_idle_energy_j"
+        ),
     )
 
     return result
+
+
+def get_all_descendant_pids(engine: Engine, parent_pids: set[int]) -> set[int]:
+    """
+    Recursively find all descendant PIDs of the given parent PIDs.
+
+    Walks the ``logical_entity`` table following ``native_parent_pid`` links
+    until no new children are discovered.
+
+    Parameters
+    ----------
+    engine : sqlalchemy.engine.Engine
+        Connected database engine.
+    parent_pids : set[int]
+        Seed set of PIDs whose descendants we want.
+
+    Returns
+    -------
+    set[int]
+        All descendant PIDs (not including the seed PIDs themselves).
+    """
+    if not parent_pids:
+        return set()
+
+    descendants: set[int] = set()
+    frontier = set(parent_pids)
+
+    while frontier:
+        pid_list = ", ".join(str(p) for p in frontier)
+        sql = text(f"SELECT DISTINCT native_pid FROM logical_entity WHERE native_parent_pid IN ({pid_list})")
+        with engine.connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        children = {row[0] for row in rows if row[0] is not None} - parent_pids - descendants
+        descendants |= children
+        frontier = children
+
+    return descendants
+
+
+def get_performance_metrics_for_pids(
+    engine: Engine,
+    pids: list[int],
+    start_time: datetime.datetime,
+    end_time: datetime.datetime,
+) -> pl.DataFrame:
+    """
+    Query per-PID performance metrics from the database.
+
+    Fetches the following metrics for each PID in the given time window:
+
+    - ``CPU_CORE_PID_UNHALTED_CYCLES`` — summed unhalted core cycles
+    - ``CPU_CORE_PID_TIME``            — summed kernel execution time (ms)
+    - ``DRAM_SOCKET_PID_MEMORY``       — peak DRAM memory usage (MB)
+    - ``GPU_DEVICE_PID_MEMORY``        — peak GPU memory usage (MB)
+
+    Parameters
+    ----------
+    engine : sqlalchemy.engine.Engine
+        Connected database engine.
+    pids : list[int]
+        Native OS PIDs to query.
+    start_time : datetime.datetime
+        Start of the time window.
+    end_time : datetime.datetime
+        End of the time window.
+
+    Returns
+    -------
+    polars.DataFrame
+        Columns: ``native_pid``, ``unhalted_cycles``, ``kernel_time_ms``,
+        ``dram_memory_mb``, ``gpu_memory_mb``.
+        Returns an empty DataFrame if *pids* is empty.
+    """
+    if not pids:
+        return pl.DataFrame(
+            schema={
+                "native_pid": pl.Int64,
+                "unhalted_cycles": pl.Float64,
+                "kernel_time_ms": pl.Float64,
+                "dram_memory_mb": pl.Float64,
+                "gpu_memory_mb": pl.Float64,
+            }
+        )
+
+    pid_list = ", ".join(str(p) for p in pids)
+    start_str = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+    sql = text(f"""
+        SELECT
+            le.native_pid,
+            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_UNHALTED_CYCLES' THEN m.value ELSE 0 END) AS unhalted_cycles,
+            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_TIME'             THEN m.value ELSE 0 END) AS kernel_time_ms,
+            MAX(CASE WHEN m.metric_id = 'DRAM_SOCKET_PID_MEMORY'        THEN m.value ELSE NULL END) AS dram_memory_mb,
+            MAX(CASE WHEN m.metric_id = 'GPU_DEVICE_PID_MEMORY'         THEN m.value ELSE NULL END) AS gpu_memory_mb
+        FROM measurement m
+        JOIN logical_entity le ON m.logical_entity_id = le.id
+        WHERE le.native_pid IN ({pid_list})
+          AND m.metric_id IN (
+              'CPU_CORE_PID_UNHALTED_CYCLES',
+              'CPU_CORE_PID_TIME',
+              'DRAM_SOCKET_PID_MEMORY',
+              'GPU_DEVICE_PID_MEMORY'
+          )
+          AND m.start_ts >= '{start_str}'
+          AND m.end_ts   <= '{end_str}'
+        GROUP BY le.native_pid
+    """)
+
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(sql)
+            rows = result.fetchall()
+            columns = list(result.keys())
+
+        if not rows:
+            return pl.DataFrame(
+                schema={
+                    "native_pid": pl.Int64,
+                    "unhalted_cycles": pl.Float64,
+                    "kernel_time_ms": pl.Float64,
+                    "dram_memory_mb": pl.Float64,
+                    "gpu_memory_mb": pl.Float64,
+                }
+            )
+
+        df = pl.DataFrame(rows, schema=columns, orient="row")
+        df = df.cast(
+            {
+                "native_pid": pl.Int64,
+                "unhalted_cycles": pl.Float64,
+                "kernel_time_ms": pl.Float64,
+                "dram_memory_mb": pl.Float64,
+                "gpu_memory_mb": pl.Float64,
+            }
+        )
+        return df
+
+    except Exception as e:
+        logger.warning(f"Performance metrics query failed: {e}")
+        return pl.DataFrame(
+            schema={
+                "native_pid": pl.Int64,
+                "unhalted_cycles": pl.Float64,
+                "kernel_time_ms": pl.Float64,
+                "dram_memory_mb": pl.Float64,
+                "gpu_memory_mb": pl.Float64,
+            }
+        )
 
 
 def filter_data_by_cmdline_and_comm(df: pl.DataFrame | None, filter_cmdline: str) -> pl.DataFrame | None:
