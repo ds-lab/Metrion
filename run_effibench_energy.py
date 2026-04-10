@@ -5,18 +5,21 @@ Run EffiBench entries under metrion monitoring and collect per-entry energy data
 Flow:
   1. Start `metrion monitor` in the background (writes to DB via --persist).
   2. Wait --warmup seconds for metrion to initialise.
-  3. For each entry in the input JSON, build a runnable script and execute it
-     as a subprocess, recording the PID and timing.
+  3. For each input file and each entry within it, build a runnable script and
+     execute it as a subprocess, recording the PID and timing.
   4. Send SIGTERM to metrion and wait until it exits gracefully (DB flush).
   5. Query the database for energy, CPU cycles, kernel time, and memory per PID
      (including child processes).
-  6. Write a JSON results file.
+  6. Write one JSON results file per input file, named {stem}_energy_results.json.
 
 Usage:
-    python run_effibench_energy.py --input-file EffiBench_vllm_qwen3.5-27b_1.json
-    python run_effibench_energy.py --input-file EffiBench_vllm_qwen3.5-27b_1.json --limit 5
-    python run_effibench_energy.py --input-file EffiBench_vllm_qwen3.5-27b_1.json \\
-        --config /path/to/config.yaml --out results.json
+    python run_effibench_energy.py --input-files EffiBench_vllm_qwen3.5-27b_1.json
+    python run_effibench_energy.py --input-files file1.json file2.json file3.json
+    python run_effibench_energy.py --input-files file1.json --limit 5
+    python run_effibench_energy.py --input-files file1.json file2.json \\
+        --config /path/to/config.yaml
+    python run_effibench_energy.py --analyze-only \\
+        --input-files file1.json file2.json --db-path /path/to/monitor.db
 """
 
 from __future__ import annotations
@@ -34,6 +37,11 @@ from pathlib import Path
 
 import yaml
 from loguru import logger
+from tqdm import tqdm
+
+# Route loguru through tqdm.write so progress bars aren't mangled by log lines.
+logger.remove()
+logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
 
 # ---------------------------------------------------------------------------
 # Helpers copied from test.py (build_runnable_script and dependencies).
@@ -331,11 +339,18 @@ def _resolve_db_path(args: argparse.Namespace, metrion_start_mono: float) -> tup
 
 
 def _run_analysis(records: list[dict], db_path: Path, db_type: str) -> None:
-    """Phase D: query DB for energy/perf and annotate records in place."""
+    """Phase D: bulk-query DB for energy/perf and annotate records in place.
+
+    Three queries total: one recursive SQL to resolve all descendant threads,
+    one bulk energy query, one bulk perf query.  Per-record attribution is then
+    done in polars in memory using top_parent_native_pid.
+    """
+    import polars as pl
+
     from metrion.energy_attribution.energy_attribution_cli import (
         close_db_connection,
         connect_to_db,
-        get_all_descendant_pids,
+        get_descendant_threads,
         get_energy_for_pids,
         get_performance_metrics_for_pids,
     )
@@ -345,36 +360,70 @@ def _run_analysis(records: list[dict], db_path: Path, db_type: str) -> None:
         logger.error("[db] Failed to connect to database.")
         return
 
-    for rec in records:
-        if rec["pid"] is None:
-            continue
-        pid = rec["pid"]
-        time_bound = timedelta(days=1)  # sanity check to avoid querying with absurd time ranges
-        start_time = datetime.fromisoformat(rec["start_time"]) - time_bound
-        end_time = datetime.fromisoformat(rec["end_time"]) + time_bound
+    active_records = [rec for rec in records if rec["pid"] is not None]
+    if not active_records:
+        close_db_connection(engine)
+        return
 
-        try:
-            descendants = get_all_descendant_pids(engine, {pid})
-        except Exception as e:
-            logger.warning(f"[db] get_all_descendant_pids failed for pid={pid}: {e}")
-            descendants = set()
+    # --- Step 1: resolve all descendant threads in one recursive SQL query ---
+    seed_pids = [rec["pid"] for rec in active_records]
+    logger.info(f"[db] Resolving descendant threads for {len(seed_pids)} seed PIDs …")
+    threads_df = get_descendant_threads(engine, seed_pids)
 
-        all_pids = {pid} | descendants
-        rec["all_pids"] = sorted(all_pids)
+    # Build per-record all_pids from top_parent_native_pid grouping
+    if not threads_df.is_empty():
+        pid_map: dict[int, list[int]] = {
+            row["top_parent_native_pid"]: sorted(row["native_pid"])
+            for row in threads_df.group_by("top_parent_native_pid")
+            .agg(pl.col("native_pid").unique())
+            .iter_rows(named=True)
+        }
+        all_pids: list[int] = threads_df["native_pid"].unique().to_list()
+    else:
+        pid_map = {}
+        all_pids = seed_pids
 
-        try:
-            energy_df = get_energy_for_pids(engine, list(all_pids), start_time, end_time)
-            rec["energy"] = _aggregate_energy(energy_df)
-        except Exception as e:
-            logger.warning(f"[db] get_energy_for_pids failed for pid={pid}: {e}")
-            rec["energy"] = _aggregate_energy(None)
+    for rec in active_records:
+        rec["all_pids"] = pid_map.get(rec["pid"], [rec["pid"]])
 
-        try:
-            perf_df = get_performance_metrics_for_pids(engine, list(all_pids), start_time, end_time)
-            rec["performance"] = _aggregate_perf(perf_df)
-        except Exception as e:
-            logger.warning(f"[db] get_performance_metrics_for_pids failed for pid={pid}: {e}")
-            rec["performance"] = _aggregate_perf(None)
+    # --- Step 2: two bulk queries for all PIDs across all records ---
+    time_bound = timedelta(days=1)
+    global_start = min(datetime.fromisoformat(rec["start_time"]) for rec in active_records) - time_bound
+    global_end = max(datetime.fromisoformat(rec["end_time"]) for rec in active_records) + time_bound
+
+    logger.info(f"[db] Bulk energy query for {len(all_pids)} PIDs …")
+    try:
+        energy_df: pl.DataFrame | None = get_energy_for_pids(engine, all_pids, global_start, global_end)
+    except Exception as e:
+        logger.warning(f"[db] get_energy_for_pids (bulk) failed: {e}")
+        energy_df = None
+
+    logger.info(f"[db] Bulk perf query for {len(all_pids)} PIDs …")
+    try:
+        perf_df: pl.DataFrame | None = get_performance_metrics_for_pids(engine, all_pids, global_start, global_end)
+    except Exception as e:
+        logger.warning(f"[db] get_performance_metrics_for_pids (bulk) failed: {e}")
+        perf_df = None
+
+    close_db_connection(engine)
+
+    # --- Step 3: filter by top_parent_native_pid, aggregate per record in polars ---
+    for rec in active_records:
+        pid_set = rec["all_pids"]
+
+        rec_energy = (
+            energy_df.filter(pl.col("native_pid").is_in(pid_set))
+            if energy_df is not None and not energy_df.is_empty()
+            else None
+        )
+        rec["energy"] = _aggregate_energy(rec_energy)
+
+        rec_perf = (
+            perf_df.filter(pl.col("native_pid").is_in(pid_set))
+            if perf_df is not None and not perf_df.is_empty()
+            else None
+        )
+        rec["performance"] = _aggregate_perf(rec_perf)
 
         logger.info(
             f"[db] problem={rec['problem_idx']} pids={rec['all_pids']} "
@@ -382,7 +431,20 @@ def _run_analysis(records: list[dict], db_path: Path, db_type: str) -> None:
             f"cycles={rec['performance'].get('unhalted_cycles')} \n"
         )
 
-    close_db_connection(engine)
+
+# ---------------------------------------------------------------------------
+# Output path helpers
+# ---------------------------------------------------------------------------
+
+
+def _out_path(input_file: Path) -> Path:
+    """Derive the output JSON path: {stem}_energy_results.json in same directory."""
+    return input_file.with_stem(input_file.stem + "_energy_results")
+
+
+def _pids_path(input_file: Path) -> Path:
+    """Derive the intermediate pids JSON path: {stem}_energy_results.pids.json."""
+    return _out_path(input_file).with_suffix(".pids.json")
 
 
 # ---------------------------------------------------------------------------
@@ -393,10 +455,15 @@ def _run_analysis(records: list[dict], db_path: Path, db_type: str) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--input-file",
+        "--input-files",
         type=Path,
-        default=None,
-        help="Path to the EffiBench JSON file (required unless --analyze-only).",
+        nargs="+",
+        required=True,
+        metavar="INPUT_FILE",
+        help=(
+            "One or more EffiBench JSON files. Each produces its own "
+            "{stem}_energy_results.json output in the same directory."
+        ),
     )
     p.add_argument(
         "--config",
@@ -405,23 +472,11 @@ def parse_args() -> argparse.Namespace:
         help="Path to metrion config.yaml.",
     )
     p.add_argument(
-        "--out",
-        type=Path,
-        default=Path(__file__).parent / "effibench_energy_results.json",
-        help="Output JSON file path.",
-    )
-    p.add_argument(
-        "--pids-file",
-        type=Path,
-        default=None,
-        help="Intermediate JSON with PID/timing records saved after execution "
-        "and loaded by --analyze-only. Default: <out>.pids.json.",
-    )
-    p.add_argument(
         "--analyze-only",
         action="store_true",
-        help="Skip metrion and script execution; load --pids-file and re-run "
-        "only the database analysis (Phase D+E). Requires --db-path.",
+        help="Skip metrion and script execution; load per-file pids files "
+        "(auto-derived from --input-files) and re-run only the database "
+        "analysis (Phase D+E). Requires --db-path.",
     )
     p.add_argument(
         "--db-path",
@@ -445,20 +500,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    pids_file = args.pids_file or args.out.with_suffix(".pids.json")
 
     # -----------------------------------------------------------------------
-    # --analyze-only: skip straight to Phase D using a saved pids file
+    # --analyze-only: skip straight to Phase D using saved pids files
     # -----------------------------------------------------------------------
     if args.analyze_only:
-        if not pids_file.exists():
-            logger.error(f"[analyze] Pids file not found: {pids_file}")
-            sys.exit(1)
         if args.db_path is None:
             logger.error("[analyze] --db-path is required with --analyze-only")
             sys.exit(1)
-        records: list[dict] = json.loads(pids_file.read_text())
-        logger.info(f"[analyze] Loaded {len(records)} records from {pids_file.name}")
 
         db_path, db_type = _resolve_db_path(args, 0.0)
         logger.info(f"[db] Connecting to {db_type}:///{db_path}")
@@ -466,30 +515,39 @@ def main() -> None:
             logger.error(f"[db] Database not found at {db_path}")
             sys.exit(1)
 
-        _run_analysis(records, db_path, db_type)
-
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(records, indent=2, default=str))
-        logger.info(f"Results written to {args.out} ({len(records)} entries)")
+        for input_file in args.input_files:
+            pids_file = _pids_path(input_file)
+            out_file = _out_path(input_file)
+            if not pids_file.exists():
+                logger.error(f"[analyze] Pids file not found: {pids_file}")
+                continue
+            records: list[dict] = json.loads(pids_file.read_text())
+            logger.info(f"[analyze] Loaded {len(records)} records from {pids_file.name}")
+            _run_analysis(records, db_path, db_type)
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            out_file.write_text(json.dumps(records, indent=2, default=str))
+            logger.info(f"Results written to {out_file} ({len(records)} entries)")
         return
 
     # -----------------------------------------------------------------------
     # Normal run: Phases A → B → C → D → E
     # -----------------------------------------------------------------------
-    if args.input_file is None:
-        logger.error("--input-file is required (or use --analyze-only to skip execution)")
-        sys.exit(1)
-    if not args.input_file.exists():
-        logger.error(f"Input file not found: {args.input_file}")
-        sys.exit(1)
     if not args.config.exists():
         logger.error(f"Config file not found: {args.config}")
         sys.exit(1)
+    for input_file in args.input_files:
+        if not input_file.exists():
+            logger.error(f"Input file not found: {input_file}")
+            sys.exit(1)
 
-    entries: list[dict] = json.loads(args.input_file.read_text())
-    if args.limit is not None:
-        entries = entries[: args.limit]
-    logger.info(f"Loaded {len(entries)} entries from {args.input_file.name}")
+    # Load all entries grouped by input file.
+    file_entries: list[tuple[Path, list[dict]]] = []
+    for input_file in args.input_files:
+        entries: list[dict] = json.loads(input_file.read_text())
+        if args.limit is not None:
+            entries = entries[: args.limit]
+        logger.info(f"Loaded {len(entries)} entries from {input_file.name}")
+        file_entries.append((input_file, entries))
 
     # --- Phase A: start metrion ---
     metrion_start_mono = time.monotonic()
@@ -501,79 +559,82 @@ def main() -> None:
         sys.exit(1)
     logger.info("[metrion] Ready.")
 
-    # --- Phase B: run scripts ---
-    records = []
-    for i, entry in enumerate(entries):
-        problem_idx = entry.get("problem_idx")
-        task_name = entry.get("task_name", "")
-        prefix = f"[{i + 1}/{len(entries)}] problem={problem_idx} task={task_name!r}"
+    # --- Phase B: run scripts (all input files inside a single metrion session) ---
+    file_records: list[tuple[Path, list[dict]]] = []
+    for input_file, entries in tqdm(file_entries, desc="Processing input files"):
+        records: list[dict] = []
+        total = len(entries)
+        for i, entry in enumerate(entries):
+            problem_idx = entry.get("problem_idx")
+            task_name = entry.get("task_name", "")
+            prefix = f"[{i + 1}/{total}|{input_file.name}] problem={problem_idx} task={task_name!r}"
 
-        script_text = build_runnable_script(entry)
-        if script_text is None:
-            logger.info(f"{prefix} … SKIP (no runnable completion)")
-            records.append(
-                {
-                    "source_entry_index": i,
-                    "problem_idx": problem_idx,
-                    "task_name": task_name,
-                    "pid": None,
-                    "all_pids": [],
-                    "returncode": None,
-                    "start_time": None,
-                    "end_time": None,
-                    "energy": {},
-                    "performance": {},
-                    "error": "no_runnable_completion",
-                }
-            )
-            continue
+            script_text = build_runnable_script(entry)
+            if script_text is None:
+                logger.info(f"{prefix} … SKIP (no runnable completion)")
+                records.append(
+                    {
+                        "source_entry_index": i,
+                        "problem_idx": problem_idx,
+                        "task_name": task_name,
+                        "pid": None,
+                        "all_pids": [],
+                        "returncode": None,
+                        "start_time": None,
+                        "end_time": None,
+                        "energy": {},
+                        "performance": {},
+                        "error": "no_runnable_completion",
+                    }
+                )
+                continue
 
-        try:
-            pid, start_time, end_time, returncode = run_script(script_text)
-            duration = (end_time - start_time).total_seconds()
-            logger.info(f"{prefix} … pid={pid} rc={returncode} {duration:.2f}s")
-            records.append(
-                {
-                    "source_entry_index": i,
-                    "problem_idx": problem_idx,
-                    "task_name": task_name,
-                    "pid": pid,
-                    "all_pids": [pid],
-                    "returncode": returncode,
-                    "start_time": start_time.isoformat(),
-                    "end_time": end_time.isoformat(),
-                    "energy": {},
-                    "performance": {},
-                    "error": "",
-                }
-            )
-        except Exception as e:
-            logger.error(f"{prefix} … ERROR: {e}")
-            records.append(
-                {
-                    "source_entry_index": i,
-                    "problem_idx": problem_idx,
-                    "task_name": task_name,
-                    "pid": None,
-                    "all_pids": [],
-                    "returncode": None,
-                    "start_time": None,
-                    "end_time": None,
-                    "energy": {},
-                    "performance": {},
-                    "error": f"execution_failed: {e}",
-                }
-            )
+            try:
+                pid, start_time, end_time, returncode = run_script(script_text)
+                records.append(
+                    {
+                        "source_entry_index": i,
+                        "problem_idx": problem_idx,
+                        "task_name": task_name,
+                        "pid": pid,
+                        "all_pids": [pid],
+                        "returncode": returncode,
+                        "start_time": start_time.isoformat(),
+                        "end_time": end_time.isoformat(),
+                        "energy": {},
+                        "performance": {},
+                        "error": "",
+                    }
+                )
+            except Exception as e:
+                logger.error(f"{prefix} … ERROR: {e}")
+                records.append(
+                    {
+                        "source_entry_index": i,
+                        "problem_idx": problem_idx,
+                        "task_name": task_name,
+                        "pid": None,
+                        "all_pids": [],
+                        "returncode": None,
+                        "start_time": None,
+                        "end_time": None,
+                        "energy": {},
+                        "performance": {},
+                        "error": f"execution_failed: {e}",
+                    }
+                )
 
-    # Save intermediate records so analysis can be re-run without re-executing scripts.
-    pids_file.parent.mkdir(parents=True, exist_ok=True)
-    pids_file.write_text(json.dumps(records, indent=2, default=str))
-    logger.info(f"[pids] Intermediate records saved to {pids_file}")
+        # Save intermediate pids file for this input before moving to the next.
+        pids_file = _pids_path(input_file)
+        pids_file.parent.mkdir(parents=True, exist_ok=True)
+        pids_file.write_text(json.dumps(records, indent=2, default=str))
+        logger.info(f"[pids] Intermediate records saved to {pids_file}")
+        file_records.append((input_file, records))
 
     # --- Phase C: stop metrion ---
     stop_metrion(metrion_proc)
 
-    # --- Phase D: query database ---
+    # --- Phase D: query database (resolve DB and chown once) ---
     db_path, db_type = _resolve_db_path(args, metrion_start_mono)
 
     # The DB is written by root (sudo metrion); transfer ownership to the current user.
@@ -588,15 +649,18 @@ def main() -> None:
             logger.warning(f"[db] chown failed: {result.stderr.decode().strip()}")
 
     logger.info(f"[db] Connecting to {db_type}:///{db_path}")
-    if not db_path.exists():
+    db_available = db_path.exists()
+    if not db_available:
         logger.error(f"[db] Database not found at {db_path}. Skipping energy queries.")
-    else:
-        _run_analysis(records, db_path, db_type)
 
-    # --- Phase E: write output ---
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(records, indent=2, default=str))
-    logger.info(f"Results written to {args.out} ({len(records)} entries)")
+    # --- Phase E: write one output file per input ---
+    for input_file, records in file_records:
+        if db_available:
+            _run_analysis(records, db_path, db_type)
+        out_file = _out_path(input_file)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(json.dumps(records, indent=2, default=str))
+        logger.info(f"Results written to {out_file} ({len(records)} entries)")
 
 
 if __name__ == "__main__":

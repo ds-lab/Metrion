@@ -546,6 +546,157 @@ def get_all_descendant_pids(engine: Engine, parent_pids: set[int]) -> set[int]:
     return descendants
 
 
+def get_descendant_threads(engine: Engine, seed_pids: list[int]) -> pl.DataFrame:
+    """
+    Recursively find all threads descended from the given seed PIDs.
+
+    Uses a single ``WITH RECURSIVE`` query to walk the process tree from each
+    seed PID, then expands to thread level.  Each result row carries a
+    ``top_parent_native_pid`` column identifying which seed PID it belongs to,
+    so callers can group results by the original seed PID.
+
+    Requires DuckDB (uses ``list_append`` / ``list_contains``).
+
+    Parameters
+    ----------
+    engine : Engine
+        Connected DuckDB engine.
+    seed_pids : list[int]
+        Seed PIDs (``native_pid`` values) to start the tree walk from.
+
+    Returns
+    -------
+    pl.DataFrame
+        One row per thread in the descendant tree.  Key columns:
+        ``top_parent_native_pid``, ``top_parent_pid_id``, ``depth``,
+        plus all columns of ``logical_entity``
+        (``native_pid``, ``native_thread_id``, ``pid_id``, …).
+        Empty DataFrame with typed schema if *seed_pids* is empty or no rows
+        are found.
+    """
+    _empty = pl.DataFrame(
+        schema={
+            "top_parent_native_pid": pl.Int64,
+            "top_parent_pid_id": pl.String,
+            "top_parent_executable_name": pl.String,
+            "top_parent_cmdline": pl.String,
+            "top_parent_pid_start_time": pl.Datetime("ns"),
+            "depth": pl.Int32,
+            "native_pid": pl.Int64,
+            "native_thread_id": pl.Int64,
+            "pid_id": pl.String,
+        }
+    )
+
+    if not seed_pids:
+        return _empty
+
+    pid_list = ", ".join(str(p) for p in seed_pids)
+
+    sql = text(f"""
+        WITH RECURSIVE
+        roots AS (
+            SELECT DISTINCT
+                pid_id              AS top_parent_pid_id,
+                native_pid          AS top_parent_native_pid,
+                executable_name     AS top_parent_executable_name,
+                cmdline             AS top_parent_cmdline,
+                pid_start_time      AS top_parent_pid_start_time
+            FROM logical_entity
+            WHERE native_pid IN ({pid_list})
+        ),
+        procs AS (
+            SELECT DISTINCT
+                pid_id, native_pid, parent_pid_id, native_parent_pid,
+                executable_name, cmdline, pid_start_time
+            FROM logical_entity
+        ),
+        tree AS (
+            SELECT
+                r.top_parent_pid_id,
+                r.top_parent_native_pid,
+                r.top_parent_executable_name,
+                r.top_parent_cmdline,
+                r.top_parent_pid_start_time,
+                p.pid_id,
+                p.native_pid,
+                p.parent_pid_id,
+                p.native_parent_pid,
+                p.executable_name,
+                p.cmdline,
+                p.pid_start_time,
+                0 AS depth,
+                [p.pid_id] AS path
+            FROM procs p
+            JOIN roots r ON p.pid_id = r.top_parent_pid_id
+
+            UNION ALL
+
+            SELECT
+                t.top_parent_pid_id,
+                t.top_parent_native_pid,
+                t.top_parent_executable_name,
+                t.top_parent_cmdline,
+                t.top_parent_pid_start_time,
+                c.pid_id,
+                c.native_pid,
+                c.parent_pid_id,
+                c.native_parent_pid,
+                c.executable_name,
+                c.cmdline,
+                c.pid_start_time,
+                t.depth + 1,
+                list_append(t.path, c.pid_id)
+            FROM tree t
+            JOIN procs c ON c.parent_pid_id = t.pid_id
+            WHERE NOT list_contains(t.path, c.pid_id)
+        )
+        SELECT
+            t.top_parent_native_pid,
+            t.top_parent_pid_id,
+            t.top_parent_executable_name,
+            t.top_parent_cmdline,
+            t.top_parent_pid_start_time,
+            t.depth,
+            le.id,
+            le.native_thread_id,
+            le.native_pid,
+            le.pid_id,
+            le.native_parent_tid,
+            le.parent_tid_id,
+            le.native_parent_pid,
+            le.parent_pid_id,
+            le.executable_name,
+            le.cmdline,
+            le.start_time,
+            le.pid_start_time,
+            le.parent_tid_start_time,
+            le.parent_pid_start_time,
+            le.resource_group_id,
+            le.resource_group_name,
+            le.user_id,
+            le.group_id
+        FROM tree t
+        JOIN logical_entity le ON le.pid_id = t.pid_id
+        ORDER BY t.top_parent_native_pid, t.depth, le.pid_start_time, le.native_pid
+    """)
+
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(sql)
+            rows = result.fetchall()
+            columns = list(result.keys())
+
+        if not rows:
+            return _empty
+
+        return pl.DataFrame(rows, schema=columns, orient="row")
+
+    except Exception as e:
+        logger.warning(f"get_descendant_threads query failed: {e}")
+        return _empty
+
+
 def get_performance_metrics_for_pids(
     engine: Engine,
     pids: list[int],
