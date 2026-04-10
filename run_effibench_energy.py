@@ -172,8 +172,11 @@ def stop_metrion(proc: subprocess.Popen) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_script(script_text: str) -> tuple[int, datetime, datetime, int | None]:
-    """Write script to a temp file, execute it, return (pid, start, end, returncode)."""
+def run_script(
+    script_text: str,
+    timeout_seconds: float | None = None,
+) -> tuple[int, datetime, datetime, int | None, bool]:
+    """Write script to a temp file, execute it, return (pid, start, end, returncode, timed_out)."""
     with tempfile.NamedTemporaryFile(
         suffix=".py", prefix="metrion_effibench_", delete=False, mode="w", encoding="utf-8"
     ) as f:
@@ -186,11 +189,34 @@ def run_script(script_text: str) -> tuple[int, datetime, datetime, int | None]:
             [sys.executable, script_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         pid = proc.pid
-        proc.wait()
+        timed_out = False
+        try:
+            if timeout_seconds is not None and timeout_seconds > 0:
+                proc.wait(timeout=timeout_seconds)
+            else:
+                proc.wait()
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            logger.warning(
+                f"[runner] Script PID={pid} exceeded timeout of {timeout_seconds}s; terminating process group."
+            )
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
         end_time = datetime.now(UTC)
-        return pid, start_time, end_time, proc.returncode
+        return pid, start_time, end_time, proc.returncode, timed_out
     finally:
         os.unlink(script_path)
 
@@ -483,6 +509,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--limit", type=int, default=None, help="Only process the first N entries (debug).")
     p.add_argument(
+        "--entry-timeout",
+        type=float,
+        default=120.0,
+        help="Max runtime in seconds per entry script. Use 0 or negative to disable (default: 120).",
+    )
+    p.add_argument(
         "--warmup", type=int, default=20, help="Seconds to wait for metrion to initialise before running scripts."
     )
     p.add_argument(
@@ -598,7 +630,9 @@ def main() -> None:
                 continue
 
             try:
-                pid, start_time, end_time, returncode = run_script(script_text)
+                pid, start_time, end_time, returncode, timed_out = run_script(script_text, args.entry_timeout)
+                if timed_out:
+                    logger.warning(f"{prefix} … TIMEOUT after {args.entry_timeout}s (rc={returncode})")
                 records.append(
                     {
                         "source_entry_index": i,
@@ -611,7 +645,7 @@ def main() -> None:
                         "end_time": end_time.isoformat(),
                         "energy": {},
                         "performance": {},
-                        "error": "",
+                        "error": f"execution_timeout: exceeded {args.entry_timeout}s" if timed_out else "",
                     }
                 )
             except Exception as e:
