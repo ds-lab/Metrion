@@ -161,7 +161,7 @@ def stop_metrion(proc: subprocess.Popen) -> None:
             logger.info(f"[metrion] Exited (rc={rc}) after {elapsed:.0f}s")
             break
         elapsed = time.monotonic() - t0
-        logger.info(f"[metrion] Waiting for graceful shutdown … {elapsed:.0f}s elapsed \n")
+        logger.info(f"[metrion] Waiting for graceful shutdown … {elapsed:.0f}s elapsed")
         time.sleep(5)
     log_file = getattr(proc, "_log_file", None)
     if log_file is not None:
@@ -451,7 +451,7 @@ def _run_analysis(records: list[dict], db_path: Path, db_type: str) -> None:
         logger.info(
             f"[db] problem={rec['problem_idx']} pids={rec['all_pids']} "
             f"cpu_energy={rec['energy'].get('cpu_total_energy_j')} J "
-            f"cycles={rec['performance'].get('unhalted_cycles')} \n"
+            f"cycles={rec['performance'].get('unhalted_cycles')}"
         )
 
 
