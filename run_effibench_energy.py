@@ -39,10 +39,6 @@ import yaml
 from loguru import logger
 from tqdm import tqdm
 
-# Route loguru through tqdm.write so progress bars aren't mangled by log lines.
-logger.remove()
-logger.add(lambda msg: tqdm.write(msg, end=""), colorize=True)
-
 # ---------------------------------------------------------------------------
 # Helpers copied from test.py (build_runnable_script and dependencies).
 # test.py is not a proper module, so we inline what we need.
@@ -487,7 +483,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--limit", type=int, default=None, help="Only process the first N entries (debug).")
     p.add_argument(
-        "--warmup", type=int, default=45, help="Seconds to wait for metrion to initialise before running scripts."
+        "--warmup", type=int, default=20, help="Seconds to wait for metrion to initialise before running scripts."
     )
     p.add_argument(
         "--log-dir",
@@ -561,10 +557,22 @@ def main() -> None:
 
     # --- Phase B: run scripts (all input files inside a single metrion session) ---
     file_records: list[tuple[Path, list[dict]]] = []
-    for input_file, entries in tqdm(file_entries, desc="Processing input files"):
+    for input_file, entries in tqdm(
+        file_entries,
+        desc="Processing input files",
+        unit="file",
+        file=sys.stdout,
+    ):
         records: list[dict] = []
         total = len(entries)
-        for i, entry in enumerate(entries):
+        for i, entry in tqdm(
+            enumerate(entries),
+            total=total,
+            desc=f"Entries in {input_file.name}",
+            unit="entry",
+            file=sys.stdout,
+            leave=False,
+        ):
             problem_idx = entry.get("problem_idx")
             task_name = entry.get("task_name", "")
             prefix = f"[{i + 1}/{total}|{input_file.name}] problem={problem_idx} task={task_name!r}"
