@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -106,13 +107,37 @@ def _strip_markdown_fences(code: str) -> str:
     return code
 
 
+def _find_class_name(code: str) -> str | None:
+    """Return the first class name defined in *code*, or None."""
+    m = re.search(r"^class\s+(\w+)", code, re.MULTILINE)
+    return m.group(1) if m else None
+
+
 def build_runnable_script(entry: dict) -> str | None:
+    """
+    Reproduce EffiLearner's add_string_to_py_file() for the EffiBench dataset.
+    Returns None if the entry can't be turned into a runnable script.
+    """
     completion = entry.get("completion") or ""
     test_case = entry.get("test_case") or ""
-    if not completion or "class Solution" not in completion:
+    if not completion:
         return None
+
     completion = _strip_markdown_fences(completion)
+
+    cls_name = _find_class_name(completion)
+    if cls_name is None:
+        return None
+
+    # Cap test cases at 100 lines, matching add_string_to_py_file().
     test_case = "\n".join(test_case.split("\n")[:100])
+
+    # If the class isn't called Solution but the test harness expects one,
+    # add an alias so `solution = Solution()` still works.
+    alias = ""
+    if cls_name != "Solution" and "Solution()" in test_case:
+        alias = f"\nSolution = {cls_name}\n"
+
     return (
         IMPORT_PKG
         + "\n"
@@ -121,6 +146,7 @@ def build_runnable_script(entry: dict) -> str | None:
         + LIST_NODE_TEXT
         + "\n"
         + completion
+        + alias
         + "\nsolution=Solution()\n"
         + test_case
     )
