@@ -144,6 +144,7 @@ def start_metrion(config_path: Path, log_dir: Path) -> tuple[subprocess.Popen, P
         cmd,
         stdout=log_file,
         stderr=log_file,
+        start_new_session=True,
     )
     proc._log_file = log_file  # keep reference so it stays open
     return proc, log_path
