@@ -749,10 +749,10 @@ def get_performance_metrics_for_pids(
     sql = text(f"""
         SELECT
             le.native_pid,
-            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_UNHALTED_CYCLES' THEN m.value ELSE 0 END) AS unhalted_cycles,
-            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_TIME'             THEN m.value ELSE 0 END) AS kernel_time_ms,
-            MAX(CASE WHEN m.metric_id = 'DRAM_SOCKET_PID_MEMORY'        THEN m.value ELSE NULL END) AS dram_memory_mb,
-            MAX(CASE WHEN m.metric_id = 'GPU_DEVICE_PID_MEMORY'         THEN m.value ELSE NULL END) AS gpu_memory_mb
+            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_UNHALTED_CYCLES' THEN m.value ELSE 0.0 END) AS unhalted_cycles,
+            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_TIME'             THEN m.value ELSE 0.0 END) AS kernel_time_ms,
+            MAX(CASE WHEN m.metric_id = 'DRAM_SOCKET_PID_MEMORY'        THEN m.value ELSE 0.0 END) AS dram_memory_mb,
+            MAX(CASE WHEN m.metric_id = 'GPU_DEVICE_PID_MEMORY'         THEN m.value ELSE 0.0 END) AS gpu_memory_mb
         FROM measurement m
         JOIN logical_entity le ON m.logical_entity_id = le.id
         WHERE le.native_pid IN ({pid_list})
@@ -771,7 +771,6 @@ def get_performance_metrics_for_pids(
         with engine.connect() as conn:
             result = conn.execute(sql)
             rows = result.fetchall()
-            columns = list(result.keys())
 
         if not rows:
             return pl.DataFrame(
@@ -784,15 +783,16 @@ def get_performance_metrics_for_pids(
                 }
             )
 
-        df = pl.DataFrame(rows, schema=columns, orient="row")
-        df = df.cast(
-            {
+        df = pl.DataFrame(
+            rows,
+            schema={
                 "native_pid": pl.Int64,
                 "unhalted_cycles": pl.Float64,
                 "kernel_time_ms": pl.Float64,
                 "dram_memory_mb": pl.Float64,
                 "gpu_memory_mb": pl.Float64,
-            }
+            },
+            orient="row",
         )
         return df
 

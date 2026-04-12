@@ -50,6 +50,18 @@ class ListNode:
     def __init__(self, val=0, next=None):
         self.val = val
         self.next = next
+    def __eq__(self, other):
+        if self is other: return True
+        a, b = self, other
+        seen = set()
+        while a is not None and b is not None:
+            if a is b: return True
+            if id(a) in seen: return id(a) == id(b)
+            seen.add(id(a))
+            if not hasattr(b, 'val') or a.val != b.val: return False
+            a, b = a.next, b.next
+        return a is None and b is None
+    def __hash__(self): return id(self)
 """
 
 TREE_NODE_TEXT = """
@@ -59,7 +71,51 @@ class TreeNode:
         self.left = left
         self.right = right
         self.next = next
-"""
+    def __eq__(self, other):
+        if self is other: return True
+        if other is None: return False
+        stack = [(self, other)]
+        seen = set()
+        while stack:
+            a, b = stack.pop()
+            if a is b: continue
+            if a is None or b is None: return False
+            if not hasattr(b, 'val') or a.val != b.val: return False
+            key = (id(a), id(b))
+            if key in seen: continue
+            seen.add(key)
+            stack.append((getattr(a, 'left', None), getattr(b, 'left', None)))
+            stack.append((getattr(a, 'right', None), getattr(b, 'right', None)))
+        return True
+    def __hash__(self): return id(self)
+
+class BigArray:
+    def __init__(self, arr):
+        self._arr = list(arr)
+    def at(self, i):
+        return self._arr[i]
+    def size(self):
+        return len(self._arr)
+
+class Node:
+    def __init__(self, val=0, left=None, right=None, next=None, children=None, random=None, neighbors=None, parent=None):
+        self.val = val
+        self.left = left
+        self.right = right
+        self.next = next
+        self.children = children if children is not None else []
+        self.random = random
+        self.neighbors = neighbors if neighbors is not None else []
+        self.parent = parent
+    def __eq__(self, other):
+        if self is other: return True
+        if other is None or not hasattr(other, 'val'): return False
+        if self.val != other.val: return False
+        if (self.left or None) != (other.left or None): return False
+        if (self.right or None) != (other.right or None): return False
+        return list(self.children or []) == list(getattr(other, 'children', None) or [])
+    def __hash__(self): return id(self)
+"""  # noqa: E501
 
 IMPORT_PKG = """
 from typing import *
@@ -75,6 +131,7 @@ from random import *
 from itertools import *
 from functools import *
 from operator import *
+pow = __builtins__['pow'] if isinstance(__builtins__, dict) else __builtins__.pow
 
 import string
 import re
@@ -107,10 +164,39 @@ def _strip_markdown_fences(code: str) -> str:
     return code
 
 
+_HELPER_CLASSES = {
+    "TreeNode",
+    "ListNode",
+    "Node",
+    "SegmentTree",
+    "FenwickTree",
+    "BIT",
+    "BinaryIndexedTree",
+    "Trie",
+    "TrieNode",
+    "UnionFind",
+    "DSU",
+    "DisjointSet",
+    "SegTree",
+    "LazySegTree",
+    "Heap",
+    "LinkedList",
+    "DoublyLinkedList",
+    "DLNode",
+    "DLinkedNode",
+    "DLL",
+    "MultiSet",
+    "SortedList",
+}
+
+
 def _find_class_name(code: str) -> str | None:
-    """Return the first class name defined in *code*, or None."""
-    m = re.search(r"^class\s+(\w+)", code, re.MULTILINE)
-    return m.group(1) if m else None
+    """Return the main user class name — prefers Solution, then the last non-helper."""
+    names = re.findall(r"^\s*class\s+(\w+)", code, re.MULTILINE)
+    if "Solution" in names:
+        return "Solution"
+    candidates = [n for n in names if n not in _HELPER_CLASSES]
+    return candidates[-1] if candidates else (names[-1] if names else None)
 
 
 def build_runnable_script(entry: dict) -> str | None:
@@ -123,33 +209,34 @@ def build_runnable_script(entry: dict) -> str | None:
     if not completion:
         return None
 
-    completion = _strip_markdown_fences(completion)
-
-    cls_name = _find_class_name(completion)
-    if cls_name is None:
-        return None
+    completion = _strip_markdown_fences(completion).strip()
 
     # Cap test cases at 100 lines, matching add_string_to_py_file().
-    test_case = "\n".join(test_case.split("\n")[:100])
+    test_lines = test_case.split("\n")[:100]
+    test_case = "\n".join(test_lines)
 
-    # If the class isn't called Solution but the test harness expects one,
-    # add an alias so `solution = Solution()` still works.
-    alias = ""
-    if cls_name != "Solution" and "Solution()" in test_case:
-        alias = f"\nSolution = {cls_name}\n"
+    cls_name = _find_class_name(completion)
 
-    return (
-        IMPORT_PKG
-        + "\n"
-        + TREE_NODE_TEXT
-        + "\n"
-        + LIST_NODE_TEXT
-        + "\n"
-        + completion
-        + alias
-        + "\nsolution=Solution()\n"
-        + test_case
-    )
+    # Check if the test harness creates its own solution variable.
+    first_test_line = test_case.strip().split("\n")[0].strip()
+    tests_create_solution = first_test_line.startswith("solution =") or first_test_line.startswith("solution=")
+
+    glue = ""
+    if cls_name == "Solution":
+        if not tests_create_solution:
+            glue = "\nsolution = Solution()\n"
+    elif cls_name is not None:
+        # Non-Solution class (e.g. MedianFinder, TreeAncestor, etc.)
+        if not tests_create_solution:
+            glue = f"\nSolution = {cls_name}\nsolution = Solution()\n"
+        else:
+            glue = f"\nSolution = {cls_name}\n"
+    else:
+        # No class found — function-only code; just concatenate.
+        if not tests_create_solution:
+            glue = "\n"
+
+    return IMPORT_PKG + "\n" + TREE_NODE_TEXT + "\n" + LIST_NODE_TEXT + "\n" + completion + glue + test_case
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +722,7 @@ def main() -> None:
             problem_idx = entry.get("problem_idx")
             task_name = entry.get("task_name", "")
             prefix = f"[{i + 1}/{total}|{input_file.name}] problem={problem_idx} task={task_name!r}"
+            difficulty = entry.get("difficulty", "")
 
             script_text = build_runnable_script(entry)
             if script_text is None:
@@ -644,6 +732,7 @@ def main() -> None:
                         "source_entry_index": i,
                         "problem_idx": problem_idx,
                         "task_name": task_name,
+                        "difficulty": difficulty,
                         "pid": None,
                         "all_pids": [],
                         "returncode": None,
@@ -665,6 +754,7 @@ def main() -> None:
                         "source_entry_index": i,
                         "problem_idx": problem_idx,
                         "task_name": task_name,
+                        "difficulty": difficulty,
                         "pid": pid,
                         "all_pids": [pid],
                         "returncode": returncode,
@@ -682,6 +772,7 @@ def main() -> None:
                         "source_entry_index": i,
                         "problem_idx": problem_idx,
                         "task_name": task_name,
+                        "difficulty": difficulty,
                         "pid": None,
                         "all_pids": [],
                         "returncode": None,
