@@ -78,14 +78,16 @@ WITH
             ei.interval_end,
             m.logical_entity_id,
             e.parent_id AS package_id,
-            SUM(m.value) AS WORK
+            SUM(m.value * CASE WHEN m."end_ts" = m."start_ts" THEN 1.0
+                ELSE (epoch(LEAST(m."end_ts", ei.interval_end)) - epoch(GREATEST(m."start_ts", ei.interval_start)))
+                   / (epoch(m."end_ts") - epoch(m."start_ts")) END) AS WORK
         FROM
             energy_interval_pkg_tmp ei,
             measurement m,
             entity e
         WHERE
-            m."start_ts" >= ei.interval_start
-            AND m."end_ts" <= ei.interval_end
+            m."start_ts" < ei.interval_end
+            AND m."end_ts" > ei.interval_start
             AND e.id = m.physical_entity_id
             AND e.parent_id = ei.package_id
             AND m.metric_id = 'CPU_CORE_PID_WORK'
@@ -117,14 +119,16 @@ WITH
             ei.interval_end,
             m.logical_entity_id,
             e.parent_id AS package_id,
-            SUM(m.value) / 1000 AS exec_time_s -- convert ms to s
+            SUM(m.value * CASE WHEN m."end_ts" = m."start_ts" THEN 1.0
+                ELSE (epoch(LEAST(m."end_ts", ei.interval_end)) - epoch(GREATEST(m."start_ts", ei.interval_start)))
+                   / (epoch(m."end_ts") - epoch(m."start_ts")) END) / 1000 AS exec_time_s -- convert ms to s
         FROM
             energy_interval_pkg_tmp ei,
             measurement m,
             entity e
         WHERE
-            m.start_ts >= ei.interval_start
-            AND m.end_ts <= ei.interval_end
+            m.start_ts < ei.interval_end
+            AND m.end_ts > ei.interval_start
             AND e.id = m.physical_entity_id
             AND e.parent_id = ei.package_id
             AND m.metric_id = 'CPU_CORE_PID_TIME'

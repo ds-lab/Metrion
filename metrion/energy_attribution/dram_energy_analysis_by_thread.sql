@@ -84,15 +84,17 @@ dram_memory_usage_by_thread AS (
         dei.interval_start,
         dei.interval_end,
         m.logical_entity_id,
-        SUM(m.value) AS total_memory_usage_by_thread
+        SUM(m.value * CASE WHEN m."end_ts" = m.start_ts THEN 1.0
+            ELSE (epoch(LEAST(m."end_ts", dei.interval_end)) - epoch(GREATEST(m.start_ts, dei.interval_start)))
+               / (epoch(m."end_ts") - epoch(m.start_ts)) END) AS total_memory_usage_by_thread
     FROM energy_interval_dram_tmp AS dei
     JOIN measurement AS m
       ON m.physical_entity_id = dei.dram_id
      AND m.metric_id = 'DRAM_SOCKET_PID_MEMORY'
      AND m.value IS NOT NULL
      AND ABS(m.value) < 1e307
-     AND m.start_ts >= dei.interval_start
-     AND m."end_ts" <= dei.interval_end
+     AND m.start_ts < dei.interval_end
+     AND m."end_ts" > dei.interval_start
     GROUP BY
         dei.dram_id, dei.cpu_id, dei.interval_start, dei.interval_end, m.logical_entity_id
 ),
@@ -120,7 +122,9 @@ dram_local_reads_by_thread AS (
         dei.interval_start,
         dei.interval_end,
         m.logical_entity_id,
-        SUM(m.value) AS accesses
+        SUM(m.value * CASE WHEN m."end_ts" = m.start_ts THEN 1.0
+            ELSE (epoch(LEAST(m."end_ts", dei.interval_end)) - epoch(GREATEST(m.start_ts, dei.interval_start)))
+               / (epoch(m."end_ts") - epoch(m.start_ts)) END) AS accesses
     FROM
         energy_interval_dram_tmp dei,
         entity e,
@@ -129,8 +133,8 @@ dram_local_reads_by_thread AS (
         e.parent_id = dei.cpu_id              -- cores of this CPU
         AND m.physical_entity_id = e.id
         AND m.metric_id = 'CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM'
-        AND m.start_ts >= dei.interval_start
-        AND m."end_ts"  <= dei.interval_end
+        AND m.start_ts < dei.interval_end
+        AND m."end_ts"  > dei.interval_start
     GROUP BY
         dei.dram_id, dei.cpu_id, dei.interval_start, dei.interval_end, m.logical_entity_id
 ),
@@ -143,15 +147,17 @@ dram_remote_reads_by_thread AS (
         dei.interval_start,
         dei.interval_end,
         m.logical_entity_id,
-        SUM(m.value) AS accesses
+        SUM(m.value * CASE WHEN m."end_ts" = m.start_ts THEN 1.0
+            ELSE (epoch(LEAST(m."end_ts", dei.interval_end)) - epoch(GREATEST(m.start_ts, dei.interval_start)))
+               / (epoch(m."end_ts") - epoch(m.start_ts)) END) AS accesses
     FROM
         energy_interval_dram_tmp dei,
         entity e,
         measurement m
     WHERE
         m.metric_id = 'CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM'
-        AND m.start_ts >= dei.interval_start
-        AND m."end_ts"  <= dei.interval_end
+        AND m.start_ts < dei.interval_end
+        AND m."end_ts"  > dei.interval_start
         AND e.id = m.physical_entity_id
         AND e.parent_id <> dei.cpu_id
     GROUP BY
