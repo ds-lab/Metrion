@@ -708,6 +708,7 @@ def get_performance_metrics_for_pids(
 
     Fetches the following metrics for each PID in the given time window:
 
+    - ``CPU_CORE_PID_WORK``           — summed scheduler work metric
     - ``CPU_CORE_PID_UNHALTED_CYCLES`` — summed unhalted core cycles
     - ``CPU_CORE_PID_TIME``            — summed kernel execution time (ms)
     - ``DRAM_SOCKET_PID_MEMORY``       — peak DRAM memory usage (MB)
@@ -728,7 +729,7 @@ def get_performance_metrics_for_pids(
     -------
     polars.DataFrame
         Columns: ``native_pid``, ``unhalted_cycles``, ``kernel_time_ms``,
-        ``dram_memory_mb``, ``gpu_memory_mb``.
+        ``dram_memory_mb``, ``gpu_memory_mb``, ``cpu_core_pid_work``.
         Returns an empty DataFrame if *pids* is empty.
     """
     if not pids:
@@ -739,6 +740,7 @@ def get_performance_metrics_for_pids(
                 "kernel_time_ms": pl.Float64,
                 "dram_memory_mb": pl.Float64,
                 "gpu_memory_mb": pl.Float64,
+                "cpu_core_pid_work": pl.Float64,
             }
         )
 
@@ -749,6 +751,7 @@ def get_performance_metrics_for_pids(
     sql = text(f"""
         SELECT
             le.native_pid,
+            SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_WORK' THEN m.value ELSE 0.0 END) AS cpu_core_pid_work,
             SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_UNHALTED_CYCLES' THEN m.value ELSE 0.0 END) AS unhalted_cycles,
             SUM(CASE WHEN m.metric_id = 'CPU_CORE_PID_TIME'             THEN m.value ELSE 0.0 END) AS kernel_time_ms,
             MAX(CASE WHEN m.metric_id = 'DRAM_SOCKET_PID_MEMORY'        THEN m.value ELSE 0.0 END) AS dram_memory_mb,
@@ -757,6 +760,7 @@ def get_performance_metrics_for_pids(
         JOIN logical_entity le ON m.logical_entity_id = le.id
         WHERE le.native_pid IN ({pid_list})
           AND m.metric_id IN (
+              'CPU_CORE_PID_WORK',
               'CPU_CORE_PID_UNHALTED_CYCLES',
               'CPU_CORE_PID_TIME',
               'DRAM_SOCKET_PID_MEMORY',
@@ -776,6 +780,7 @@ def get_performance_metrics_for_pids(
             return pl.DataFrame(
                 schema={
                     "native_pid": pl.Int64,
+                    "cpu_core_pid_work": pl.Float64,
                     "unhalted_cycles": pl.Float64,
                     "kernel_time_ms": pl.Float64,
                     "dram_memory_mb": pl.Float64,
@@ -787,6 +792,7 @@ def get_performance_metrics_for_pids(
             rows,
             schema={
                 "native_pid": pl.Int64,
+                "cpu_core_pid_work": pl.Float64,
                 "unhalted_cycles": pl.Float64,
                 "kernel_time_ms": pl.Float64,
                 "dram_memory_mb": pl.Float64,
@@ -801,6 +807,7 @@ def get_performance_metrics_for_pids(
         return pl.DataFrame(
             schema={
                 "native_pid": pl.Int64,
+                "cpu_core_pid_work": pl.Float64,
                 "unhalted_cycles": pl.Float64,
                 "kernel_time_ms": pl.Float64,
                 "dram_memory_mb": pl.Float64,
