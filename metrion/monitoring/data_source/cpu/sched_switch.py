@@ -31,6 +31,10 @@ from metrion.metric import (
     CPU_CORE_PID_WORK,
     Metric,
 )
+from metrion.monitoring.data_source.cpu.collection_plan import (
+    SchedSwitchCollectionPlan,
+    resolve_sched_switch_plan,
+)
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.cpu.utils import (
     CustomPerf,
@@ -86,10 +90,42 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         align=True,
     )
 
-    def __init__(self, config: RingBufferConfig, *, name: str | None = None, daemon: bool = True) -> None:
+    @classmethod
+    def start_singleton(
+        cls,
+        config: RingBufferConfig,
+        collection_plan: SchedSwitchCollectionPlan | None = None,
+        daemon: bool = True,
+    ):
+        with cls._singletons_lock:
+            existing = cls._singletons.get(cls)
+            if existing is not None and existing.is_alive():
+                logger.debug("sched_switch bpf: reusing existing singleton process")
+                return existing
+
+            plan = collection_plan or SchedSwitchCollectionPlan.all_enabled()
+            enabled_groups, disabled_groups = plan.perf_groups_summary()
+            logger.info(
+                "sched_switch bpf: starting process, collecting perf groups={}, skipping={}",
+                enabled_groups,
+                disabled_groups,
+            )
+            inst = cls(config=config, collection_plan=collection_plan, daemon=daemon)
+            inst.start()
+            cls._singletons[cls] = inst
+            return inst
+
+    def __init__(
+        self,
+        config: RingBufferConfig,
+        collection_plan: SchedSwitchCollectionPlan | None = None,
+        name: str | None = None,
+        daemon: bool = True,
+    ) -> None:
         super().__init__(config, name=name, daemon=daemon)
         # Enable fast raw bytes mode
         self._use_raw_bytes = True
+        self._collection_plan = collection_plan or SchedSwitchCollectionPlan.all_enabled()
 
     @override
     def _parse_raw_events(self, raw_events: list[bytes]) -> pl.DataFrame:
@@ -198,6 +234,8 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         """
         Set up and configure performance monitoring events for CPU cores.
 
+        Opens only the perf counter groups required by the enabled metrics in config.
+
         This method initializes performance counters for monitoring:
         - Unhalted core cycles (UCC) for both P-cores and E-cores
         - APERF (Actual Performance Frequency Clock Count)
@@ -217,6 +255,12 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         - https://perfwiki.github.io/main/print/253669.pdf
         - https://man7.org/linux/man-pages/man1/perf-stat.1.html
         """
+        collecting, skipping = self._collection_plan.perf_groups_summary()
+        logger.info(
+            "sched_switch BPF: setting up perf events, collecting={}, skipping={}",
+            collecting,
+            skipping,
+        )
 
         # Open perf events for unhalted core cycles, aperf, mperf
         # 4 means RAW_TYPE
@@ -255,11 +299,12 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             core_cpus = []
 
         # Setup FDs lists
+        fds_ucc: list[int] = []
         fds_load_local_dram: list[int] = []
         fds_load_remote_dram: list[int] = []
         fds_store: list[int] = []
 
-        if len(atom_cpus) != 0 and len(core_cpus) != 0:
+        if self._collection_plan.needs_cpu_perf and len(atom_cpus) != 0 and len(core_cpus) != 0:
             # hybrid system detected
             # select only cores in topology
             # Unhalted Core Cycles for Atom cores, read from /sys/bus/event_source/devices/cpu_atom/events/cpu-cycles
@@ -343,7 +388,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
 
             fds_cache_miss = fds_l2_rqsts_miss + fds_llc_miss_atom  # noqa: F841
 
-        else:
+        elif self._collection_plan.needs_cpu_perf:
             # no hybrid system, use only unhalted core cycles for all cores
             type = read_perf_type("/sys/bus/event_source/devices/cpu/type")
             config = read_perf_event("/sys/bus/event_source/devices/cpu/events/cpu-cycles")
@@ -364,135 +409,144 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 pid=-1,
             )
 
-            # L2_RQSTS.MISS
-            # attr_l2_rqsts_miss = CustomPerf.perf_event_attr()
-            # attr_l2_rqsts_miss.type = 0x4
-            # attr_l2_rqsts_miss.config = 0x3F24
-            # attr_l2_rqsts_miss.size = ct.sizeof(CustomPerf.perf_event_attr)
-            # attr_l2_rqsts_miss.sample_period = 0
-            # attr_l2_rqsts_miss.sample_type = 0
-            # attr_l2_rqsts_miss.disabled = 0
-            # attr_l2_rqsts_miss.exclude_kernel = 0
-            # attr_l2_rqsts_miss.exclude_user = 0
-            # attr_l2_rqsts_miss.freq = 0
-            # attr_l2_rqsts_miss.exclude_guest = 0
-            # fds_cache_miss = CustomPerf.perf_custom_event_open_with_results(attr=attr_l2_rqsts_miss, pid=-1)
-
-            # Events for DRAM Energy Consumption
+        needs_memory_perf = (
+            self._collection_plan.needs_l3_local
+            or self._collection_plan.needs_l3_remote
+            or self._collection_plan.needs_stores
+        )
+        if needs_memory_perf and not (len(atom_cpus) != 0 and len(core_cpus) != 0):
+            # Events for DRAM Energy Consumption (non-hybrid systems only)
             # https://perfmon-events.intel.com/skylake_server.html
-            event_load_local_dram = "mem_load_l3_miss_retired.local_dram"
-            event_load_remote_dram = "mem_load_l3_miss_retired.remote_dram"
-            event_store = "mem_inst_retired.all_stores"
+            if self._collection_plan.needs_l3_local:
+                event_load_local_dram = "mem_load_l3_miss_retired.local_dram"
+                config_load_local_dram = resolve_with_strace(event_load_local_dram, cpu=0)
+                attr_load_local_dram = CustomPerf.perf_event_attr()
+                attr_load_local_dram.type = config_load_local_dram["type"]
+                attr_load_local_dram.config = config_load_local_dram["config"]
+                attr_load_local_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
+                attr_load_local_dram.sample_period = 0
+                attr_load_local_dram.sample_type = 0
+                attr_load_local_dram.disabled = 0
+                attr_load_local_dram.exclude_kernel = 0
+                attr_load_local_dram.exclude_user = 0
+                attr_load_local_dram.freq = 0
+                attr_load_local_dram.exclude_guest = 0
+                attr_load_local_dram.config1 = config_load_local_dram.get("config1", 0)
+                fds_load_local_dram = CustomPerf.perf_custom_event_open_with_results(attr=attr_load_local_dram, pid=-1)
 
-            config_load_local_dram = resolve_with_strace(event_load_local_dram, cpu=0)
-            config_load_remote_dram = resolve_with_strace(event_load_remote_dram, cpu=0)
-            config_store = resolve_with_strace(event_store, cpu=0)
+            if self._collection_plan.needs_l3_remote:
+                event_load_remote_dram = "mem_load_l3_miss_retired.remote_dram"
+                config_load_remote_dram = resolve_with_strace(event_load_remote_dram, cpu=0)
+                attr_load_remote_dram = CustomPerf.perf_event_attr()
+                attr_load_remote_dram.type = config_load_remote_dram["type"]
+                attr_load_remote_dram.config = config_load_remote_dram["config"]
+                attr_load_remote_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
+                attr_load_remote_dram.sample_period = 0
+                attr_load_remote_dram.sample_type = 0
+                attr_load_remote_dram.disabled = 0
+                attr_load_remote_dram.exclude_kernel = 0
+                attr_load_remote_dram.exclude_user = 0
+                attr_load_remote_dram.freq = 0
+                attr_load_remote_dram.exclude_guest = 0
+                attr_load_remote_dram.config1 = config_load_remote_dram.get("config1", 0)
+                fds_load_remote_dram = CustomPerf.perf_custom_event_open_with_results(
+                    attr=attr_load_remote_dram, pid=-1
+                )
 
-            attr_load_local_dram = CustomPerf.perf_event_attr()
-            attr_load_local_dram.type = config_load_local_dram["type"]
-            attr_load_local_dram.config = config_load_local_dram["config"]
-            attr_load_local_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
-            attr_load_local_dram.sample_period = 0
-            attr_load_local_dram.sample_type = 0
-            attr_load_local_dram.disabled = 0
-            attr_load_local_dram.exclude_kernel = 0
-            attr_load_local_dram.exclude_user = 0
-            attr_load_local_dram.freq = 0
-            attr_load_local_dram.exclude_guest = 0
-            attr_load_local_dram.config1 = config_load_local_dram.get("config1", 0)
-            fds_load_local_dram = CustomPerf.perf_custom_event_open_with_results(attr=attr_load_local_dram, pid=-1)
+            if self._collection_plan.needs_stores:
+                event_store = "mem_inst_retired.all_stores"
+                config_store = resolve_with_strace(event_store, cpu=0)
+                attr_store = CustomPerf.perf_event_attr()
+                attr_store.type = config_store["type"]
+                attr_store.config = config_store["config"]
+                attr_store.size = ct.sizeof(CustomPerf.perf_event_attr)
+                attr_store.sample_period = 0
+                attr_store.sample_type = 0
+                attr_store.disabled = 0
+                attr_store.exclude_kernel = 0
+                attr_store.exclude_user = 0
+                attr_store.freq = 0
+                attr_store.exclude_guest = 0
+                attr_store.config1 = config_store.get("config1", 0)
+                fds_store = CustomPerf.perf_custom_event_open_with_results(attr=attr_store, pid=-1)
 
-            attr_load_remote_dram = CustomPerf.perf_event_attr()
-            attr_load_remote_dram.type = config_load_remote_dram["type"]
-            attr_load_remote_dram.config = config_load_remote_dram["config"]
-            attr_load_remote_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
-            attr_load_remote_dram.sample_period = 0
-            attr_load_remote_dram.sample_type = 0
-            attr_load_remote_dram.disabled = 0
-            attr_load_remote_dram.exclude_kernel = 0
-            attr_load_remote_dram.exclude_user = 0
-            attr_load_remote_dram.freq = 0
-            attr_load_remote_dram.exclude_guest = 0
-            attr_load_remote_dram.config1 = config_load_remote_dram.get("config1", 0)
-            fds_load_remote_dram = CustomPerf.perf_custom_event_open_with_results(attr=attr_load_remote_dram, pid=-1)
+        fds_aperf: list[int] = []
+        fds_mperf: list[int] = []
+        if self._collection_plan.needs_cpu_perf:
+            # run the following command to obtain correct attribute values
+            # sudo strace -e perf_event_open -v perf stat -e msr/mperf/ -C 0 sleep 1 2>&1 | grep perf_event_open
+            # MPERF
+            mperf_type = read_perf_type("/sys/bus/event_source/devices/msr/type")
+            mperf_config = read_perf_event("/sys/bus/event_source/devices/msr/events/mperf")
+            attr_mperf = CustomPerf.perf_event_attr()
+            attr_mperf.type = mperf_type
+            attr_mperf.config = mperf_config
+            attr_mperf.size = ct.sizeof(CustomPerf.perf_event_attr)
+            attr_mperf.sample_period = 0
+            attr_mperf.sample_type = 0
+            attr_mperf.disabled = 0
+            attr_mperf.exclude_kernel = 0
+            attr_mperf.exclude_user = 0
+            attr_mperf.freq = 0
+            attr_mperf.exclude_guest = 0
+            fds_mperf = CustomPerf.perf_custom_event_open_with_results(attr=attr_mperf, pid=-1, group_fds=fds_ucc)
 
-            attr_store = CustomPerf.perf_event_attr()
-            attr_store.type = config_store["type"]
-            attr_store.config = config_store["config"]
-            attr_store.size = ct.sizeof(CustomPerf.perf_event_attr)
-            attr_store.sample_period = 0
-            attr_store.sample_type = 0
-            attr_store.disabled = 0
-            attr_store.exclude_kernel = 0
-            attr_store.exclude_user = 0
-            attr_store.freq = 0
-            attr_store.exclude_guest = 0
-            attr_store.config1 = config_store.get("config1", 0)
-            fds_store = CustomPerf.perf_custom_event_open_with_results(attr=attr_store, pid=-1)
-
-        # run the following command to obtain correct attribute values
-        # sudo strace -e perf_event_open -v perf stat -e msr/mperf/ -C 0 sleep 1 2>&1 | grep perf_event_open
-        # MPERF
-        mperf_type = read_perf_type("/sys/bus/event_source/devices/msr/type")
-        mperf_config = read_perf_event("/sys/bus/event_source/devices/msr/events/mperf")
-        attr_mperf = CustomPerf.perf_event_attr()
-        attr_mperf.type = mperf_type
-        attr_mperf.config = mperf_config
-        attr_mperf.size = ct.sizeof(CustomPerf.perf_event_attr)
-        attr_mperf.sample_period = 0
-        attr_mperf.sample_type = 0
-        attr_mperf.disabled = 0
-        attr_mperf.exclude_kernel = 0
-        attr_mperf.exclude_user = 0
-        attr_mperf.freq = 0
-        attr_mperf.exclude_guest = 0
-        fds_mperf = CustomPerf.perf_custom_event_open_with_results(attr=attr_mperf, pid=-1, group_fds=fds_ucc)
-
-        # APERF
-        aperf_type = read_perf_type("/sys/bus/event_source/devices/msr/type")
-        aperf_config = read_perf_event("/sys/bus/event_source/devices/msr/events/aperf")
-        attr_aperf = CustomPerf.perf_event_attr()
-        attr_aperf.type = aperf_type
-        attr_aperf.config = aperf_config
-        attr_aperf.size = ct.sizeof(CustomPerf.perf_event_attr)
-        attr_aperf.sample_period = 0
-        attr_aperf.sample_type = 0
-        attr_aperf.disabled = 0
-        attr_aperf.exclude_kernel = 0
-        attr_aperf.exclude_user = 0
-        attr_aperf.freq = 0
-        attr_aperf.exclude_guest = 0
-        fds_aperf = CustomPerf.perf_custom_event_open_with_results(attr=attr_aperf, pid=-1, group_fds=fds_ucc)
+            # APERF
+            aperf_type = read_perf_type("/sys/bus/event_source/devices/msr/type")
+            aperf_config = read_perf_event("/sys/bus/event_source/devices/msr/events/aperf")
+            attr_aperf = CustomPerf.perf_event_attr()
+            attr_aperf.type = aperf_type
+            attr_aperf.config = aperf_config
+            attr_aperf.size = ct.sizeof(CustomPerf.perf_event_attr)
+            attr_aperf.sample_period = 0
+            attr_aperf.sample_type = 0
+            attr_aperf.disabled = 0
+            attr_aperf.exclude_kernel = 0
+            attr_aperf.exclude_user = 0
+            attr_aperf.freq = 0
+            attr_aperf.exclude_guest = 0
+            fds_aperf = CustomPerf.perf_custom_event_open_with_results(attr=attr_aperf, pid=-1, group_fds=fds_ucc)
 
         # Attach the perf events to the BPF program
-        # CPU Events
-        for i, fd in enumerate(fds_ucc):
-            self._bpf["cycles_core"][self._bpf["cycles_core"].Key(i)] = self._bpf["cycles_core"].Leaf(fd)  # ty:ignore[not-subscriptable]
-            self._bpf["cycles_core"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
-        for i, apfd in enumerate(fds_aperf):
-            self._bpf["aperf_core"][self._bpf["aperf_core"].Key(i)] = self._bpf["aperf_core"].Leaf(apfd)  # ty:ignore[not-subscriptable]
-            self._bpf["aperf_core"]._open_key_fds[i] = apfd  # ty:ignore[not-subscriptable]
-        for i, mpfd in enumerate(fds_mperf):
-            self._bpf["mperf_core"][self._bpf["mperf_core"].Key(i)] = self._bpf["mperf_core"].Leaf(mpfd)  # ty:ignore[not-subscriptable]
-            self._bpf["mperf_core"]._open_key_fds[i] = mpfd  # ty:ignore[not-subscriptable]
+        if self._collection_plan.needs_cpu_perf and self._bpf is not None:
+            for i, fd in enumerate(fds_ucc):
+                self._bpf["cycles_core"][self._bpf["cycles_core"].Key(i)] = self._bpf["cycles_core"].Leaf(fd)  # ty:ignore[not-subscriptable]
+                self._bpf["cycles_core"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+            for i, apfd in enumerate(fds_aperf):
+                self._bpf["aperf_core"][self._bpf["aperf_core"].Key(i)] = self._bpf["aperf_core"].Leaf(apfd)  # ty:ignore[not-subscriptable]
+                self._bpf["aperf_core"]._open_key_fds[i] = apfd  # ty:ignore[not-subscriptable]
+            for i, mpfd in enumerate(fds_mperf):
+                self._bpf["mperf_core"][self._bpf["mperf_core"].Key(i)] = self._bpf["mperf_core"].Leaf(mpfd)  # ty:ignore[not-subscriptable]
+                self._bpf["mperf_core"]._open_key_fds[i] = mpfd  # ty:ignore[not-subscriptable]
 
-        # Package Events
-        # for i, cache_miss_fd in enumerate(fds_cache_miss):
-        #     self._bpf["cache_miss"][self._bpf["cache_miss"].Key(i)] = self._bpf["cache_miss"].Leaf(cache_miss_fd)
-        #     self._bpf["cache_miss"]._open_key_fds[i] = cache_miss_fd
+        if self._collection_plan.needs_l3_local and self._bpf is not None:
+            for i, fd in enumerate(fds_load_local_dram):
+                self._bpf["load_local_perf"][self._bpf["load_local_perf"].Key(i)] = self._bpf["load_local_perf"].Leaf(
+                    fd
+                )  # ty:ignore[not-subscriptable]
+                self._bpf["load_local_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
 
-        # DRAM
-        for i, fd in enumerate(fds_load_local_dram):
-            self._bpf["load_local_perf"][self._bpf["load_local_perf"].Key(i)] = self._bpf["load_local_perf"].Leaf(fd)  # ty:ignore[not-subscriptable]
-            self._bpf["load_local_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+        if self._collection_plan.needs_l3_remote and self._bpf is not None:
+            for i, fd in enumerate(fds_load_remote_dram):
+                self._bpf["load_remote_perf"][self._bpf["load_remote_perf"].Key(i)] = self._bpf[
+                    "load_remote_perf"
+                ].Leaf(fd)  # ty:ignore[not-subscriptable]
+                self._bpf["load_remote_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
 
-        for i, fd in enumerate(fds_load_remote_dram):
-            self._bpf["load_remote_perf"][self._bpf["load_remote_perf"].Key(i)] = self._bpf["load_remote_perf"].Leaf(fd)  # ty:ignore[not-subscriptable]
-            self._bpf["load_remote_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+        if self._collection_plan.needs_stores and self._bpf is not None:
+            for i, fd in enumerate(fds_store):
+                self._bpf["store_perf"][self._bpf["store_perf"].Key(i)] = self._bpf["store_perf"].Leaf(fd)  # ty:ignore[not-subscriptable]
+                self._bpf["store_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
 
-        for i, fd in enumerate(fds_store):
-            self._bpf["store_perf"][self._bpf["store_perf"].Key(i)] = self._bpf["store_perf"].Leaf(fd)  # ty:ignore[not-subscriptable]
-            self._bpf["store_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+        logger.info(
+            "sched_switch BPF: attached perf fds (ucc={}, aperf={}, mperf={}, l3_local={}, l3_remote={}, stores={})",
+            len(fds_ucc),
+            len(fds_aperf),
+            len(fds_mperf),
+            len(fds_load_local_dram),
+            len(fds_load_remote_dram),
+            len(fds_store),
+        )
 
     @override
     def _attach_ringbuf(self) -> None:
@@ -607,7 +661,12 @@ class SchedSwitchMonitor(DataSource):
             # (optionally) initialize here or in __init__
         return cls._instance
 
-    def __init__(self, entities: Sequence[CPU], interval: float | None = None):
+    def __init__(
+        self,
+        entities: Sequence[CPU],
+        interval: float | None = None,
+        enabled_metrics: Sequence[Metric] | None = None,
+    ):
         """Initialize the SchedSwitchMonitor.
 
         Parameters
@@ -617,13 +676,27 @@ class SchedSwitchMonitor(DataSource):
             contains a single CPU entity representing all cores on the system.
         interval : float, optional
              The collection interval in seconds.
+        enabled_metrics : Sequence[Metric], optional
+            Metrics enabled in config for the CPU component.
         """
         if not hasattr(self, "_initialized"):
-            super().__init__(entities, interval=interval)
+            super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
             self._initialized = True
 
             check_entity_type(entities)
             self._entities = entities
+            self._collection_plan = resolve_sched_switch_plan(enabled_metrics)
+            self._enabled_metrics = set(enabled_metrics) if enabled_metrics else set(self._entity_metric_mapping[CPU])
+            logger.info(
+                "sched_switch enabled metrics from config: {}",
+                sorted(metric.name for metric in self._enabled_metrics),
+            )
+            collecting, skipping = self._collection_plan.perf_groups_summary()
+            logger.info(
+                "sched_switch resolved perf counter plan: collecting={}, skipping={}",
+                collecting,
+                skipping,
+            )
 
             mp.set_start_method("spawn", force=True)
             self._queue_monitoring_data = mp.Queue()
@@ -685,7 +758,10 @@ class SchedSwitchMonitor(DataSource):
                 },
             )
 
-            self._rb_sched_switch = SchedSwitchBpfMonitor.start_singleton(self._ring_buffer_config)
+            self._rb_sched_switch = SchedSwitchBpfMonitor.start_singleton(
+                self._ring_buffer_config,
+                collection_plan=self._collection_plan,
+            )
 
             # timing data
             self._boot_time_s = psutil.boot_time()
@@ -1220,37 +1296,48 @@ class SchedSwitchMonitor(DataSource):
             pl.col("stores_end"),
         ).unique()
 
-        (
-            time_measurements_df,
-            aperf_measurements_df,
-            mperf_measurements_df,
-            unhalted_cycles_measurements_df,
-            execution_type_measurements_df,
-            pid_work_measurements_df,
-        ) = self._calculate_cpu_metrics(raw_data_measurement_data_df)
+        pid_work_measurements_df = pl.DataFrame()
+        if self._collection_plan.needs_cpu_perf:
+            (
+                time_measurements_df,
+                aperf_measurements_df,
+                mperf_measurements_df,
+                unhalted_cycles_measurements_df,
+                execution_type_measurements_df,
+                pid_work_measurements_df,
+            ) = self._calculate_cpu_metrics(raw_data_measurement_data_df)
 
-        (
-            #            l2_miss_measurements_df,
-            mem_load_l3_miss_local_dram_df,
-            mem_load_l3_miss_remote_dram_df,
-            mem_inst_retired_all_stores_df,
-        ) = self._calculate_memory_metrics(raw_data_measurement_data_df)
+            if CPU_CORE_PID_APERF in self._enabled_metrics:
+                self._cache_cpu_core_pid_aperf.extend(split_large_df(aperf_measurements_df))
+            if CPU_CORE_PID_MPERF in self._enabled_metrics:
+                self._cache_cpu_core_pid_mperf.extend(split_large_df(mperf_measurements_df))
+            if CPU_CORE_PID_UNHALTED_CYCLES in self._enabled_metrics:
+                self._cache_cpu_core_pid_unhalted_core_cycles.extend(split_large_df(unhalted_cycles_measurements_df))
+            if CPU_CORE_PID_TIME in self._enabled_metrics:
+                self._cache_cpu_core_pid_time.extend(split_large_df(time_measurements_df))
+            if CPU_CORE_PID_EXECUTION_TYPE in self._enabled_metrics:
+                self._cache_cpu_core_pid_execution_type.extend(split_large_df(execution_type_measurements_df))
+            if CPU_CORE_PID_WORK in self._enabled_metrics:
+                self._cache_cpu_core_pid_work.extend(split_large_df(pid_work_measurements_df))
 
-        self._cache_cpu_core_pid_aperf.extend(split_large_df(aperf_measurements_df))
-        self._cache_cpu_core_pid_mperf.extend(split_large_df(mperf_measurements_df))
-        self._cache_cpu_core_pid_unhalted_core_cycles.extend(split_large_df(unhalted_cycles_measurements_df))
-        self._cache_cpu_core_pid_time.extend(split_large_df(time_measurements_df))
-        self._cache_cpu_core_pid_execution_type.extend(split_large_df(execution_type_measurements_df))
-        self._cache_cpu_core_pid_work.extend(split_large_df(pid_work_measurements_df))
+        needs_memory_metrics = (
+            self._collection_plan.needs_l3_local
+            or self._collection_plan.needs_l3_remote
+            or self._collection_plan.needs_stores
+        )
+        if needs_memory_metrics:
+            (
+                mem_load_l3_miss_local_dram_df,
+                mem_load_l3_miss_remote_dram_df,
+                mem_inst_retired_all_stores_df,
+            ) = self._calculate_memory_metrics(raw_data_measurement_data_df)
 
-        # if l2_miss_measurements_df.height > 0:
-        #     self._cache_cpu_core_pid_l2_miss.extend(split_large_df(l2_miss_measurements_df))
-        if mem_load_l3_miss_local_dram_df.height > 0:
-            self._cache_cpu_core_pid_load_local.extend(split_large_df(mem_load_l3_miss_local_dram_df))
-        if mem_load_l3_miss_remote_dram_df.height > 0:
-            self._cache_cpu_core_pid_load_remote.extend(split_large_df(mem_load_l3_miss_remote_dram_df))
-        if mem_inst_retired_all_stores_df.height > 0:
-            self._cache_cpu_core_pid_all_stores.extend(split_large_df(mem_inst_retired_all_stores_df))
+            if self._collection_plan.needs_l3_local and mem_load_l3_miss_local_dram_df.height > 0:
+                self._cache_cpu_core_pid_load_local.extend(split_large_df(mem_load_l3_miss_local_dram_df))
+            if self._collection_plan.needs_l3_remote and mem_load_l3_miss_remote_dram_df.height > 0:
+                self._cache_cpu_core_pid_load_remote.extend(split_large_df(mem_load_l3_miss_remote_dram_df))
+            if self._collection_plan.needs_stores and mem_inst_retired_all_stores_df.height > 0:
+                self._cache_cpu_core_pid_all_stores.extend(split_large_df(mem_inst_retired_all_stores_df))
 
         self._total_work_data += pid_work_measurements_df.height
 

@@ -46,7 +46,12 @@ class ProcNuma(DataSource):
 
     _entity_metric_mapping: dict[type[Entity], set[Metric]] = {DRAM: {DRAM_SOCKET_PID_MEMORY}}
 
-    def __init__(self, entities: Sequence[DRAM], interval: float | None = None):
+    def __init__(
+        self,
+        entities: Sequence[DRAM],
+        interval: float | None = None,
+        enabled_metrics: list[Metric] | None = None,
+    ):
         """
         Initialize the ProcNuma data source.
 
@@ -57,7 +62,7 @@ class ProcNuma(DataSource):
         interval : float, optional
              The collection interval in seconds.
         """
-        super().__init__(entities, interval=interval)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
         self.entities = entities
         self._last_called = time.perf_counter()
         # check_entity_type(entities, expected_type=DRAM)

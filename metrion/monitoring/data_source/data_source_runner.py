@@ -23,7 +23,7 @@ class DataSourceRunner(threading.Thread):
         queue: queue.Queue,
     ):
         super().__init__(daemon=True)
-        self._datasource = datasource(entities, interval=interval)
+        self._datasource = datasource(entities, interval=interval, enabled_metrics=metrics)
         self._metrics = metrics
         self._interval = interval
         self._stop_event = threading.Event()

@@ -15,9 +15,9 @@ energy_model:
         - CPU_SOCKET_PKG_ENERGY
         - CPU_CORE_PID_WORK
         - CPU_CORE_PID_TIME
-        - CPU_CORE_PID_UNHALTED_CYCLES
-        - CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM
-        - CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM
+        # - CPU_CORE_PID_UNHALTED_CYCLES
+        # - CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM
+        # - CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM
     dram:
       mode: include
       power: auto
