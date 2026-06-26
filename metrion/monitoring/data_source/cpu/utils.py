@@ -371,6 +371,7 @@ def parse_attr_kvlist(kvblob):
 
 
 def resolve_with_strace(event, cpu=None, perf="perf"):
+    print(f"Resolving event {event} with CPU {cpu} and perf {perf}")
     kvblob = run_strace(event, cpu=cpu, perf=perf)
     d = parse_attr_kvlist(kvblob)
     # Validate presence

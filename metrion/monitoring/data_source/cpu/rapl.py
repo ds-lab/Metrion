@@ -39,6 +39,7 @@ class RAPLCPU(DataSource):
         entities: list[Entity],
         powercap_tree: Path | None = None,
         interval: float | None = None,
+        enabled_metrics: list[Metric] | None = None,
     ):
         """Initializes a RAPL data source for a list of entities.
 
@@ -52,7 +53,7 @@ class RAPLCPU(DataSource):
         interval : float, optional
              The collection interval in seconds.
         """
-        super().__init__(entities, interval=interval)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
         self.powercap_tree = powercap_tree or Path("/sys/devices/virtual/powercap/intel-rapl")
         self._socket_info: dict[int, dict] = {}
         self._timing_registered_pkg = False

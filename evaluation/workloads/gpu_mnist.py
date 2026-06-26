@@ -171,4 +171,4 @@ if __name__ == "__main__":
     main()
 
 
-# CUDA_VISIBLE_DEVICES=0 python gpu_mnist.py --epochs 1 --batch-size 32
+# CUDA_VISIBLE_DEVICES=0 python gpu_mnist.py --epochs 1 --batch-size 32 & PID=$!; echo "PID is: $PID"; wait $PID

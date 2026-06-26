@@ -17,7 +17,12 @@ class DataSource(ABC):
     _entity_metric_mapping: dict[type[Entity], set[Metric]] = {}
 
     @abstractmethod
-    def __init__(self, entities: Sequence[Entity], interval: float | None = None):
+    def __init__(
+        self,
+        entities: Sequence[Entity],
+        interval: float | None = None,
+        enabled_metrics: Sequence[Metric] | None = None,
+    ):
         """
         Initialize the data source with a list of entities.
 
@@ -27,6 +32,8 @@ class DataSource(ABC):
             The entities that this data source will monitor or collect data from.
         interval : float or None, optional
             The collection interval in seconds. If None, the interval is unknown or not applicable.
+        enabled_metrics : Sequence of Metric, optional
+            Metrics enabled in config for this data source's component.
 
         Notes
         -----
@@ -34,6 +41,7 @@ class DataSource(ABC):
         """
         self.entities: Sequence[Entity] = entities
         self._interval = interval
+        self._enabled_metrics: Sequence[Metric] | None = enabled_metrics
         check_entity_type(entities)
 
     @abstractmethod

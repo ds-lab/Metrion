@@ -194,11 +194,12 @@ class TCPDataSource(DataSource):
         self,
         entities: Sequence[NetworkInterface],
         interval: float | None = None,
+        enabled_metrics: list[Metric] | None = None,
     ) -> None:
         if hasattr(self, "_initialized"):
             return
 
-        super().__init__(entities, interval=interval)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
         check_entity_type(entities, expected_type=NetworkInterface)
 
         self._logical_entity_registry = LogicalEntityRegistry.get_instance()

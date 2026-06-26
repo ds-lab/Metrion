@@ -85,16 +85,20 @@ gpu_util_by_thread AS (
         ei.interval_start,
         ei.interval_end,
         m.logical_entity_id,
-        SUM(m.value) AS total_util,
-        COUNT(*) AS sample_count
+        SUM(m.value * CASE WHEN m.end_ts = m.start_ts THEN 1.0
+            ELSE (epoch(LEAST(m.end_ts, ei.interval_end)) - epoch(GREATEST(m.start_ts, ei.interval_start)))
+               / (epoch(m.end_ts) - epoch(m.start_ts)) END) AS total_util,
+        SUM(CASE WHEN m.end_ts = m.start_ts THEN 1.0
+            ELSE (epoch(LEAST(m.end_ts, ei.interval_end)) - epoch(GREATEST(m.start_ts, ei.interval_start)))
+               / (epoch(m.end_ts) - epoch(m.start_ts)) END) AS sample_count
     FROM energy_interval_gpu_tmp AS ei
     JOIN measurement AS m
       ON m.physical_entity_id = ei.gpu_id
      AND m.metric_id = 'GPU_DEVICE_PID_COMPUTE_UTILIZATION'
      AND m.value IS NOT NULL
      AND ABS(m.value) < 1e307
-     AND m.start_ts >= ei.interval_start
-     AND m.end_ts <= ei.interval_end
+     AND m.start_ts < ei.interval_end
+     AND m.end_ts > ei.interval_start
     GROUP BY ei.gpu_id, ei.interval_start, ei.interval_end, m.logical_entity_id
 ),
 
