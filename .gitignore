@@ -73,3 +73,5 @@ metrion/energy_attribution/**/*.json
 # byte files
 **/*-ubyte
 **/*-ubyte.gz
+
+wheels/
