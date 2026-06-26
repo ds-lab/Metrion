@@ -146,6 +146,12 @@ Delete pycache files:
 find . \( -type d -name "__pycache__" -o -type f \( -name "*.pyc" -o -name "*.pyo" \) \) -exec rm -rf {} +
 ```
 
+In case metrion can not shutdown gracefully, you can force it to shutdown by killing the process with: 
+```bash
+sudo ps | grep metrion
+sudo kill -9 <pid> <pid> ...
+```
+
 
 ## Citation
 This software is currently under development at the University of Augsburg. If you build on it in academic work, please cite the forthcoming publication:
