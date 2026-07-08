@@ -1,0 +1,17 @@
+repos:
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.0
+    hooks:
+       # Run the linter.
+       - id: ruff-check
+         types_or: [ python, pyi ]
+         args: [ --fix ]
+       # Run the formatter.
+       - id: ruff-format
+         types_or: [ python, pyi ]
+
+# uv helpers 
+-    repo: https://github.com/astral-sh/uv-pre-commit
+     rev: 0.7.13
+     hooks:
+       - id: uv-lock             # update uv.lock when pyproject changes

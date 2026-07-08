@@ -1,0 +1,77 @@
+### Jupyter Notebooks ###
+
+# Ignore checkpoints
+**/.ipynb_checkpoints 
+# Ignore notebooks, they're tracked via JupyText
+**/*.ipynb
+
+### Python ###
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info
+*.so
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info
+
+### IDEs ###
+.vscode
+
+### MLFlow output
+mlruns
+
+### Temp folder
+/temp
+
+### JUnit Reports
+pytest-uxavuc-report.xml
+pytest-experiment-cli-report.xml
+mypy-report.xml
+
+# Hypothesis Test Caches
+**/*.hypothesis
+**/*.mypy_cache
+**/*.pytest_cache
+
+# Mac OS 
+.DS_Store
+
+#DB
+**/*.db*
+
+# Venv
+.venv
+
+# Rust 
+rust_ext/target/
+target/
+
+# Ruff
+.ruff_cache/
+
+# HTML Reports
+**/*.html
+
+# Log files
+**/*.log
+
+# output in evaluation
+evaluation/**/*.csv
+evaluation/**/*.png
+evaluation/**/*.json
+
+# output in energy attribution
+metrion/energy_attribution/**/*.csv
+metrion/energy_attribution/**/*.png
+metrion/energy_attribution/**/*.json
+
+# byte files
+**/*-ubyte
+**/*-ubyte.gz
+
+wheels/
