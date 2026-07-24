@@ -156,6 +156,21 @@ def run_rapl_idle_measurement(dwell_time=60, extra_units=None):
         raise
 
 
+# Accepts "digits", "digits.digits", or "digits,digits" -- a single optional
+# decimal separator, either '.' or ','. Deliberately rejects mixed/repeated
+# separators, signs, and non-numeric tokens so a locale-mangled or otherwise
+# corrupted value is never silently misinterpreted. Locale-independent: does
+# not use locale.atof() or read the process locale.
+_RAPL_NUMBER_RE = re.compile(r"^[0-9]+(?:[.,][0-9]+)?$")
+
+
+def _parse_rapl_watt_value(token: str, *, field: str, line: str) -> float:
+    """Parse a single RAPL power token deterministically, independent of locale."""
+    if not _RAPL_NUMBER_RE.match(token):
+        raise ValueError(f"Malformed RAPL {field!r} value {token!r} in line: {line!r}")
+    return float(token.replace(",", "."))
+
+
 def parse_rapl_idle_log(log_path: str | pathlib.Path | None = None) -> dict[int, dict[str, float | None]]:
     """
     Parse the freeze-idle-rapl.sh log file and extract idle power consumption per package.
@@ -173,27 +188,38 @@ def parse_rapl_idle_log(log_path: str | pathlib.Path | None = None) -> dict[int,
         Structure:
         {
             package_id: {
-                'package': power_in_watts,      # Package total power (float or None)
+                'package': power_in_watts,      # Package total power (float, never None)
                 'cpu': power_in_watts,           # CPU cores power (float or None)
                 'integrated-gpu': power_in_watts, # GPU power (float or None)
                 'dram': power_in_watts           # DRAM power (float or None)
             }
         }
 
+    Notes
+    -----
+    Power values accept a dot or comma decimal separator (e.g. "10.0196" or
+    "10,0196"); mixed/repeated separators or other non-numeric content raise
+    ValueError. "Package Total" has no legitimate "N/A" form in the source
+    script and therefore always raises rather than defaulting to None or 0.0
+    if malformed. "CPU Cores" / "Integrated GPU" / "DRAM" keep their existing
+    contract: "N/A" (domain not present on this hardware) parses to None, but
+    any other malformed value for a present line still raises.
+
     Raises
     ------
     FileNotFoundError
         If the RAPL idle log file is not found
     ValueError
-        If no package power data is found in the log file
+        If no package power data is found in the log file, or if a recognized
+        labelled field is present with a malformed, empty, or ambiguous value
 
     Examples
     --------
     >>> result = parse_rapl_idle_log()
     >>> print(result)
     {
-        0: {'cpu': 85.20, 'integrated-gpu': 12.30, 'dram': 45.60},
-        1: {'cpu': 82.15, 'integrated-gpu': None, 'dram': 38.45}
+        0: {'package': 11.38, 'cpu': 8.52, 'integrated-gpu': 1.23, 'dram': 4.56},
+        1: {'package': 10.90, 'cpu': 8.22, 'integrated-gpu': None, 'dram': 3.85}
     }
     """
     # Determine log path
@@ -216,9 +242,9 @@ def parse_rapl_idle_log(log_path: str | pathlib.Path | None = None) -> dict[int,
             line = line.strip()
 
             # Look for package section headers: "=== Package N ==="
-            package_match = re.match(r"^=== Package (\d+) ===$", line)
-            if package_match:
-                current_package_id = int(package_match.group(1))
+            package_header_match = re.match(r"^=== Package (\d+) ===$", line)
+            if package_header_match:
+                current_package_id = int(package_header_match.group(1))
                 packages[current_package_id] = {"cpu": None, "integrated-gpu": None, "dram": None}
                 continue
 
@@ -226,28 +252,53 @@ def parse_rapl_idle_log(log_path: str | pathlib.Path | None = None) -> dict[int,
             if current_package_id is None:
                 continue
 
-            # Parse power measurements
-            # Package Total      :  11.3824 W
-            package_match = re.match(r"^Package Total\s*:\s*([0-9]+.[0-9]+)\s*W$", line)
-            if package_match:
-                packages[current_package_id]["package"] = float(package_match.group(1))
-
-            # CPU Cores: "CPU Cores          :    85.20 mW" or "CPU Cores          :      N/A"
-            cpu_match = re.match(r"^CPU Cores\s*:\s*([0-9]+.[0-9]+)\s*W$", line)
-            if cpu_match:
-                packages[current_package_id]["cpu"] = float(cpu_match.group(1))
+            # Package Total      :  11.3824 W   (never legitimately "N/A")
+            if line.startswith("Package Total"):
+                package_match = re.match(r"^Package Total\s*:\s*(\S+)\s*W$", line)
+                if not package_match:
+                    raise ValueError(f"Malformed 'Package Total' line for package {current_package_id}: {line!r}")
+                packages[current_package_id]["package"] = _parse_rapl_watt_value(
+                    package_match.group(1), field="Package Total", line=line
+                )
                 continue
 
-            # Integrated GPU: "Integrated GPU     :    12.30 mW" or "Integrated GPU     :      N/A"
-            gpu_match = re.match(r"^Integrated GPU\s*:\s*([0-9]+.[0-9]+)\s*W$", line)
-            if gpu_match:
-                packages[current_package_id]["integrated-gpu"] = float(gpu_match.group(1))
+            # CPU Cores: "CPU Cores          :    85.20 W" or "CPU Cores          :      N/A"
+            if line.startswith("CPU Cores"):
+                cpu_match = re.match(r"^CPU Cores\s*:\s*(\S+)\s*W$", line)
+                if cpu_match:
+                    packages[current_package_id]["cpu"] = _parse_rapl_watt_value(
+                        cpu_match.group(1), field="CPU Cores", line=line
+                    )
+                elif re.match(r"^CPU Cores\s*:\s*N/A$", line):
+                    pass  # domain not available on this hardware -- keep None
+                else:
+                    raise ValueError(f"Malformed 'CPU Cores' line for package {current_package_id}: {line!r}")
                 continue
 
-            # DRAM: "DRAM               :    45.60 mW" or "DRAM               :      N/A"
-            dram_match = re.match(r"^DRAM\s*:\s*([0-9]+.[0-9]+)\s*W$", line)
-            if dram_match:
-                packages[current_package_id]["dram"] = float(dram_match.group(1))
+            # Integrated GPU: "Integrated GPU     :    12.30 W" or "Integrated GPU     :      N/A"
+            if line.startswith("Integrated GPU"):
+                gpu_match = re.match(r"^Integrated GPU\s*:\s*(\S+)\s*W$", line)
+                if gpu_match:
+                    packages[current_package_id]["integrated-gpu"] = _parse_rapl_watt_value(
+                        gpu_match.group(1), field="Integrated GPU", line=line
+                    )
+                elif re.match(r"^Integrated GPU\s*:\s*N/A$", line):
+                    pass  # domain not available on this hardware -- keep None
+                else:
+                    raise ValueError(f"Malformed 'Integrated GPU' line for package {current_package_id}: {line!r}")
+                continue
+
+            # DRAM: "DRAM               :    45.60 W" or "DRAM               :      N/A"
+            if line.startswith("DRAM"):
+                dram_match = re.match(r"^DRAM\s*:\s*(\S+)\s*W$", line)
+                if dram_match:
+                    packages[current_package_id]["dram"] = _parse_rapl_watt_value(
+                        dram_match.group(1), field="DRAM", line=line
+                    )
+                elif re.match(r"^DRAM\s*:\s*N/A$", line):
+                    pass  # domain not available on this hardware -- keep None
+                else:
+                    raise ValueError(f"Malformed 'DRAM' line for package {current_package_id}: {line!r}")
                 continue
 
             # Stop parsing when we reach system totals

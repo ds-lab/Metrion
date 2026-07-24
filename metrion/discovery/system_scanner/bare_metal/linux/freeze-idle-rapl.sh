@@ -13,6 +13,14 @@
 #
 set -euo pipefail
 
+# Force a locale-independent decimal point for this script's own printf/bc
+# calculations. bc always emits dot-decimal output; under a comma-decimal
+# LC_NUMERIC (e.g. de_DE), bash's printf "%f" silently truncates that output
+# at the decimal point instead of reformatting it, corrupting every power
+# value below. Scoped to this script's environment only -- does not change
+# the host's system-wide locale configuration.
+export LC_NUMERIC=C
+
 IDLE_SEC="${1:-30}"
 shift || true
 LOG_FOLDER="${1:-/var/log}"
