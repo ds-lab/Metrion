@@ -252,13 +252,16 @@ def read_temp_ipc(path: str) -> pl.DataFrame:
     return df
 
 
-def _generate_id(n) -> pl.Series:
-    ids = []
+def _generate_id(n: int) -> pl.Series:
+    ids: list[int] = []
     gen = Measurement.get_snowflake_generator()
-    for _ in range(n):
-        id = next(gen)
-        ids.append(id)
-    return pl.Series("id", ids)
+
+    while len(ids) < n:
+        generated_id = next(gen)
+        if generated_id is not None:
+            ids.append(generated_id)
+
+    return pl.Series("id", ids, dtype=pl.Int64)
 
 
 def _add_id_to_measurement_df(df: pl.DataFrame) -> pl.DataFrame:
@@ -267,6 +270,8 @@ def _add_id_to_measurement_df(df: pl.DataFrame) -> pl.DataFrame:
         id_series = _generate_id(n)
         df = df.with_columns(id_series)
     else:
+        df = df.with_columns(pl.col("id").cast(pl.Int64))
+
         missing_ids = df.filter(pl.col("id").is_null())
         having_ids = df.filter(pl.col("id").is_not_null())
         n_missing = missing_ids.height
