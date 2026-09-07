@@ -3,7 +3,7 @@
 import os
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from typing import override
@@ -13,6 +13,7 @@ from loguru import logger
 
 from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
+from metrion.discovery.system_scanner.bare_metal.linux.util import get_nodes_per_package
 from metrion.entity.dram import DRAM
 from metrion.entity.entity import Entity
 from metrion.entity.logical_entity_registry import LogicalEntityRegistry
@@ -27,6 +28,57 @@ _RE_KERNEL_PAGESIZE = re.compile(r"kernelpagesize_kB=(\d+)")
 
 # Fast string-based category tokens (lowercase for matching)
 _HUGE_TOKENS = ("huge", "hugetlb", "hugetlbfs", "thp", "anonhuge", "anon_hugepage")
+
+
+def parse_numa_maps(
+    lines: Iterable[str], default_page_kb: int, huge_page_kb: int
+) -> tuple[dict[int, dict[str, float]], float]:
+    """
+    Sum a process's memory per NUMA node from numa_maps lines, in MB.
+
+    Emulates numastat's show_process_info() logic:
+    - Starts each line as 'Private'
+    - Reclassifies if special tokens are found
+    - Uses explicit kernel page size if present, else huge or default
+    - Sums N<node>=<pages> entries into per-node totals
+    """
+    category_order = ["Huge", "Heap", "Stack", "Private"]
+
+    # node -> category -> MB, holding whatever nodes the process actually touched
+    numa_data: dict[int, dict[str, float]] = {}
+    total_mb = 0.0
+
+    for line in lines:
+        # 1. Determine category using fast string matching
+        lower = line.lower()
+        if any(tok in lower for tok in _HUGE_TOKENS):
+            category = "Huge"
+        elif "heap" in lower:
+            category = "Heap"
+        elif "stack" in lower:
+            category = "Stack"
+        else:
+            category = "Private"
+
+        # 2. Determine page size using pre-compiled regex
+        page_size_kb = default_page_kb
+        pagesize_match = _RE_KERNEL_PAGESIZE.search(line)
+        if pagesize_match:
+            page_size_kb = int(pagesize_match.group(1))
+        elif category == "Huge":
+            page_size_kb = huge_page_kb
+
+        # 3. Find all N<node>=<pages> using pre-compiled regex
+        for match in _RE_NODE_PAGES.finditer(line):
+            node_id = int(match.group(1))
+            pages = int(match.group(2))
+            mem_mb = (pages * page_size_kb) / 1024.0  # kB → MB
+
+            node = numa_data.setdefault(node_id, {cat: 0.0 for cat in category_order})
+            node[category] += mem_mb
+            total_mb += mem_mb
+
+    return {node: numa_data[node] for node in sorted(numa_data)}, total_mb
 
 
 class ProcNuma(DataSource):
@@ -69,6 +121,7 @@ class ProcNuma(DataSource):
         self._last_called = time.perf_counter()
         # check_entity_type(entities, expected_type=DRAM)
         self._logical_entity_registry = LogicalEntityRegistry.get_instance()
+        self._nodes_per_package = get_nodes_per_package()
 
         self._metric_lookup: dict[Metric, Callable[[], DataRecord]] = {
             DRAM_SOCKET_PID_MEMORY: self._get_all_processes_numa_info,
@@ -177,67 +230,23 @@ class ProcNuma(DataSource):
     def _get_numa_memory_for_pid(
         self, pid: int, default_page_kb: int, huge_page_kb: int
     ) -> tuple[dict[int, dict[str, float]] | None, float]:
-        """
-        Parse /proc/<pid>/numa_maps to calculate NUMA memory usage.
-
-        Emulates numastat's show_process_info() logic:
-        - Starts each line as 'Private'
-        - Reclassifies if special tokens are found
-        - Uses explicit kernel page size if present, else huge or default
-        - Sums N<node>=<pages> entries into per-node totals (in MB)
-        """
-        category_order = ["Huge", "Heap", "Stack", "Private"]
-
-        # Initialize node -> category -> MB
-        sockets = len(self.entities)
-        numa_data = {i: {cat: 0.0 for cat in category_order} for i in range(sockets)}
-        total_mb = 0.0
-
-        numa_maps_path = f"/proc/{pid}/numa_maps"
-
+        """Read /proc/<pid>/numa_maps and hand the lines to the parser."""
         try:
-            with open(numa_maps_path) as f:
-                for line in f:
-                    # 1. Determine category using fast string matching
-                    lower = line.lower()
-                    if any(tok in lower for tok in _HUGE_TOKENS):
-                        category = "Huge"
-                    elif "heap" in lower:
-                        category = "Heap"
-                    elif "stack" in lower:
-                        category = "Stack"
-                    else:
-                        category = "Private"
-
-                    # 2. Determine page size using pre-compiled regex
-                    page_size_kb = default_page_kb
-                    pagesize_match = _RE_KERNEL_PAGESIZE.search(line)
-                    if pagesize_match:
-                        page_size_kb = int(pagesize_match.group(1))
-                    elif category == "Huge":
-                        page_size_kb = huge_page_kb
-
-                    # 3. Find all N<node>=<pages> using pre-compiled regex
-                    for match in _RE_NODE_PAGES.finditer(line):
-                        node_id = int(match.group(1))
-                        pages = int(match.group(2))
-                        mem_mb = (pages * page_size_kb) / 1024.0  # kB → MB
-
-                        if node_id in numa_data:
-                            numa_data[node_id][category] += mem_mb
-                        total_mb += mem_mb
-
+            with open(f"/proc/{pid}/numa_maps") as f:
+                return parse_numa_maps(f, default_page_kb, huge_page_kb)
         except (FileNotFoundError, PermissionError, OSError):
             return None, 0.0
 
-        # Ensure consistent ordering and zero-fill missing categories
-        result = {}
-        for node in sorted(numa_data.keys()):
-            node_dict = numa_data[node]
-            # fill missing categories with 0.0
-            result[node] = {cat: node_dict.get(cat, 0.0) for cat in category_order}
+    def _memory_on_socket(self, numa_memory: dict[int, dict[str, float]], dram: DRAM) -> float:
+        """
+        Private memory a process holds on one socket, summed over the NUMA nodes of that socket.
 
-        return result, total_mb
+        Sub-NUMA clustering gives a socket several nodes. Without the mapping only the node whose
+        id happens to match the socket number would be counted and the rest would read as zero.
+        """
+        package_id = int(dram.cpu.package_id)
+        nodes = self._nodes_per_package.get(package_id, [package_id])
+        return sum(numa_memory.get(node, {}).get("Private", 0.0) for node in nodes)
 
     def _get_all_processes_numa_info(self) -> DataRecord:
         """
@@ -292,7 +301,7 @@ class ProcNuma(DataSource):
                     for e in self.entities:
                         if isinstance(e, DRAM):
                             m = Measurement(
-                                value=numa_memory.get(int(e.cpu.package_id), {"Private": 0.0}).get("Private", 0.0),
+                                value=self._memory_on_socket(numa_memory, e),
                                 metric_id=DRAM_SOCKET_PID_MEMORY.name,
                                 physical_entity_id=e.id,
                                 logical_entity_id=logical_entity.id,

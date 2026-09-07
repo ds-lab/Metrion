@@ -4,7 +4,7 @@ import re
 from loguru import logger
 
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_rapl_caps
-from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, parse_cpu_list
+from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, get_nodes_per_package
 
 
 def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int, dict[str, float]]]:
@@ -140,15 +140,6 @@ def _mem_total_mb(meminfo_path: pathlib.Path) -> float:
     return int(match.group(1)) / 1024 if match else 0.0
 
 
-def _package_of_cpu(sysfs_root: pathlib.Path, cpu_id: int) -> int | None:
-    """Socket a logical CPU belongs to, or None if the kernel does not say."""
-    pkg_file = sysfs_root / "devices/system/cpu" / f"cpu{cpu_id}" / "topology/physical_package_id"
-    try:
-        return int(pkg_file.read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-
 def get_memory_per_package(
     sysfs_root: pathlib.Path = pathlib.Path("/sys"),
     proc_meminfo: pathlib.Path = pathlib.Path("/proc/meminfo"),
@@ -156,27 +147,13 @@ def get_memory_per_package(
     """
     Usable memory in MB per CPU socket, summed over the NUMA nodes attached to that socket.
 
-    Sub-NUMA clustering puts several nodes on one socket, so the sum is over nodes, not a lookup.
     Kernels built without NUMA expose no nodes at all; the whole machine is then one socket.
     """
-    memory_per_package: dict[int, float] = {}
-
-    for node_path in sorted((sysfs_root / "devices/system/node").glob("node[0-9]*")):
-        try:
-            cpus = parse_cpu_list((node_path / "cpulist").read_text().strip())
-        except (OSError, ValueError):
-            continue
-
-        # A node without CPUs is memory-only, e.g. CXL or persistent memory. No socket owns it,
-        # and RAPL does not meter it either.
-        if not cpus:
-            continue
-
-        package_id = _package_of_cpu(sysfs_root, cpus[0])
-        if package_id is None:
-            continue
-
-        memory_per_package[package_id] = memory_per_package.get(package_id, 0.0) + _mem_total_mb(node_path / "meminfo")
+    node_dir = sysfs_root / "devices/system/node"
+    memory_per_package = {
+        package_id: sum(_mem_total_mb(node_dir / f"node{node_id}" / "meminfo") for node_id in nodes)
+        for package_id, nodes in get_nodes_per_package(sysfs_root).items()
+    }
 
     if not memory_per_package:
         logger.debug("Kernel exposes no NUMA nodes, treating the machine as a single socket")
