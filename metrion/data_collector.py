@@ -66,7 +66,7 @@ class DataSaver:
 
     def store_data(self):
         ds_factory = DataStorageFactory()
-        self._data_storage = ds_factory.create_data_storage(self._storage_type, db_url=self._storage_path)
+        self._data_storage = ds_factory.create_data_storage(self._storage_type, self._storage_path)
 
         while not self._stop_event.is_set():
             try:

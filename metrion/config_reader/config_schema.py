@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from loguru import logger
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 # ─────────────────────────────
 # Power configuration
@@ -38,8 +39,18 @@ class StorageConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["sqlite", "duckdb"] = "duckdb"
+    type: Literal["sqlite", "duckdb", "parquet"] = "duckdb"
     path: str = "./monitor.db"
+
+    @field_validator("path")
+    @classmethod
+    def warn_if_parquet_path_looks_like_a_database(cls, value: str, info: ValidationInfo) -> str:
+        if info.data.get("type") == "parquet" and Path(value).suffix in (".db", ".sqlite", ".duckdb"):
+            logger.warning(
+                f"storage.type is parquet, but storage.path '{value}' names a database file. "
+                "Parquet writes into a directory of that name."
+            )
+        return value
 
     def get_target(self, base_path: Path | None = None) -> str:
         """
@@ -53,7 +64,8 @@ class StorageConfig(BaseModel):
         Returns
         -------
         str
-            Connection string in the format 'type:///path'.
+            Connection string 'type:///path' for the database backends, the output directory
+            for parquet.
         """
         if base_path is None:
             base_path = Path(__file__).parents[2]
@@ -61,6 +73,9 @@ class StorageConfig(BaseModel):
         target = Path(self.path)
         if not target.is_absolute():
             target = base_path / target
+
+        if self.type == "parquet":
+            return str(target)
 
         return f"{self.type}:///{target}"
 

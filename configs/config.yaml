@@ -9,9 +9,11 @@ debug: true
 
 # Where the collected data is written.
 storage:
-  # duckdb or sqlite. duckdb is what the SQL analyses under metrion/energy_attribution/ expect.
+  # duckdb, sqlite or parquet.
+  #   duckdb  - what the SQL analyses under metrion/energy_attribution/ expect. path is a file.
+  #   parquet - append-only files, cheapest during the run. path is a directory.
   type: duckdb
-  # Database file. A relative path is resolved against the repository root.
+  # A relative path is resolved against the repository root.
   path: ./monitor.db
 
 # How often things happen. Every value here is one waiting step between an event in the kernel
