@@ -75,3 +75,6 @@ metrion/energy_attribution/**/*.json
 **/*-ubyte.gz
 
 wheels/
+# benchmark output
+bench/baseline_*.txt
+bench/shutdown-dumps/
