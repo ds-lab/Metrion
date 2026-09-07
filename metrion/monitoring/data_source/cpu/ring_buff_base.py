@@ -14,6 +14,10 @@ from loguru import logger
 
 from metrion.util import IpcAsyncWriter
 
+# Drops are checked on every poll iteration; without a throttle a busy ring buffer would
+# produce a warning every few milliseconds.
+_DROP_WARNING_INTERVAL_S = 10.0
+
 
 @dataclass(slots=True)
 class RingBufferConfig:
@@ -74,6 +78,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         # missing events tracking
         self._missing_events = 0
         self._total_events = 0
+        self._last_drop_warning = 0.0
 
         # created in child process
         self._bpf = None
@@ -265,10 +270,26 @@ class EbpfRingBufferProcess(mp.Process, ABC):
     # -----------------------------
     def _check_missing_events(self) -> None:
         missing_events = self._get_drop_count()
-        if missing_events > self._missing_events:
-            delta = missing_events - self._missing_events
-            logger.debug(f"[{self.name}] Missed events: {delta} (Total missing events {missing_events})")
-            self._missing_events = missing_events
+        if missing_events <= self._missing_events:
+            return
+
+        delta = missing_events - self._missing_events
+        self._missing_events = missing_events
+        logger.debug(f"[{self.name}] Missed events: {delta} (Total missing events {missing_events})")
+
+        now = time.time()
+        if now - self._last_drop_warning < _DROP_WARNING_INTERVAL_S:
+            return
+        self._last_drop_warning = now
+
+        # _total_events only advances on flush, so the events still sitting in the buffer have to
+        # be counted here as well - otherwise an early drop reads as a 100 % loss rate.
+        buffered = len(self._buffer) + len(self._raw_buffer)
+        seen = self._total_events + buffered + missing_events
+        logger.warning(
+            f"[{self.name}] Ring buffer overflow: {missing_events} of {seen} events dropped by the "
+            f"kernel ({100.0 * missing_events / seen:.2f} %). Dropped events cannot be recovered."
+        )
 
     # -----------------------------
     # Shutdown
@@ -280,11 +301,15 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         try:
             self._flush_to_queue()
             self._ipc_writer.close()
-            logger.debug(f"[{self.name}] Total missed events: {self._missing_events}")
-            logger.debug(f"[{self.name}] Total processed events: {self._total_events}")
         except Exception:
             # best-effort shutdown
             pass
+
+        # Outside the try above on purpose: this is the only place a run reports its losses, so a
+        # failed flush must not swallow it.
+        logger.info(
+            f"[{self.name}] Events processed: {self._total_events}, dropped in the kernel: {self._missing_events}"
+        )
 
         try:
             self._queue.put(self._sentinel)
