@@ -69,6 +69,7 @@ class ParquetDataStorage(DataStorageI):
         self._root.mkdir(parents=True, exist_ok=True)
         self._rotate_rows = rotate_rows
         self._writers: dict[str, _RotatingParquetWriter] = {}
+        self._entity_seq = 0
         logger.info(f"ParquetDataStorage writes to {self._root.resolve()}")
 
     def _writer(self, name: str) -> _RotatingParquetWriter:
@@ -107,7 +108,27 @@ class ParquetDataStorage(DataStorageI):
                 writer.write(frame)
 
     def save_entities(self, entities: Sequence[Entity], progressbar: bool = False) -> None:
-        raise NotImplementedError("implemented in S3.2")
+        """Write entities append-only, one stream per concrete type.
+
+        Deliberately without deduplication: the same entity may reappear in later cycles
+        with richer metadata. The versions are merged on read.
+        """
+        by_type: dict[str, list[pl.DataFrame]] = {}
+        for entity in entities:
+            # CPUs carry their cores as sub-objects; the DB path writes those as well.
+            for item in (entity, *getattr(entity, "cores", ())):
+                by_type.setdefault(type(item).__name__.lower(), []).append(item._to_df())
+
+        # One sequence number per call, so a later version of an entity can be told from an
+        # earlier one on read. A timestamp would not be enough: two calls can share a
+        # microsecond, and DuckDB is read with preserve_insertion_order off, so there is no
+        # implicit order to fall back on.
+        self._entity_seq += 1
+        for name, frames in by_type.items():
+            df = pl.concat(frames, how="diagonal_relaxed").with_columns(
+                pl.lit(self._entity_seq, dtype=pl.Int64).alias("_seq")
+            )
+            self._writer(f"entities/{name}").write(df)
 
     def save_data_record(self, data_record: DataRecord, progressbar: bool = False) -> None:
         if len(data_record.entities) > 0:

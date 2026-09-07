@@ -132,3 +132,155 @@ def test_manifest_records_row_counts(tmp_path):
 
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["streams"]["measurements"] == 7
+
+
+def _logical_entity(pid, cmdline="python3", cgroup=None):
+    from metrion.entity.logical_entity import LogicalEntity
+
+    t = datetime(2026, 1, 1, tzinfo=UTC)
+    return LogicalEntity(
+        native_thread_id=pid,
+        native_pid=pid,
+        native_parent_pid=1,
+        native_parent_thread_id=1,
+        executable_name="python3",
+        cmdline=cmdline,
+        start_time=t,
+        pid_start_time=t,
+        parent_tid_start_time=t,
+        parent_pid_start_time=t,
+        resource_group_name=cgroup,
+    )
+
+
+def _cpu_with_cores(count=2):
+    """Builds a CPU the way hardware detection does - package_id is a string there."""
+    from metrion.entity.core import Core
+    from metrion.entity.cpu import CPU
+
+    cores = [Core(core_id=i, package_id="0", thread_siblings=[i], mhz=3000, parent_id="host-1") for i in range(count)]
+    return CPU(
+        manufacturer="GenuineIntel",
+        model="test",
+        physical_cores=count,
+        logical_cores=count,
+        package_id="0",
+        cache=8192,
+        hyperthreading=False,
+        topology={i: 0 for i in range(count)},
+        cores=cores,
+        idle_power_package=1.0,
+        parent_id="host-1",
+    )
+
+
+def test_entities_are_written_per_type(tmp_path):
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_logical_entity(100), _logical_entity(101)])
+    storage.close()
+
+    df = pl.read_parquet(tmp_path / "entities" / "logicalentity" / "*.parquet")
+    assert df.height == 2
+    assert set(df["native_pid"].to_list()) == {100, 101}
+
+
+def test_types_do_not_share_a_stream(tmp_path):
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_logical_entity(100), _cpu_with_cores(0)])
+    storage.close()
+
+    streams = sorted(p.name for p in (tmp_path / "entities").iterdir())
+    assert streams == ["cpu", "logicalentity"]
+
+
+def test_cpu_cores_get_their_own_stream(tmp_path):
+    """CPUs carry their cores as sub-objects; the DB path writes them, so this has to as well."""
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_cpu_with_cores(4)])
+    storage.close()
+
+    cores = pl.read_parquet(tmp_path / "entities" / "core" / "*.parquet")
+    assert cores.height == 4
+    assert sorted(cores["core_id"].to_list()) == [0, 1, 2, 3]
+
+
+def test_same_entity_written_twice_is_kept_twice(tmp_path):
+    """Append-only is deliberate: the second version carries better metadata."""
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_logical_entity(100, cmdline="")])
+    storage.save_entities([_logical_entity(100, cmdline="/usr/bin/python3 -m foo")])
+    storage.close()
+
+    df = pl.read_parquet(tmp_path / "entities" / "logicalentity" / "*.parquet")
+    assert df.height == 2
+    assert df["id"].n_unique() == 1
+
+
+def test_seq_orders_the_versions_of_one_entity(tmp_path):
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_logical_entity(100, cmdline="")])
+    storage.save_entities([_logical_entity(100, cmdline="besser")])
+    storage.close()
+
+    df = pl.read_parquet(tmp_path / "entities" / "logicalentity" / "*.parquet")
+    latest = df.sort("_seq").group_by("id").last()
+    assert latest.height == 1
+    assert latest["cmdline"][0] == "besser"
+
+
+def test_seq_is_unique_per_save_call(tmp_path):
+    """Two calls without a pause must stay distinguishable - a timestamp would not be."""
+    storage = ParquetDataStorage(str(tmp_path))
+    for _ in range(3):
+        storage.save_entities([_logical_entity(100)])
+    storage.close()
+
+    df = pl.read_parquet(tmp_path / "entities" / "logicalentity" / "*.parquet")
+    assert df["_seq"].to_list() == [1, 2, 3]
+
+
+def test_one_call_shares_a_seq_across_streams(tmp_path):
+    """A CPU and its cores are one snapshot and must not look like two versions."""
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_cpu_with_cores(2)])
+    storage.close()
+
+    cpu = pl.read_parquet(tmp_path / "entities" / "cpu" / "*.parquet")
+    cores = pl.read_parquet(tmp_path / "entities" / "core" / "*.parquet")
+    assert cpu["_seq"].to_list() == [1]
+    assert cores["_seq"].to_list() == [1, 1]
+
+
+def test_empty_entity_list_is_a_noop(tmp_path):
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([])
+    storage.close()
+
+    assert not (tmp_path / "entities").exists()
+
+
+def test_physical_entities_keep_their_parent_id(tmp_path):
+    """The dram analysis joins entity.parent_id, so it has to survive into the stream."""
+    from metrion.entity.dram import DRAM
+
+    cpu = _cpu_with_cores(2)
+    dram = DRAM(total_memory=16.0, cpu=cpu, idle_power=1.0, max_power=8.0, parent_id=cpu.id)
+
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([cpu, dram])
+    storage.close()
+
+    written = pl.read_parquet(tmp_path / "entities" / "dram" / "*.parquet")
+    assert written["parent_id"].to_list() == [cpu.id]
+    assert written["package_id"].to_list() == ["0"]
+
+
+def test_two_versions_in_one_call_are_both_kept(tmp_path):
+    """Append-only holds within a single call too - nothing is deduplicated by id."""
+    storage = ParquetDataStorage(str(tmp_path))
+    storage.save_entities([_logical_entity(100, cmdline=""), _logical_entity(100, cmdline="besser")])
+    storage.close()
+
+    df = pl.read_parquet(tmp_path / "entities" / "logicalentity" / "*.parquet")
+    assert df.height == 2
+    assert df["id"].n_unique() == 1
