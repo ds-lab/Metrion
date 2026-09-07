@@ -11,6 +11,7 @@ from metrion.config_reader.config_schema import (
     DatabaseConfig,
     EnergyModelConfig,
     GeneralConfig,
+    SamplingConfig,
     SubcomponentPowerConfig,
 )
 
@@ -23,4 +24,5 @@ __all__ = [
     "EnergyModelConfig",
     "ComponentConfig",
     "SubcomponentPowerConfig",
+    "SamplingConfig",
 ]

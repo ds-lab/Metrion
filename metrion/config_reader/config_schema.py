@@ -6,6 +6,7 @@ This module defines the configuration structure for:
 - General settings (debug mode)
 - Energy model configuration (granularity, components)
 - Component configuration (CPU, GPU, DRAM, Network) with include/exclude modes
+- Sampling intervals per data source
 """
 
 import re
@@ -13,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ─────────────────────────────
 # Power configuration
@@ -69,6 +70,43 @@ class GeneralConfig(BaseModel):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     debug: bool = False
     collection_interval: float = Field(default=5.0, gt=0, description="Data collection interval in seconds")
+
+
+# ─────────────────────────────
+# Sampling section
+# ─────────────────────────────
+class SamplingConfig(BaseModel):
+    """
+    Collection interval of every data source, in seconds.
+
+    One field per data source, not per metric: a data source is polled as a whole, so all its
+    metrics share one interval.
+
+    This section is keyed by data source, energy_model.components is keyed by component. The two
+    do not line up: RAPLCPU serves both the cpu and the dram component, while cpu is served by
+    RAPLCPU and SchedSwitchMonitor together. energy_model decides which sources run at all, this
+    section decides how often each of them runs.
+
+    The meaning differs between the two kinds of source. For the polled sources (rapl, nvml,
+    proc_numa) the interval is the sample rate — every read produces one measurement. For the
+    eBPF sources (sched_switch, tcp_monitor) the kernel probe records every event continuously
+    and a producer process buffers them; the interval only says how often the agent picks up
+    what has been buffered. Raising it costs freshness, never events.
+
+    Unknown keys are rejected so that a misspelled interval fails loudly instead of silently
+    falling back to the default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Polled sources: one read, one sample.
+    rapl: float = Field(default=1.0, ge=0.25, description="Read the RAPL energy counters (CPU and DRAM package)")
+    nvml: float = Field(default=1.0, gt=0, description="Query NVML (device energy and per-process GPU utilization)")
+    proc_numa: float = Field(default=5.0, gt=0, description="Parse /proc/<pid>/numa_maps for the per-NUMA footprint")
+
+    # eBPF sources: the kernel records continuously, this is the pickup interval.
+    sched_switch: float = Field(default=5.0, gt=0, description="Pick up buffered scheduler events (CPU time per PID)")
+    tcp_monitor: float = Field(default=5.0, gt=0, description="Pick up buffered socket events (traffic per PID)")
 
 
 # ─────────────────────────────
@@ -289,6 +327,7 @@ class AgentConfig(BaseModel):
 
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     energy_model: EnergyModelConfig = Field(default_factory=EnergyModelConfig)
+    sampling: SamplingConfig = Field(default_factory=SamplingConfig)
 
     @classmethod
     def from_yaml_file(cls, path: str | Path) -> "AgentConfig":

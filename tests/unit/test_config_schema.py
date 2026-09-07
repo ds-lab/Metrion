@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from metrion.config_reader import (
     AgentConfig,
@@ -13,6 +14,7 @@ from metrion.config_reader import (
     ConfigReader,
     DatabaseConfig,
     EnergyModelConfig,
+    SamplingConfig,
     SubcomponentPowerConfig,
 )
 
@@ -153,6 +155,65 @@ class TestEnergyModelConfig:
 
         assert config.get_component_config("cpu") == comp_config
         assert config.get_component_config("nonexistent") is None
+
+
+class TestSamplingConfig:
+    """Tests for SamplingConfig."""
+
+    def test_defaults_match_previous_hardcoded_values(self):
+        """EntityTypeMonitor._setup uses 1.0 s for the energy sources and 5.0 s for the rest."""
+        s = SamplingConfig()
+        assert (s.rapl, s.nvml, s.proc_numa, s.sched_switch, s.tcp_monitor) == (1.0, 1.0, 5.0, 5.0, 5.0)
+
+    def test_one_field_per_data_source(self):
+        """A data source is polled as a whole, so its metrics cannot have separate intervals."""
+        assert set(SamplingConfig.model_fields) == {"rapl", "nvml", "proc_numa", "sched_switch", "tcp_monitor"}
+
+    def test_section_is_optional(self):
+        """A config without a sampling section keeps every default."""
+        config = AgentConfig.model_validate({"general": {}, "energy_model": {"components": {}}})
+        assert config.sampling.rapl == 1.0
+
+    def test_rapl_below_grouping_limit_is_rejected(self):
+        """Below 0.25 s the guard band would be wider than the usable window."""
+        with pytest.raises(ValidationError):
+            SamplingConfig(rapl=0.2)
+
+    def test_only_rapl_has_a_lower_bound(self):
+        """The 0.25 s limit comes from the grouping bucket width, which only rapl sets."""
+        assert SamplingConfig(sched_switch=0.1).sched_switch == 0.1
+
+    def test_rejects_non_positive(self):
+        with pytest.raises(ValidationError):
+            SamplingConfig(sched_switch=-1)
+
+    def test_values_are_read_from_yaml(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text(
+            "general:\n  collection_interval: 5\n"
+            "energy_model:\n  components:\n    cpu:\n      mode: include\n      metrics: '*'\n"
+            "sampling:\n  rapl: 0.5\n  sched_switch: 2.0\n"
+        )
+
+        config = ConfigReader.read_config(str(path))
+
+        assert config.sampling.rapl == 0.5
+        assert config.sampling.sched_switch == 2.0
+        assert config.sampling.proc_numa == 5.0, "fields left out keep their default"
+
+    def test_misspelled_interval_is_rejected(self):
+        """A typo must not silently leave the default in place."""
+        with pytest.raises(ValidationError):
+            SamplingConfig.model_validate({"tcp_moniter": 5.0})
+
+    def test_shipped_config_yaml_is_valid(self):
+        """configs/config.yaml is the file users start from, so it has to validate."""
+        shipped = Path(__file__).parents[2] / "configs" / "config.yaml"
+
+        config = AgentConfig.from_yaml_file(shipped)
+
+        assert config.sampling.rapl == 1.0
+        assert config.sampling.tcp_monitor == 5.0
 
 
 class TestAgentConfig:
