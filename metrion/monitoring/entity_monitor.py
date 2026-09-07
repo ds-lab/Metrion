@@ -3,9 +3,10 @@ from collections.abc import Sequence
 
 from loguru import logger
 
+from metrion.config_reader.config_schema import SamplingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
-from metrion.metric import CPU_SOCKET_PKG_ENERGY, DRAM_SOCKET_TOTAL_ENERGY, GPU_DEVICE_TOTAL_ENERGY, Metric
+from metrion.metric import Metric
 from metrion.monitoring.data_source.data_source_factory import DataSourceFactory
 from metrion.monitoring.data_source.data_source_runner import DataSourceRunner
 from metrion.queue_util import drain_until_sentinel
@@ -22,9 +23,21 @@ class EntityTypeMonitor:
         The entities to monitor.
     metrics : list of Metric
         The metrics to collect for the entities.
+    sampling : SamplingConfig, optional
+        Collection interval per data source. Defaults to SamplingConfig().
     """
 
-    def __init__(self, entities: Sequence[Entity], metrics: list[Metric]):
+    # One config field per data source class. The names are deliberately spelled out because the
+    # classes follow no shared naming pattern.
+    _SAMPLING_FIELD_BY_SOURCE = {
+        "RAPLCPU": "rapl",
+        "NVMLDataSource": "nvml",
+        "ProcNuma": "proc_numa",
+        "SchedSwitchMonitor": "sched_switch",
+        "TCPDataSource": "tcp_monitor",
+    }
+
+    def __init__(self, entities: Sequence[Entity], metrics: list[Metric], sampling: SamplingConfig | None = None):
         """
         Initialize the EntityTypeMonitor.
 
@@ -34,9 +47,12 @@ class EntityTypeMonitor:
             The entities to monitor.
         metrics : list of Metric
             The metrics to collect for the entities.
+        sampling : SamplingConfig, optional
+            Collection interval per data source. Defaults to SamplingConfig().
         """
         self._entities = entities
         self._metrics = metrics
+        self._sampling = sampling or SamplingConfig()
 
         check_entity_type(entities)
         DataSourceFactory.auto_register()
@@ -49,21 +65,25 @@ class EntityTypeMonitor:
         self._setup()
         self._start()
 
+    def _interval_for(self, data_source: type) -> float:
+        """Collection interval for a data source, taken from the sampling config."""
+        name = data_source.__name__
+        field = self._SAMPLING_FIELD_BY_SOURCE.get(name)
+        if field is None:
+            logger.warning(f"No sampling interval configured for {name}, using 5.0 s")
+            return 5.0
+        return getattr(self._sampling, field)
+
     def _setup(self):
         """
         Set up data source runners and their associated queues.
         """
         for data_source, metrics in self._data_source_metrics.items():
             queue = q.Queue()
-            if (
-                CPU_SOCKET_PKG_ENERGY in metrics
-                or GPU_DEVICE_TOTAL_ENERGY in metrics
-                or DRAM_SOCKET_TOTAL_ENERGY in metrics
-            ):
-                runner = DataSourceRunner(data_source, self._entities, metrics, 1.0, queue)
-            else:
-                runner = DataSourceRunner(data_source, self._entities, metrics, 5.0, queue)
+            interval = self._interval_for(data_source)
+            runner = DataSourceRunner(data_source, self._entities, metrics, interval, queue)
             self._data_source_runners[runner] = queue
+            logger.info(f"{data_source.__name__}: collection interval {interval} s")
 
     def _start(self):
         """

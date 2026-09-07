@@ -209,7 +209,9 @@ class Orchestrator:
                 continue
 
             if len(desired_metrics) > 0:
-                self._entity_monitors.append(EntityTypeMonitor(entities, desired_metrics))
+                self._entity_monitors.append(
+                    EntityTypeMonitor(entities, desired_metrics, sampling=self._config.sampling)
+                )
                 logger.debug(
                     f"Created monitor for {entity_type.__name__} with metrics: {[m.name for m in desired_metrics]}"
                 )

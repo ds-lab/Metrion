@@ -34,3 +34,22 @@ energy_model:
       mode: include
       power: auto
       metrics: "*"
+
+# Collection interval per data source, in seconds. One entry per source, not per metric.
+# energy_model.components[*].metrics decides which sources run at all; this section only
+# decides how often each of them runs. The two are keyed differently on purpose: RAPLCPU
+# serves both the cpu and the dram component, and cpu is served by RAPLCPU and
+# SchedSwitchMonitor together.
+sampling:
+  # Polled sources: one read, one sample.
+  # rapl must stay at or above 0.25 s. It defines the grid that CPU work rows are bucketed
+  # into, and the 100 ms guard band on both ends of an interval leaves nothing usable below.
+  rapl: 1.0
+  nvml: 1.0
+  proc_numa: 5.0
+
+  # eBPF sources: the kernel probe records every event continuously and a producer process
+  # buffers them (every 10000 events or 1.0 s). The value below is only how often the agent
+  # picks up what has been buffered, so raising it costs freshness, never events.
+  sched_switch: 5.0
+  tcp_monitor: 5.0
