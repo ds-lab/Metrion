@@ -1,9 +1,8 @@
 import os
 import signal
-import sys
+import threading
 import time
 from pathlib import Path
-from time import sleep
 
 import click
 from loguru import logger
@@ -59,6 +58,8 @@ class Orchestrator:
         self._entity_monitors: list[EntityTypeMonitor] = []
         self._running = False
         self._main_pid = os.getpid()
+        self._shutdown_requested = threading.Event()
+        self._force_exit_armed = False
 
         # Register signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -122,7 +123,9 @@ class Orchestrator:
 
     def _signal_handler(self, signum, frame):
         """
-        Handle SIGINT and SIGTERM signals for graceful shutdown.
+        Request shutdown. The monitoring loop performs the cleanup.
+
+        A second signal terminates the process immediately.
 
         Parameters
         ----------
@@ -133,17 +136,15 @@ class Orchestrator:
         """
         if os.getpid() != self._main_pid:
             return
-        # Prevent any more of our handler running
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        signal.signal(signal.SIGQUIT, signal.SIG_IGN)
 
-        logger.info("Attempting graceful shutdown…")
-        self.stop()
+        if self._force_exit_armed:
+            logger.error("Second signal received, exiting immediately.")
+            os._exit(1)
 
-        # exit the process cleanly now that we’ve cleaned up
-        sys.exit(0)
+        self._force_exit_armed = True
+        self._running = False
+        self._shutdown_requested.set()
+        logger.info("Shutdown requested. Press Ctrl+C again to exit immediately.")
 
     def read_config(self, path: str) -> None:
         """
@@ -285,14 +286,15 @@ class Orchestrator:
             logger.info("Starting monitoring loop. Press Ctrl+C to stop gracefully.")
 
         while self._running:
+            if self._shutdown_requested.is_set():
+                break
+
             # Check timeout
             if timeout_seconds is not None:
-                logger.warning("Timeout is set. Monitoring will stop after the specified duration.")
                 elapsed = time.time() - start_time
                 if elapsed >= timeout_seconds:
-                    logger.warning("Timeout reached. Stopping monitoring.")
                     logger.info(f"Timeout of {timeout_minutes} minute(s) reached. Stopping monitoring.")
-                    self.stop()
+                    self._shutdown_requested.set()
                     break
             time_start = time.time()
             self._logical_entity_registry.update()
@@ -314,13 +316,14 @@ class Orchestrator:
             time_end = time.time()
             logger.debug(f"Total Iteration took {time_end - time_start} seconds")
 
-            # Sleep in small increments to check for shutdown signal more frequently
+            # Wait for the next cycle, but return immediately on shutdown.
             if self._config.general.collection_interval and self._running:
-                sleep_time = self._config.general.collection_interval
-                while sleep_time > 0 and self._running:
-                    sleep_increment = min(0.05, sleep_time)  # Sleep in 50ms increments for faster response
-                    sleep(sleep_increment)
-                    sleep_time -= sleep_increment
+                if self._shutdown_requested.wait(self._config.general.collection_interval):
+                    break
+
+        if self._shutdown_requested.is_set():
+            logger.info("Attempting graceful shutdown…")
+            self.stop()
 
     def save_data_record(self, data_record: DataRecord) -> None:
         """
