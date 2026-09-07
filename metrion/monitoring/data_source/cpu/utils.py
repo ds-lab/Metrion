@@ -16,6 +16,17 @@ _ppid_start_cache: dict[int, float] = {}
 _CLK_TCK = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
 
 
+def grouping_threshold_ms(interval_ms: int) -> int:
+    """
+    Guard band that keeps grouped rows away from the boundaries of an energy interval.
+
+    Ten percent of the interval, clamped to 5-100 ms. A row is only grouped when it stays that
+    far from both ends, so the usable window is ``interval_ms - 2 * grouping_threshold_ms(...)``
+    and stays at 80 % of the interval down to 50 ms.
+    """
+    return max(5, min(100, interval_ms // 10))
+
+
 def get_pid_starttime(pid: int) -> datetime:
     """
     Get the start time of a process given its PID.

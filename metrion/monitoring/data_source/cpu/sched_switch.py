@@ -6,13 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, override
 
+import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
 import numpy as np
 import polars as pl
 import psutil
 from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
-import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
 from metrion.data_record import DataRecord
 from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
 from metrion.entity.cpu import CPU
@@ -39,6 +39,7 @@ from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProc
 from metrion.monitoring.data_source.cpu.utils import (
     CustomPerf,
     count_cpu_sockets_from_sysfs,
+    grouping_threshold_ms,
     read_perf_event,
     read_perf_type,
     resolve_with_strace,
@@ -922,11 +923,10 @@ class SchedSwitchMonitor(DataSource):
 
         start_ms = tc.start_time_ms
         interval_ms = int(tc.interval_seconds * 1000)
-        self._grouping_threshold = 100  # in ms
 
         interval_ns = interval_ms * 1_000_000
         start_ns = start_ms * 1_000_000
-        threshold_ns = self._grouping_threshold * 1_000_000
+        threshold_ns = grouping_threshold_ms(interval_ms) * 1_000_000
         boot_epoch_ns = int(self._boot_time_s * 1e9)
 
         group_by_columns = ["pid", "pid_start", "cpu_core", "group_id"]
