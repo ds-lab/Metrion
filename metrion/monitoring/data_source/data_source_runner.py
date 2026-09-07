@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 import uuid
 from collections.abc import Sequence
 
@@ -33,21 +34,43 @@ class DataSourceRunner(threading.Thread):
         self._final_data_records = DataRecord(entities=[], measurements=[])
         self._done_event = threading.Event()
         self._id = uuid.uuid4()
+        self._late_ticks = 0
 
     def run(self):
         try:
+            start = time.monotonic()
+            tick = 0
+
             while not self._stop_event.is_set():
                 data = self._datasource.get_data(self._metrics)
                 self._datasource.clean_up()
                 self._queue.put_nowait(data)
 
-                if self._stop_event.wait(self._interval):
+                # Wake up on the fixed grid start + tick * interval, not interval seconds after
+                # the work happens to finish. Otherwise the period is interval + work time.
+                tick += 1
+                sleep_for = start + tick * self._interval - time.monotonic()
+
+                if sleep_for < 0:
+                    # The work took longer than the interval. Skip forward to the next grid
+                    # point that is still ahead of us instead of falling further behind.
+                    behind = int(-sleep_for // self._interval) + 1
+                    tick += behind
+                    self._late_ticks += behind
+                    sleep_for = max(0.0, start + tick * self._interval - time.monotonic())
+
+                if self._stop_event.wait(sleep_for):
                     logger.debug("DataSourceRunner stopped initiated")
                     break
 
             self._finalize()
 
         finally:
+            if self._late_ticks:
+                logger.warning(
+                    f"DataSourceRunner {self._id}: work took longer than the "
+                    f"{self._interval}s interval, the schedule was realigned {self._late_ticks} times"
+                )
             self._queue.put(self.SENT_END)
             self._done_event.set()
             logger.debug("DataSourceRunner stopped")
