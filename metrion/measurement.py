@@ -48,11 +48,7 @@ class Measurement:
         self._start_ts = start_ts if start_ts else now
         self._end_ts = end_ts if end_ts else now
 
-        # Create the snowflake ID
-        gen = self.get_snowflake_generator()
-        id = next(gen)
-        assert id is not None
-        self._id: int = id
+        self._id: int = self.next_ids(1)[0]
 
     @property
     def value(self) -> Any:
@@ -151,6 +147,22 @@ class Measurement:
             cls._GEN = SnowflakeGenerator(instance=instance_id)
 
         return cls._GEN
+
+    @classmethod
+    def next_ids(cls, n: int) -> list[int]:
+        """
+        Draw n snowflake ids.
+
+        The generator hands out 4096 ids per millisecond and returns None once those are used up,
+        so it has to be asked again instead of being taken at its word.
+        """
+        gen = cls.get_snowflake_generator()
+        ids: list[int] = []
+        while len(ids) < n:
+            generated = next(gen)
+            if generated is not None:
+                ids.append(generated)
+        return ids
 
 
 class CommunicationMeasurement(Measurement):

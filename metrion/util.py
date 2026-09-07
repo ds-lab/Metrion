@@ -227,32 +227,21 @@ def read_temp_ipc(path: str) -> pl.DataFrame:
     return df
 
 
-def _generate_id(n) -> pl.Series:
-    ids = []
-    gen = Measurement.get_snowflake_generator()
-    for _ in range(n):
-        id = next(gen)
-        ids.append(id)
-    return pl.Series("id", ids)
+def _generate_id(n: int) -> pl.Series:
+    return pl.Series("id", Measurement.next_ids(n), dtype=pl.Int64)
 
 
 def _add_id_to_measurement_df(df: pl.DataFrame) -> pl.DataFrame:
+    """Give every row an id, keeping the ones it already has and the order they are in."""
     if "id" not in df.columns:
-        n = df.height
-        id_series = _generate_id(n)
-        df = df.with_columns(id_series)
-    else:
-        missing_ids = df.filter(pl.col("id").is_null())
-        having_ids = df.filter(pl.col("id").is_not_null())
-        n_missing = missing_ids.height
+        return df.with_columns(_generate_id(df.height))
 
-        if n_missing > 0:
-            id_series = _generate_id(n_missing)
-            missing_with_ids = missing_ids.with_columns(id_series)
-            df = pl.concat([having_ids, missing_with_ids])
+    ids = df["id"].cast(pl.Int64)
+    holes = ids.is_null().arg_true()
+    if holes.len() > 0:
+        ids = ids.scatter(holes, _generate_id(holes.len()))
 
-    df = df.with_columns(pl.col("id").cast(pl.Int64))
-    return df
+    return df.with_columns(ids)
 
 
 def transform_measuremnent_list_to_polars(
