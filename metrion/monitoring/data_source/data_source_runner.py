@@ -62,7 +62,8 @@ class DataSourceRunner(threading.Thread):
     def request_stop(self):
         self._stop_event.set()
 
-    def get_final_data_records(self) -> DataRecord:
+    def get_final_data_records(self, timeout: float = 20.0) -> DataRecord:
         # ensures caller won’t read partial results
-        self._done_event.wait()
+        if not self._done_event.wait(timeout):
+            logger.warning(f"DataSourceRunner {self._id}: did not finalize within {timeout}s")
         return self._final_data_records

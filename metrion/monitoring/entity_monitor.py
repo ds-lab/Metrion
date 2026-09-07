@@ -1,11 +1,14 @@
 import queue as q
 from collections.abc import Sequence
 
+from loguru import logger
+
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import CPU_SOCKET_PKG_ENERGY, DRAM_SOCKET_TOTAL_ENERGY, GPU_DEVICE_TOTAL_ENERGY, Metric
 from metrion.monitoring.data_source.data_source_factory import DataSourceFactory
 from metrion.monitoring.data_source.data_source_runner import DataSourceRunner
+from metrion.queue_util import drain_until_sentinel
 from metrion.util import check_entity_type
 
 
@@ -83,6 +86,11 @@ class EntityTypeMonitor:
         for queue in self._data_source_runners.values():
             while not queue.empty():
                 data_record = queue.get_nowait()
+                if data_record == DataSourceRunner.SENT_END:
+                    # A runner that already finished left its marker here. Acknowledge it,
+                    # otherwise queue.join() would never return.
+                    queue.task_done()
+                    continue
                 merged_measurements.extend(data_record.measurements)
                 merged_entities.extend(data_record.entities)
 
@@ -90,65 +98,67 @@ class EntityTypeMonitor:
 
         return DataRecord(entities=merged_entities, measurements=merged_measurements)
 
-    def _drain_queue_for_runner(self, runner: DataSourceRunner) -> DataRecord:
+    def _drain_queue_for_runner(self, runner: DataSourceRunner, deadline_s: float = 15.0) -> DataRecord:
         """
-        Drain the queue for a specific runner.
+        Drain the queue of one runner up to its SENT_END marker or the deadline.
 
         Parameters
         ----------
         runner : DataSourceRunner
             The runner to drain the queue for.
+        deadline_s : float
+            Maximum time to wait for SENT_END, in seconds.
 
         Returns
         -------
         DataRecord
             A DataRecord containing merged entities and measurements from the runner's queue.
         """
-        data_record = DataRecord(entities=[], measurements=[])
         queue = self._data_source_runners[runner]
-        while True:
-            try:
-                data_record_tmp = queue.get_nowait()
-                if data_record_tmp == DataSourceRunner.SENT_END:
-                    queue.task_done()
-                    break
-                data_record.entities.extend(data_record_tmp.entities)
-                data_record.measurements.extend(data_record_tmp.measurements)
-                queue.task_done()
-            except q.Empty:
-                continue
 
-        return data_record
+        items, seen = drain_until_sentinel(
+            queue, DataSourceRunner.SENT_END, deadline_s=deadline_s, name=f"runner-{runner._id}"
+        )
+        if not seen:
+            logger.warning(f"DataSourceRunner {runner._id}: SENT_END not received within {deadline_s}s")
+
+        entities = []
+        measurements = []
+        for item in items:
+            entities.extend(item.entities)
+            measurements.extend(item.measurements)
+            queue.task_done()
+        if seen:
+            queue.task_done()
+
+        return DataRecord(entities=entities, measurements=measurements)
 
     def stop(self) -> DataRecord | None:
         """
-        Stop all data source runners and wait for their queues to be processed.
+        Stop all data source runners and collect what they produced.
         """
-        from loguru import logger
+        # Ask every runner to stop first, so they wind down in parallel.
+        for runner in self._data_source_runners:
+            logger.debug(f"Stopping DataSourceRunner from entity monitor {runner._id}")
+            runner.request_stop()
 
-        final_data_records = DataRecord(entities=[], measurements=[])
-        for runner in self._data_source_runners.keys():
+        entities = []
+        measurements = []
+        for runner in self._data_source_runners:
+            # Drain dead runners too: their SENT_END and data sit in the queue either way.
+            drain_data = self._drain_queue_for_runner(runner)
+            entities.extend(drain_data.entities)
+            measurements.extend(drain_data.measurements)
+
+            final_data_record = runner.get_final_data_records()
+            if final_data_record:
+                entities.extend(final_data_record.entities)
+                measurements.extend(final_data_record.measurements)
+            logger.debug(f"DataSourceRunner {runner._id} finished")
+
+        for runner in self._data_source_runners:
+            runner.join(timeout=20.0)
             if runner.is_alive():
-                logger.debug(f"Stopping DataSourceRunner from entity monitor {runner._id}")
-                runner.request_stop()
-                logger.debug(f"Waiting for DataSourceRunner {runner._id} to finish")
-                drain_data = self._drain_queue_for_runner(runner)
-                final_data_record = runner.get_final_data_records()
-                logger.debug(f"DataSourceRunner {runner._id} finished")
+                logger.warning(f"DataSourceRunner {runner._id} did not terminate, giving up on it")
 
-                if final_data_record:
-                    final_data_records.entities.extend(final_data_record.entities)
-                    final_data_records.measurements.extend(final_data_record.measurements)
-
-                if drain_data:
-                    final_data_records.entities.extend(drain_data.entities)
-                    final_data_records.measurements.extend(drain_data.measurements)
-
-        for runner, queue in self._data_source_runners.items():
-            logger.debug(f"Waiting for DataSourceRunner {runner._id} to join")
-            runner.join(timeout=60.0)
-            logger.debug(f"Waiting for DataSourceRunner {runner._id} queue to join")
-            queue.join()
-            logger.debug(f"DataSourceRunner {runner._id} joined")
-
-        return final_data_records
+        return DataRecord(entities=entities, measurements=measurements)
