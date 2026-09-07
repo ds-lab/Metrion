@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 from loguru import logger
 
-from metrion.config_reader.config_schema import SourceIntervals
+from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import Metric
@@ -23,8 +23,8 @@ class EntityTypeMonitor:
         The entities to monitor.
     metrics : list of Metric
         The metrics to collect for the entities.
-    intervals : SourceIntervals, optional
-        Collection interval per data source. Defaults to SourceIntervals().
+    timing : TimingConfig, optional
+        The timing section of the config. Defaults to TimingConfig().
     """
 
     # One config field per data source class. The names are deliberately spelled out because the
@@ -37,7 +37,7 @@ class EntityTypeMonitor:
         "TCPDataSource": "tcp_monitor",
     }
 
-    def __init__(self, entities: Sequence[Entity], metrics: list[Metric], intervals: SourceIntervals | None = None):
+    def __init__(self, entities: Sequence[Entity], metrics: list[Metric], timing: TimingConfig | None = None):
         """
         Initialize the EntityTypeMonitor.
 
@@ -47,12 +47,12 @@ class EntityTypeMonitor:
             The entities to monitor.
         metrics : list of Metric
             The metrics to collect for the entities.
-        intervals : SourceIntervals, optional
-            Collection interval per data source. Defaults to SourceIntervals().
+        timing : TimingConfig, optional
+            The timing section of the config. Defaults to TimingConfig().
         """
         self._entities = entities
         self._metrics = metrics
-        self._intervals = intervals or SourceIntervals()
+        self._timing = timing or TimingConfig()
 
         check_entity_type(entities)
         DataSourceFactory.auto_register()
@@ -72,7 +72,7 @@ class EntityTypeMonitor:
         if field is None:
             logger.warning(f"No collection interval configured for {name}, using 5.0 s")
             return 5.0
-        return getattr(self._intervals, field)
+        return getattr(self._timing.sources, field)
 
     def _setup(self):
         """
@@ -81,7 +81,7 @@ class EntityTypeMonitor:
         for data_source, metrics in self._data_source_metrics.items():
             queue = q.Queue()
             interval = self._interval_for(data_source)
-            runner = DataSourceRunner(data_source, self._entities, metrics, interval, queue)
+            runner = DataSourceRunner(data_source, self._entities, metrics, interval, queue, self._timing)
             self._data_source_runners[runner] = queue
             logger.info(f"{data_source.__name__}: collection interval {interval} s")
 

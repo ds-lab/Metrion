@@ -110,6 +110,8 @@ class TimingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     cycle: float = Field(default=5.0, gt=0, description="Drain the data source queues and hand a batch to storage")
+    ebpf_flush: float = Field(default=1.0, gt=0, description="eBPF producer: buffered events -> IPC writer")
+    storage_flush: float = Field(default=2.0, gt=0, description="IPC writer: buffered rows -> file on disk")
     sources: SourceIntervals = Field(default_factory=SourceIntervals)
 
 

@@ -20,6 +20,11 @@ class RingBufferConfig:
     buffer_flush_threshold: int
     buffer_flush_time_threshold: float
 
+    # How long the IpcAsyncWriter inside this process holds rows before writing a file. Named
+    # apart from buffer_flush_time_threshold above on purpose: that one is the step before,
+    # from the event buffer into the writer.
+    writer_flush_s: float = 2.0
+
     output_queue: mp.Queue = field(default_factory=mp.Queue)
     stop_event: mp.Event = field(default_factory=mp.Event)  # ty:ignore[invalid-type-form]
 
@@ -54,6 +59,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
 
         self._buffer_flush_threshold = int(config.buffer_flush_threshold)
         self._buffer_flush_time_threshold = float(config.buffer_flush_time_threshold)
+        self._writer_flush_s = float(config.writer_flush_s)
         self._last_flush_time = time.time()
 
         # queue + lifecycle
@@ -121,7 +127,9 @@ class EbpfRingBufferProcess(mp.Process, ABC):
     # -----------------------------
     def run(self) -> None:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        self._ipc_writer = IpcAsyncWriter(self._queue, max_rows=self._buffer_flush_threshold)
+        self._ipc_writer = IpcAsyncWriter(
+            self._queue, max_rows=self._buffer_flush_threshold, max_age_s=self._writer_flush_s
+        )
         try:
             self._bpf = self._create_bpf()
             self._setup_perf_events()

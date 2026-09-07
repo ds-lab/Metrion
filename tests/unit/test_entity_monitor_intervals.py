@@ -1,15 +1,15 @@
 import pytest
 
-from metrion.config_reader.config_schema import SourceIntervals
+from metrion.config_reader.config_schema import SourceIntervals, TimingConfig
 from metrion.monitoring.entity_monitor import EntityTypeMonitor
 
 _FIELD_BY_SOURCE = EntityTypeMonitor._INTERVAL_FIELD_BY_SOURCE
 
 
-def _monitor(intervals):
+def _monitor(sources):
     """EntityTypeMonitor without __init__, which would start data source threads."""
     monitor = EntityTypeMonitor.__new__(EntityTypeMonitor)
-    monitor._intervals = intervals
+    monitor._timing = TimingConfig(sources=sources)
     return monitor
 
 

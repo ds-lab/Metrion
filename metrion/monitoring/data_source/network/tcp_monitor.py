@@ -18,6 +18,7 @@ import psutil
 from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
+from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.communication_endpoint import CommunicationEndpoint, NetworkAddress, NetworkTransport
 from metrion.entity.entity import Entity
@@ -195,11 +196,12 @@ class TCPDataSource(DataSource):
         entities: Sequence[NetworkInterface],
         interval: float | None = None,
         enabled_metrics: list[Metric] | None = None,
+        timing: TimingConfig | None = None,
     ) -> None:
         if hasattr(self, "_initialized"):
             return
 
-        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
         check_entity_type(entities, expected_type=NetworkInterface)
 
         self._logical_entity_registry = LogicalEntityRegistry.get_instance()
@@ -213,7 +215,8 @@ class TCPDataSource(DataSource):
         # Ring buffer config
         self._ring_config = RingBufferConfig(
             buffer_flush_threshold=10000,
-            buffer_flush_time_threshold=1.0,
+            buffer_flush_time_threshold=self._timing.ebpf_flush,
+            writer_flush_s=self._timing.storage_flush,
             output_queue=mp.Queue(),
             stop_event=mp.Event(),
             sentinel="TCP_SENTINEL",

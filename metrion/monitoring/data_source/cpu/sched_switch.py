@@ -13,6 +13,7 @@ import psutil
 from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
+from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
 from metrion.entity.cpu import CPU
@@ -668,6 +669,7 @@ class SchedSwitchMonitor(DataSource):
         entities: Sequence[CPU],
         interval: float | None = None,
         enabled_metrics: Sequence[Metric] | None = None,
+        timing: TimingConfig | None = None,
     ):
         """Initialize the SchedSwitchMonitor.
 
@@ -682,7 +684,7 @@ class SchedSwitchMonitor(DataSource):
             Metrics enabled in config for the CPU component.
         """
         if not hasattr(self, "_initialized"):
-            super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
+            super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
             self._initialized = True
 
             check_entity_type(entities)
@@ -720,7 +722,8 @@ class SchedSwitchMonitor(DataSource):
             # Track the background monitoring process
             self._ring_buffer_config = RingBufferConfig(
                 buffer_flush_threshold=10_000,
-                buffer_flush_time_threshold=1.0,
+                buffer_flush_time_threshold=self._timing.ebpf_flush,
+                writer_flush_s=self._timing.storage_flush,
                 output_queue=self._queue_monitoring_data,
                 stop_event=self._stop_event,
                 sentinel="SENTINEL",

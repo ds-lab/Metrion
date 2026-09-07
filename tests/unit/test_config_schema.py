@@ -211,6 +211,7 @@ class TestSourceIntervals:
         config = AgentConfig.from_yaml_file(shipped)
 
         assert config.timing.cycle == 10
+        assert (config.timing.ebpf_flush, config.timing.storage_flush) == (1.0, 2.0)
         assert config.timing.sources.rapl == 1.0
         assert config.timing.sources.tcp_monitor == 5.0
 
@@ -220,8 +221,13 @@ class TestTimingConfig:
 
     def test_defaults(self):
         t = TimingConfig()
-        assert t.cycle == 5.0
+        assert (t.cycle, t.ebpf_flush, t.storage_flush) == (5.0, 1.0, 2.0)
         assert t.sources.rapl == 1.0
+
+    def test_defaults_match_the_previously_hardcoded_values(self):
+        """1.0 s stood in sched_switch.py and tcp_monitor.py, 2.0 s was the IpcAsyncWriter default."""
+        t = TimingConfig()
+        assert (t.ebpf_flush, t.storage_flush) == (1.0, 2.0)
 
     def test_cycle_must_be_positive(self):
         with pytest.raises(ValidationError):

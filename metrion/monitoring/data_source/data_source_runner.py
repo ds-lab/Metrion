@@ -5,6 +5,7 @@ from collections.abc import Sequence
 
 from loguru import logger
 
+from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import Metric
@@ -21,9 +22,10 @@ class DataSourceRunner(threading.Thread):
         metrics: list[Metric],
         interval: float,
         queue: queue.Queue,
+        timing: TimingConfig | None = None,
     ):
         super().__init__(daemon=True)
-        self._datasource = datasource(entities, interval=interval, enabled_metrics=metrics)
+        self._datasource = datasource(entities, interval=interval, enabled_metrics=metrics, timing=timing)
         self._metrics = metrics
         self._interval = interval
         self._stop_event = threading.Event()

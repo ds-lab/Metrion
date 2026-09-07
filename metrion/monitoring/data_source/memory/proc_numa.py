@@ -11,6 +11,7 @@ from typing import override
 import polars as pl
 from loguru import logger
 
+from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.dram import DRAM
 from metrion.entity.entity import Entity
@@ -51,6 +52,7 @@ class ProcNuma(DataSource):
         entities: Sequence[DRAM],
         interval: float | None = None,
         enabled_metrics: list[Metric] | None = None,
+        timing: TimingConfig | None = None,
     ):
         """
         Initialize the ProcNuma data source.
@@ -62,7 +64,7 @@ class ProcNuma(DataSource):
         interval : float, optional
              The collection interval in seconds.
         """
-        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
         self.entities = entities
         self._last_called = time.perf_counter()
         # check_entity_type(entities, expected_type=DRAM)

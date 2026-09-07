@@ -158,13 +158,14 @@ class DataCollector:
     SENT_E = ("__EOF__", "entities")
     SENT_M = ("__EOF__", "measurements")
 
-    def __init__(self, storage_type: str, storage_path: str):
+    def __init__(self, storage_type: str, storage_path: str, flush_interval: float = 2.0):
         """
         Initialize the DataCollector.
 
         Args:
-            strategy: Dictionary with 'type' ('interval' or 'max_items') and 'value'
-            data_storage: Storage interface for persisting data records
+            storage_type: Backend to write to, e.g. 'duckdb' or 'sqlite'
+            storage_path: Target the backend is opened with
+            flush_interval: Seconds the IPC writer holds rows before writing a file
         """
         self._ctx = mp.get_context("spawn")
 
@@ -186,6 +187,7 @@ class DataCollector:
         self.ipc_writer = IpcAsyncWriter(
             out_paths_queue=self._measurements_queue,
             assign_ids=True,
+            max_age_s=flush_interval,
         )
 
         self._start_collection_process()

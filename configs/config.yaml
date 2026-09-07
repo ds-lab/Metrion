@@ -17,9 +17,19 @@ storage:
 # How often things happen. Every value here is one waiting step between an event in the kernel
 # and the moment its energy is attributed - change when latency matters.
 timing:
-  # The agent's main loop: how often it collects what the data sources have collected, and hands them to storage. 
+  # The agent's main loop: how often it collects what the data sources have collected, and hands them to storage.
   # Raising it batches more per round trip; lowering it shortens the delay until a measurement is on disk.
   cycle: 10
+
+  # The eBPF producers (sched_switch, tcp_monitor) collect kernel events into a buffer and hand
+  # it on in batches. This is how long a buffered event waits before it is handed on. Nothing is
+  # lost by raising it - the kernel probe keeps recording either way, the batch just gets bigger.
+  ebpf_flush: 1.0
+
+  # How long a writer holds finished rows before it writes them to a file. Applies to both
+  # writers: the one inside each eBPF producer and the one in the agent that feeds storage.
+  # Lowering it gets data onto disk sooner, in more and smaller files.
+  storage_flush: 2.0
 
   # How often each data source is collected. One entry per source, not per metric: a source is
   # collected as a whole, so all of its metrics share one interval.

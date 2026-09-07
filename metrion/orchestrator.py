@@ -173,6 +173,7 @@ class Orchestrator:
         self._data_collector = DataCollector(
             storage_type=storage.type,
             storage_path=storage.get_target(Path(__file__).parent.parent),
+            flush_interval=self._config.timing.storage_flush,
         )
 
     def create_physical_entities(self) -> None:
@@ -211,9 +212,7 @@ class Orchestrator:
                 continue
 
             if len(desired_metrics) > 0:
-                self._entity_monitors.append(
-                    EntityTypeMonitor(entities, desired_metrics, intervals=self._config.timing.sources)
-                )
+                self._entity_monitors.append(EntityTypeMonitor(entities, desired_metrics, timing=self._config.timing))
                 logger.debug(
                     f"Created monitor for {entity_type.__name__} with metrics: {[m.name for m in desired_metrics]}"
                 )

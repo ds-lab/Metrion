@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
+from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import Metric
@@ -22,6 +23,7 @@ class DataSource(ABC):
         entities: Sequence[Entity],
         interval: float | None = None,
         enabled_metrics: Sequence[Metric] | None = None,
+        timing: TimingConfig | None = None,
     ):
         """
         Initialize the data source with a list of entities.
@@ -34,6 +36,8 @@ class DataSource(ABC):
             The collection interval in seconds. If None, the interval is unknown or not applicable.
         enabled_metrics : Sequence of Metric, optional
             Metrics enabled in config for this data source's component.
+        timing : TimingConfig, optional
+            The timing section of the config. Only the sources that run an eBPF producer read it.
 
         Notes
         -----
@@ -42,6 +46,7 @@ class DataSource(ABC):
         self.entities: Sequence[Entity] = entities
         self._interval = interval
         self._enabled_metrics: Sequence[Metric] | None = enabled_metrics
+        self._timing = timing or TimingConfig()
         check_entity_type(entities)
 
     @abstractmethod
