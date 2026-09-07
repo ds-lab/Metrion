@@ -24,7 +24,7 @@ def restore_signal_handlers():
 def orchestrator(tmp_path):
     orch = Orchestrator(str(tmp_path / "config.yaml"))
     orch._config = MagicMock()
-    orch._config.general.collection_interval = 0.05
+    orch._config.timing.cycle = 0.05
     orch._logical_entity_registry = MagicMock()
     orch._logical_entity_registry.get_new_entities.return_value = []
     orch._data_collector = MagicMock()
@@ -82,7 +82,7 @@ def test_timeout_stops_the_loop_and_calls_stop_once(orchestrator):
 
 
 def test_loop_returns_promptly_on_shutdown_instead_of_sleeping(orchestrator):
-    orchestrator._config.general.collection_interval = 10.0
+    orchestrator._config.timing.cycle = 10.0
 
     thread = threading.Thread(target=orchestrator.start_monitoring, daemon=True)
     thread.start()

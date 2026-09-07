@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 from loguru import logger
 
-from metrion.config_reader.config_schema import SamplingConfig
+from metrion.config_reader.config_schema import SourceIntervals
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import Metric
@@ -23,13 +23,13 @@ class EntityTypeMonitor:
         The entities to monitor.
     metrics : list of Metric
         The metrics to collect for the entities.
-    sampling : SamplingConfig, optional
-        Collection interval per data source. Defaults to SamplingConfig().
+    intervals : SourceIntervals, optional
+        Collection interval per data source. Defaults to SourceIntervals().
     """
 
     # One config field per data source class. The names are deliberately spelled out because the
     # classes follow no shared naming pattern.
-    _SAMPLING_FIELD_BY_SOURCE = {
+    _INTERVAL_FIELD_BY_SOURCE = {
         "RAPLCPU": "rapl",
         "NVMLDataSource": "nvml",
         "ProcNuma": "proc_numa",
@@ -37,7 +37,7 @@ class EntityTypeMonitor:
         "TCPDataSource": "tcp_monitor",
     }
 
-    def __init__(self, entities: Sequence[Entity], metrics: list[Metric], sampling: SamplingConfig | None = None):
+    def __init__(self, entities: Sequence[Entity], metrics: list[Metric], intervals: SourceIntervals | None = None):
         """
         Initialize the EntityTypeMonitor.
 
@@ -47,12 +47,12 @@ class EntityTypeMonitor:
             The entities to monitor.
         metrics : list of Metric
             The metrics to collect for the entities.
-        sampling : SamplingConfig, optional
-            Collection interval per data source. Defaults to SamplingConfig().
+        intervals : SourceIntervals, optional
+            Collection interval per data source. Defaults to SourceIntervals().
         """
         self._entities = entities
         self._metrics = metrics
-        self._sampling = sampling or SamplingConfig()
+        self._intervals = intervals or SourceIntervals()
 
         check_entity_type(entities)
         DataSourceFactory.auto_register()
@@ -66,13 +66,13 @@ class EntityTypeMonitor:
         self._start()
 
     def _interval_for(self, data_source: type) -> float:
-        """Collection interval for a data source, taken from the sampling config."""
+        """Collection interval for a data source, taken from timing.sources."""
         name = data_source.__name__
-        field = self._SAMPLING_FIELD_BY_SOURCE.get(name)
+        field = self._INTERVAL_FIELD_BY_SOURCE.get(name)
         if field is None:
-            logger.warning(f"No sampling interval configured for {name}, using 5.0 s")
+            logger.warning(f"No collection interval configured for {name}, using 5.0 s")
             return 5.0
-        return getattr(self._sampling, field)
+        return getattr(self._intervals, field)
 
     def _setup(self):
         """

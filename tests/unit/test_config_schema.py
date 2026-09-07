@@ -6,45 +6,44 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from metrion.config_reader import (
     AgentConfig,
     ComponentConfig,
     ConfigReader,
-    DatabaseConfig,
     EnergyModelConfig,
-    SamplingConfig,
+    SourceIntervals,
+    StorageConfig,
     SubcomponentPowerConfig,
+    TimingConfig,
 )
 
 
-class TestDatabaseConfig:
-    """Tests for DatabaseConfig."""
+class TestStorageConfig:
+    """Tests for StorageConfig, which replaced general.database."""
 
     def test_default_values(self):
-        """Test default database configuration values."""
-        config = DatabaseConfig()
+        config = StorageConfig()
         assert config.type == "duckdb"
         assert config.path == "./monitor.db"
 
     def test_custom_values(self):
-        """Test custom database configuration values."""
-        config = DatabaseConfig(type="sqlite", path="/custom/path/db.sqlite")
+        config = StorageConfig(type="sqlite", path="/custom/path/db.sqlite")
         assert config.type == "sqlite"
         assert config.path == "/custom/path/db.sqlite"
 
-    def test_connection_string(self):
-        """Test connection string generation."""
-        config = DatabaseConfig(type="duckdb", path="./test.db")
-        conn_str = config.get_connection_string(Path("/base"))
-        assert conn_str == "duckdb:////base/test.db"
+    def test_relative_path_is_resolved_against_the_base(self):
+        config = StorageConfig(type="duckdb", path="./test.db")
+        assert config.get_target(Path("/base")) == "duckdb:////base/test.db"
 
-    def test_connection_string_absolute_path(self):
-        """Test connection string with absolute path."""
-        config = DatabaseConfig(type="sqlite", path="/absolute/path/db.sqlite")
-        conn_str = config.get_connection_string()
-        assert conn_str == "sqlite:////absolute/path/db.sqlite"
+    def test_absolute_path_is_kept(self):
+        config = StorageConfig(type="sqlite", path="/absolute/path/db.sqlite")
+        assert config.get_target() == "sqlite:////absolute/path/db.sqlite"
+
+    def test_rejects_unknown_type(self):
+        with pytest.raises(ValidationError):
+            StorageConfig(type="mongodb")
 
 
 class TestSubcomponentEnergyConfig:
@@ -157,54 +156,53 @@ class TestEnergyModelConfig:
         assert config.get_component_config("nonexistent") is None
 
 
-class TestSamplingConfig:
-    """Tests for SamplingConfig."""
+class TestSourceIntervals:
+    """Tests for timing.sources."""
 
     def test_defaults_match_previous_hardcoded_values(self):
-        """EntityTypeMonitor._setup uses 1.0 s for the energy sources and 5.0 s for the rest."""
-        s = SamplingConfig()
+        """EntityTypeMonitor._setup used 1.0 s for the energy sources and 5.0 s for the rest."""
+        s = SourceIntervals()
         assert (s.rapl, s.nvml, s.proc_numa, s.sched_switch, s.tcp_monitor) == (1.0, 1.0, 5.0, 5.0, 5.0)
 
     def test_one_field_per_data_source(self):
-        """A data source is polled as a whole, so its metrics cannot have separate intervals."""
-        assert set(SamplingConfig.model_fields) == {"rapl", "nvml", "proc_numa", "sched_switch", "tcp_monitor"}
+        """A data source is collected as a whole, so its metrics cannot have separate intervals."""
+        assert set(SourceIntervals.model_fields) == {"rapl", "nvml", "proc_numa", "sched_switch", "tcp_monitor"}
 
     def test_section_is_optional(self):
-        """A config without a sampling section keeps every default."""
-        config = AgentConfig.model_validate({"general": {}, "energy_model": {"components": {}}})
-        assert config.sampling.rapl == 1.0
+        """A config without a timing section keeps every default."""
+        config = AgentConfig.model_validate({"energy_model": {"components": {}}})
+        assert config.timing.sources.rapl == 1.0
 
     def test_rapl_below_grouping_limit_is_rejected(self):
         """Below 0.25 s the guard band would be wider than the usable window."""
         with pytest.raises(ValidationError):
-            SamplingConfig(rapl=0.2)
+            SourceIntervals(rapl=0.2)
 
     def test_only_rapl_has_a_lower_bound(self):
         """The 0.25 s limit comes from the grouping bucket width, which only rapl sets."""
-        assert SamplingConfig(sched_switch=0.1).sched_switch == 0.1
+        assert SourceIntervals(sched_switch=0.1).sched_switch == 0.1
 
     def test_rejects_non_positive(self):
         with pytest.raises(ValidationError):
-            SamplingConfig(sched_switch=-1)
+            SourceIntervals(sched_switch=-1)
 
     def test_values_are_read_from_yaml(self, tmp_path):
         path = tmp_path / "c.yaml"
         path.write_text(
-            "general:\n  collection_interval: 5\n"
+            "timing:\n  cycle: 5\n  sources:\n    rapl: 0.5\n    sched_switch: 2.0\n"
             "energy_model:\n  components:\n    cpu:\n      mode: include\n      metrics: '*'\n"
-            "sampling:\n  rapl: 0.5\n  sched_switch: 2.0\n"
         )
 
         config = ConfigReader.read_config(str(path))
 
-        assert config.sampling.rapl == 0.5
-        assert config.sampling.sched_switch == 2.0
-        assert config.sampling.proc_numa == 5.0, "fields left out keep their default"
+        assert config.timing.sources.rapl == 0.5
+        assert config.timing.sources.sched_switch == 2.0
+        assert config.timing.sources.proc_numa == 5.0, "fields left out keep their default"
 
     def test_misspelled_interval_is_rejected(self):
         """A typo must not silently leave the default in place."""
         with pytest.raises(ValidationError):
-            SamplingConfig.model_validate({"tcp_moniter": 5.0})
+            SourceIntervals.model_validate({"tcp_moniter": 5.0})
 
     def test_shipped_config_yaml_is_valid(self):
         """configs/config.yaml is the file users start from, so it has to validate."""
@@ -212,8 +210,70 @@ class TestSamplingConfig:
 
         config = AgentConfig.from_yaml_file(shipped)
 
-        assert config.sampling.rapl == 1.0
-        assert config.sampling.tcp_monitor == 5.0
+        assert config.timing.cycle == 10
+        assert config.timing.sources.rapl == 1.0
+        assert config.timing.sources.tcp_monitor == 5.0
+
+
+class TestTimingConfig:
+    """Tests for the timing section."""
+
+    def test_defaults(self):
+        t = TimingConfig()
+        assert t.cycle == 5.0
+        assert t.sources.rapl == 1.0
+
+    def test_cycle_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            TimingConfig(cycle=0)
+
+    def test_cycle_is_read_from_yaml(self, tmp_path):
+        """collection_interval moved out of general into timing.cycle."""
+        path = tmp_path / "c.yaml"
+        path.write_text("timing:\n  cycle: 12\nenergy_model:\n  components: {}\n")
+
+        assert AgentConfig.from_yaml_file(path).timing.cycle == 12
+
+
+class TestStrictSections:
+    """Unknown keys have to fail loudly - a silently ignored option is the bug we keep hitting."""
+
+    def test_every_model_forbids_extra_keys(self):
+        """Catches a section added later without extra="forbid"."""
+        import metrion.config_reader.config_schema as schema
+
+        models = [
+            obj
+            for obj in vars(schema).values()
+            if isinstance(obj, type) and issubclass(obj, BaseModel) and obj is not BaseModel
+        ]
+
+        assert models, "no models found - did the module move?"
+        assert [m.__name__ for m in models if m.model_config.get("extra") != "forbid"] == []
+
+    def test_a_config_from_before_the_rename_is_rejected(self):
+        """general.database and sampling are gone; an unmigrated config must not start silently."""
+        old_style = {
+            "general": {"database": {"type": "duckdb", "path": "./monitor.db"}, "collection_interval": 10},
+            "sampling": {"rapl": 1.0},
+            "energy_model": {"components": {}},
+        }
+
+        with pytest.raises(ValidationError) as exc:
+            AgentConfig.model_validate(old_style)
+
+        assert {e["loc"][0] for e in exc.value.errors()} == {"general", "sampling"}
+
+    def test_misspelled_component_is_rejected(self):
+        """A typo here used to be silent: the entry was ignored and the real component stayed on."""
+        with pytest.raises(ValidationError):
+            EnergyModelConfig.model_validate({"components": {"dramm": {"mode": "exclude"}}})
+
+    def test_known_components_are_accepted(self):
+        config = EnergyModelConfig.model_validate(
+            {"components": {name: {"mode": "include"} for name in ("cpu", "gpu", "dram", "network", "host")}}
+        )
+        assert len(config.components) == 5
 
 
 class TestAgentConfig:
@@ -222,20 +282,22 @@ class TestAgentConfig:
     def test_default_config(self):
         """Test default agent configuration."""
         config = AgentConfig()
-        assert config.general.database.type == "duckdb"
-        assert config.general.debug is False
-        assert config.general.collection_interval == 5.0
+        assert config.storage.type == "duckdb"
+        assert config.debug is False
+        assert config.timing.cycle == 5.0
         assert config.energy_model.granularity == "detailed"
 
     def test_from_yaml_file(self):
         """Test loading configuration from YAML file."""
         yaml_content = """
-general:
-  database:
-    type: sqlite
-    path: ./test.db
-  debug: true
-  collection_interval: 10
+debug: true
+
+storage:
+  type: sqlite
+  path: ./test.db
+
+timing:
+  cycle: 10
 
 energy_model:
   granularity: compressed
@@ -255,9 +317,9 @@ energy_model:
 
             config = AgentConfig.from_yaml_file(f.name)
 
-            assert config.general.database.type == "sqlite"
-            assert config.general.debug is True
-            assert config.general.collection_interval == 10.0
+            assert config.storage.type == "sqlite"
+            assert config.debug is True
+            assert config.timing.cycle == 10.0
             assert config.energy_model.granularity == "compressed"
             assert config.energy_model.is_component_included("cpu") is True
             assert config.energy_model.is_component_included("gpu") is False
@@ -272,12 +334,14 @@ energy_model:
     def test_from_yaml_file_with_auto_power(self):
         """Test loading configuration with auto power detection."""
         yaml_content = """
-general:
-  database:
-    type: duckdb
-    path: ./test.db
-  debug: false
-  collection_interval: 5
+debug: false
+
+storage:
+  type: duckdb
+  path: ./test.db
+
+timing:
+  cycle: 5
 
 energy_model:
   granularity: detailed
@@ -352,12 +416,14 @@ class TestConfigReader:
     def test_read_config(self):
         """Test reading configuration through ConfigReader."""
         yaml_content = """
-general:
-  database:
-    type: duckdb
-    path: ./test.db
-  debug: false
-  collection_interval: 5
+debug: false
+
+storage:
+  type: duckdb
+  path: ./test.db
+
+timing:
+  cycle: 5
 
 energy_model:
   granularity: detailed
@@ -372,18 +438,20 @@ energy_model:
             config = ConfigReader.read_config(f.name)
 
             assert isinstance(config, AgentConfig)
-            assert config.general.database.type == "duckdb"
-            assert config.general.debug is False
+            assert config.storage.type == "duckdb"
+            assert config.debug is False
 
     def test_read_config_with_debug_mode(self):
         """Test that debug mode adds timestamp to database path."""
         yaml_content = """
-general:
-  database:
-    type: duckdb
-    path: ./test.db
-  debug: true
-  collection_interval: 5
+debug: true
+
+storage:
+  type: duckdb
+  path: ./test.db
+
+timing:
+  cycle: 5
 
 energy_model:
   granularity: detailed
@@ -395,8 +463,8 @@ energy_model:
             config = ConfigReader.read_config(f.name)
 
             # In debug mode, the path should have a timestamp added
-            assert "test_" in config.general.database.path
-            assert ".db" in config.general.database.path
+            assert "test_" in config.storage.path
+            assert ".db" in config.storage.path
 
 
 class TestMetricsConfig:
@@ -447,11 +515,11 @@ class TestMetricsConfig:
     def test_yaml_config_with_metrics_wildcard(self):
         """Test loading YAML config with metrics wildcard."""
         yaml_content = """
-general:
-  database:
-    type: duckdb
-    path: ./test.db
-  debug: false
+debug: false
+
+storage:
+  type: duckdb
+  path: ./test.db
 
 energy_model:
   components:
@@ -469,11 +537,11 @@ energy_model:
     def test_yaml_config_with_metrics_list(self):
         """Test loading YAML config with specific metrics list."""
         yaml_content = """
-general:
-  database:
-    type: duckdb
-    path: ./test.db
-  debug: false
+debug: false
+
+storage:
+  type: duckdb
+  path: ./test.db
 
 energy_model:
   components:

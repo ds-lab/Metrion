@@ -168,10 +168,12 @@ class Orchestrator:
         Create the data collector using the configured storage strategy and data storage.
         """
         assert self._config is not None, "Config must be loaded before creating data collector."
-        storage_type = self._config.general.database.type
-        storage_path = self._config.get_database_connection_string(Path(__file__).parent.parent)
+        storage = self._config.storage
 
-        self._data_collector = DataCollector(storage_type=storage_type, storage_path=storage_path)
+        self._data_collector = DataCollector(
+            storage_type=storage.type,
+            storage_path=storage.get_target(Path(__file__).parent.parent),
+        )
 
     def create_physical_entities(self) -> None:
         """
@@ -210,7 +212,7 @@ class Orchestrator:
 
             if len(desired_metrics) > 0:
                 self._entity_monitors.append(
-                    EntityTypeMonitor(entities, desired_metrics, sampling=self._config.sampling)
+                    EntityTypeMonitor(entities, desired_metrics, intervals=self._config.timing.sources)
                 )
                 logger.debug(
                     f"Created monitor for {entity_type.__name__} with metrics: {[m.name for m in desired_metrics]}"
@@ -319,8 +321,8 @@ class Orchestrator:
             logger.debug(f"Total Iteration took {time_end - time_start} seconds")
 
             # Wait for the next cycle, but return immediately on shutdown.
-            if self._config.general.collection_interval and self._running:
-                if self._shutdown_requested.wait(self._config.general.collection_interval):
+            if self._config.timing.cycle and self._running:
+                if self._shutdown_requested.wait(self._config.timing.cycle):
                     break
 
         if self._shutdown_requested.is_set():

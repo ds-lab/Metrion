@@ -2,11 +2,13 @@
 Pydantic configuration schema for the Metrion agent.
 
 This module defines the configuration structure for:
-- Database settings (type, path)
-- General settings (debug mode)
+- Storage settings (type, path)
+- Timing: the collection cycle and the interval of every data source
 - Energy model configuration (granularity, components)
 - Component configuration (CPU, GPU, DRAM, Network) with include/exclude modes
-- Sampling intervals per data source
+
+Every section rejects unknown keys, so a misspelled option fails at startup instead of
+silently leaving the default in place.
 """
 
 import re
@@ -29,57 +31,48 @@ class PowerConfig:
 
 
 # ─────────────────────────────
-# Database section
+# Storage section
 # ─────────────────────────────
-class DatabaseConfig(BaseModel):
-    """Database configuration for storing collected metrics."""
+class StorageConfig(BaseModel):
+    """Where the collected data is written."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["sqlite", "duckdb"] = "duckdb"
     path: str = "./monitor.db"
 
-    def get_connection_string(self, base_path: Path | None = None) -> str:
+    def get_target(self, base_path: Path | None = None) -> str:
         """
-        Generate the database connection string.
+        Build the target that the storage backend is opened with.
 
         Parameters
         ----------
         base_path : Path, optional
-            Base path for resolving relative database paths.
+            Root for a relative path. Defaults to the repository root.
 
         Returns
         -------
         str
-            Database connection string in the format 'type:///path'.
+            Connection string in the format 'type:///path'.
         """
         if base_path is None:
             base_path = Path(__file__).parents[2]
 
-        db_path = Path(self.path)
-        if not db_path.is_absolute():
-            db_path = base_path / db_path
+        target = Path(self.path)
+        if not target.is_absolute():
+            target = base_path / target
 
-        return f"{self.type}:///{db_path}"
-
-
-# ─────────────────────────────
-# General section
-# ─────────────────────────────
-class GeneralConfig(BaseModel):
-    """General configuration settings."""
-
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
-    debug: bool = False
-    collection_interval: float = Field(default=5.0, gt=0, description="Data collection interval in seconds")
+        return f"{self.type}:///{target}"
 
 
 # ─────────────────────────────
-# Sampling section
+# Timing section
 # ─────────────────────────────
-class SamplingConfig(BaseModel):
+class SourceIntervals(BaseModel):
     """
     Collection interval of every data source, in seconds.
 
-    One field per data source, not per metric: a data source is polled as a whole, so all its
+    One field per data source, not per metric: a data source is collected as a whole, so all its
     metrics share one interval.
 
     This section is keyed by data source, energy_model.components is keyed by component. The two
@@ -92,9 +85,6 @@ class SamplingConfig(BaseModel):
     eBPF sources (sched_switch, tcp_monitor) the kernel probe records every event continuously
     and a producer process buffers them; the interval only says how often the agent picks up
     what has been buffered. Raising it costs freshness, never events.
-
-    Unknown keys are rejected so that a misspelled interval fails loudly instead of silently
-    falling back to the default.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -109,6 +99,20 @@ class SamplingConfig(BaseModel):
     tcp_monitor: float = Field(default=5.0, gt=0, description="Pick up buffered socket events (traffic per PID)")
 
 
+class TimingConfig(BaseModel):
+    """
+    Everything that decides how often something happens, in seconds.
+
+    The fields add up to the delay between an event in the kernel and the moment its energy is
+    attributed, so this is the section to change when latency matters.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    cycle: float = Field(default=5.0, gt=0, description="Drain the data source queues and hand a batch to storage")
+    sources: SourceIntervals = Field(default_factory=SourceIntervals)
+
+
 # ─────────────────────────────
 # Subcomponent power configuration
 # ─────────────────────────────
@@ -119,6 +123,8 @@ class SubcomponentPowerConfig(BaseModel):
     This is used ONLY for defining power characteristics (idle/max power)
     of specific subcomponents like CPU packages or GPUs.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     id: str | int
     idle_power: PowerValue = "auto"
@@ -205,6 +211,10 @@ SubcomponentsConfig = Literal["auto"] | list[SubcomponentPowerConfig]
 # Type for metrics: either "*" for all metrics, or a list of specific metric names
 MetricsConfig = Literal["*"] | list[str]
 
+# The components METRION knows about. Anything else in energy_model.components is a typo, and a
+# typo there is silent: the misspelled entry is ignored and the real component keeps its default.
+ComponentName = Literal["cpu", "gpu", "dram", "network", "host"]
+
 
 # ─────────────────────────────
 # Component configuration
@@ -221,6 +231,8 @@ class ComponentConfig(BaseModel):
     - "*": Collect all applicable metrics for this component
     - A list of metric names: Collect only the specified metrics
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     mode: Literal["include", "exclude"] = "include"
     power: SubcomponentsConfig = "auto"
@@ -259,8 +271,10 @@ class ComponentConfig(BaseModel):
 class EnergyModelConfig(BaseModel):
     """Configuration for the energy model and component settings."""
 
+    model_config = ConfigDict(extra="forbid")
+
     granularity: Literal["compressed", "detailed"] = "detailed"
-    components: dict[str, ComponentConfig] = Field(default_factory=dict)
+    components: dict[ComponentName, ComponentConfig] = Field(default_factory=dict)
 
     def is_component_included(self, component_name: str) -> bool:
         """
@@ -325,9 +339,12 @@ class EnergyModelConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Root configuration for the Metrion agent."""
 
-    general: GeneralConfig = Field(default_factory=GeneralConfig)
+    model_config = ConfigDict(extra="forbid")
+
+    debug: bool = False
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    timing: TimingConfig = Field(default_factory=TimingConfig)
     energy_model: EnergyModelConfig = Field(default_factory=EnergyModelConfig)
-    sampling: SamplingConfig = Field(default_factory=SamplingConfig)
 
     @classmethod
     def from_yaml_file(cls, path: str | Path) -> "AgentConfig":
@@ -361,22 +378,6 @@ class AgentConfig(BaseModel):
             config_dict = yaml.safe_load(f)
 
         return cls.model_validate(config_dict)
-
-    def get_database_connection_string(self, base_path: Path | None = None) -> str:
-        """
-        Get the database connection string.
-
-        Parameters
-        ----------
-        base_path : Path, optional
-            Base path for resolving relative paths.
-
-        Returns
-        -------
-        str
-            Database connection string.
-        """
-        return self.general.database.get_connection_string(base_path)
 
     def get_subcomponent_power_config(self, component_type: str, subcomponent_id: str | int) -> PowerConfig:
         """

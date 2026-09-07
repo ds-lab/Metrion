@@ -47,15 +47,15 @@ class ConfigReader:
         config = AgentConfig.from_yaml_file(config_path)
 
         # Configure logging level based on debug setting
-        cls._configure_logging(config.general.debug)
+        cls._configure_logging(config.debug)
 
         # Apply debug mode transformations if needed
-        if config.general.debug:
+        if config.debug:
             config = cls._apply_debug_transformations(config)
 
         logger.info(f"Configuration loaded from {config_path}")
-        logger.debug(f"Database type: {config.general.database.type}")
-        logger.debug(f"Collection interval: {config.general.collection_interval}s")
+        logger.debug(f"Storage: {config.storage.type} at {config.storage.path}")
+        logger.debug(f"Collection cycle: {config.timing.cycle}s")
         logger.debug(f"Energy model granularity: {config.energy_model.granularity}")
 
         return config
@@ -82,31 +82,23 @@ class ConfigReader:
     @classmethod
     def _apply_debug_transformations(cls, config: AgentConfig) -> AgentConfig:
         """
-        Apply debug-mode specific transformations to the configuration.
-
-        In debug mode, the database path is modified to include a timestamp
-        to avoid overwriting previous data.
+        Append a timestamp to the storage path so debug runs do not overwrite each other.
 
         Parameters
         ----------
         config : AgentConfig
-            The original configuration.
+            The configuration to modify.
 
         Returns
         -------
         AgentConfig
-            Modified configuration with debug transformations applied.
+            The same object, with storage.path rewritten.
         """
-        # Add timestamp to database path in debug mode
-        original_path = Path(config.general.database.path)
+        original_path = Path(config.storage.path)
         timestamp = datetime.now(UTC).strftime("_%Y_%m_%d_%H_%M_%S")
-        new_path = original_path.with_stem(original_path.stem + timestamp)
+        config.storage.path = str(original_path.with_stem(original_path.stem + timestamp))
 
-        # Create a new config with the modified path
-        config_dict = config.model_dump()
-        config_dict["general"]["database"]["path"] = str(new_path)
-
-        return AgentConfig.model_validate(config_dict)
+        return config
 
 
 # Backwards compatibility - expose read_config as module-level function

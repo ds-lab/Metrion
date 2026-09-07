@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
-from metrion.config_reader import SamplingConfig
+from metrion.config_reader import SourceIntervals
 from metrion.monitoring.timing_context import TimingContext
 
 # grouping_threshold_ms lives in cpu/utils.py, which imports bcc at module level.
@@ -34,10 +34,10 @@ def test_window_keeps_80_percent_of_the_interval(interval_ms):
 
 
 def test_every_rapl_interval_the_config_accepts_stays_groupable():
-    """Ties SamplingConfig's lower bound to this formula: lowering it must fail here first."""
+    """Ties the lower bound in SourceIntervals to this formula: lowering it must fail here first."""
     for interval_ms in range(1, 2001):
         try:
-            SamplingConfig(rapl=interval_ms / 1000)
+            SourceIntervals(rapl=interval_ms / 1000)
         except ValidationError:
             continue
         assert interval_ms - 2 * grouping_threshold_ms(interval_ms) > 0, f"{interval_ms} ms leaves no window"
