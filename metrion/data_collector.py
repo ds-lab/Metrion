@@ -185,6 +185,7 @@ class DataCollector:
         # IPC writer
         self.ipc_writer = IpcAsyncWriter(
             out_paths_queue=self._measurements_queue,
+            assign_ids=True,
         )
 
         self._start_collection_process()

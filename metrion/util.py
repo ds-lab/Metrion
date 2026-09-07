@@ -1,10 +1,12 @@
 import multiprocessing as mp
 import os
 import tempfile
+import time
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
 from threading import Thread
 
 import polars as pl
@@ -14,34 +16,83 @@ from metrion.entity.entity import Entity
 from metrion.measurement import CommunicationMeasurement, Measurement
 
 
-class IpcAsyncWriterV2:
+@dataclass
+class _Batch:
+    """Frames waiting to be written as one IPC file, plus when the first of them arrived."""
+
+    dfs: list[pl.DataFrame] = field(default_factory=list)
+    rows: int = 0
+    oldest: float | None = None
+
+    def add(self, df: pl.DataFrame) -> None:
+        if not self.dfs:
+            self.oldest = time.monotonic()
+        self.dfs.append(df)
+        self.rows += df.height
+
+    def clear(self) -> None:
+        self.dfs = []
+        self.rows = 0
+        self.oldest = None
+
+    def is_older_than(self, max_age_s: float) -> bool:
+        return self.oldest is not None and (time.monotonic() - self.oldest) >= max_age_s
+
+
+class IpcAsyncWriter:
     """
     Background IPC writer.
-    Enqueue Polars DataFrames; writer batches up to `max_rows` then writes IPC to disk
-    and emits the file path to `out_paths_queue`.
+
+    Enqueue Polars DataFrames; the writer keeps one batch per ``df_type`` and writes it to a
+    temporary IPC file once the batch reaches ``max_rows`` rows or its oldest frame is
+    ``max_age_s`` old, then puts the file path on ``out_paths_queue``.
+
+    Parameters
+    ----------
+    out_paths_queue : mp.Queue
+        Receives the path of every file the writer produces.
+    max_rows : int
+        Row count at which a batch is written out.
+    max_age_s : float
+        Age of the oldest buffered frame at which a batch is written out, even if the row
+        threshold was never reached.
+    assign_ids : bool
+        Give every row a snowflake ``id`` before buffering it. Set it for measurement frames;
+        raw event frames do not need one.
     """
 
-    def __init__(self, out_paths_queue: mp.Queue, max_rows: int = 500_000):
+    _SENTINEL = object()
+
+    def __init__(
+        self,
+        out_paths_queue: mp.Queue,
+        max_rows: int = 500_000,
+        max_age_s: float = 2.0,
+        assign_ids: bool = False,
+    ):
         self._out_paths_queue = out_paths_queue
         self._max_rows = int(max_rows)
+        self._max_age_s = float(max_age_s)
+        self._poll_interval = max(0.01, min(0.25, self._max_age_s / 4))
+        self._assign_ids = assign_ids
 
-        self._batch: list[pl.DataFrame] = []
-        self._batch_rows: int = 0
-
-        self._sentinel = object()
+        self._batches: dict[str, _Batch] = {}
 
         self._jobs: Queue[object] = Queue()
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def enqueue(self, dfs: pl.DataFrame | Sequence[pl.DataFrame]) -> None:
+    def enqueue(self, dfs: pl.DataFrame | Sequence[pl.DataFrame], df_type: str = "measurement") -> None:
         if isinstance(dfs, pl.DataFrame):
-            self._jobs.put([dfs])
-        else:
-            self._jobs.put(list(dfs))
+            dfs = [dfs]
+        if not isinstance(dfs, Sequence):
+            raise TypeError(f"Expected pl.DataFrame or Sequence[pl.DataFrame], got {type(dfs)!r}")
+        if not isinstance(df_type, str):
+            raise TypeError(f"df_type must be a str, got {type(df_type)!r}")
+        self._jobs.put((list(dfs), df_type))
 
     def close(self) -> None:
-        self._jobs.put(self._sentinel)
+        self._jobs.put(self._SENTINEL)
         self._thread.join()
 
     def _emit_path(self, path: str | Path) -> None:
@@ -50,146 +101,70 @@ class IpcAsyncWriterV2:
     def _write_df(self, df: pl.DataFrame) -> None:
         self._emit_path(write_temp_ipc(df))
 
-    def _flush_batch(self) -> None:
-        if not self._batch:
-            return
-        self._write_df(pl.concat(self._batch, how="vertical"))
-        self._batch.clear()
-        self._batch_rows = 0
+    def _batch_for(self, df_type: str) -> _Batch:
+        return self._batches.setdefault(df_type, _Batch())
 
-    def _run(self) -> None:
-        import logging
-
-        log = logging.getLogger(__name__)
-
-        while True:
-            item = self._jobs.get()
-            try:
-                if item is self._sentinel:
-                    self._flush_batch()
-                    return
-
-                if not isinstance(item, list):
-                    raise TypeError(f"Expected list[pl.DataFrame], got {type(item)!r}")
-
-                for df in item:
-                    if not isinstance(df, pl.DataFrame):
-                        raise TypeError(f"Expected pl.DataFrame, got {type(df)!r}")
-
-                    # Huge df: flush current batch, then write chunked.
-                    if df.height > self._max_rows:
-                        self._flush_batch()
-                        for chunk in split_large_df(df, self._max_rows):
-                            self._write_df(chunk)
-                        continue
-
-                    # Would overflow: flush first.
-                    if self._batch_rows + df.height > self._max_rows:
-                        self._flush_batch()
-
-                    self._batch.append(df)
-                    self._batch_rows += df.height
-
-            except Exception:
-                log.exception("IPC writer failed")
-            finally:
-                self._jobs.task_done()
-
-
-class IpcAsyncWriter:
-    _SENTINEL = object()
-
-    """
-    Background IPC writer.
-    - enqueue(dfs): returns quickly (unless queue is full -> backpressure)
-    - worker writes df to a temp file and pushes the path to out_paths_queue
-    """
-
-    def __init__(
-        self,
-        out_paths_queue: mp.Queue,
-        max_rows: int = 500_000,
-    ):
-        self._out_paths_queue = out_paths_queue
-        self._jobs: Queue[object] = Queue()
-        self._max_rows = max_rows
-
-        self._thread = Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def enqueue(self, dfs: Sequence[pl.DataFrame], df_type: str) -> None:
-        self._jobs.put((dfs, df_type))
-
-    def close(self) -> None:
-        self._jobs.put(self._SENTINEL)
-        self._thread.join()
-
-    def _emit_path(self, path: Path) -> None:
-        self._out_paths_queue.put(str(path))
-
-    def _flush_measurements(self, measurement_dfs: list[pl.DataFrame]) -> None:
-        if not measurement_dfs:
+    def _flush(self, df_type: str) -> None:
+        batch = self._batch_for(df_type)
+        if not batch.dfs:
             return
         try:
-            measurement_df = pl.concat(measurement_dfs, how="vertical")
-            path = Path(write_temp_ipc(measurement_df))
-            self._emit_path(path)
-        except Exception as e:
-            logger.warning(f"IPC writer failed during measurement flush with {e}")
-            schema = [df.schema for df in measurement_dfs]
-            print(schema)
+            self._write_df(pl.concat(batch.dfs, how="vertical"))
+        except Exception:
+            schemas = [df.schema for df in batch.dfs]
+            logger.opt(exception=True).warning(f"IPC writer dropped a {df_type} batch, schemas: {schemas}")
+        finally:
+            # A batch that cannot be written would otherwise be retried forever and keep growing.
+            batch.clear()
+
+    def _flush_all(self) -> None:
+        for df_type in list(self._batches):
+            self._flush(df_type)
+
+    def _flush_aged(self) -> None:
+        for df_type, batch in list(self._batches.items()):
+            if batch.is_older_than(self._max_age_s):
+                self._flush(df_type)
+
+    def _buffer(self, dfs: Sequence[pl.DataFrame], df_type: str) -> None:
+        batch = self._batch_for(df_type)
+        for df in dfs:
+            if not isinstance(df, pl.DataFrame):
+                raise TypeError(f"Expected pl.DataFrame, got {type(df)!r}")
+            if self._assign_ids:
+                df = _add_id_to_measurement_df(df)
+
+            # Huge frame: write out what is pending, then write the frame in chunks.
+            if df.height > self._max_rows:
+                self._flush(df_type)
+                for chunk in split_large_df(df, self._max_rows):
+                    self._write_df(chunk)
+                continue
+
+            # Would overflow: write out what is pending first.
+            if batch.rows + df.height > self._max_rows:
+                self._flush(df_type)
+
+            batch.add(df)
 
     def _run(self) -> None:
-        running_measurement_rows = 0
-        measurement_dfs: list[pl.DataFrame] = []
-
         while True:
-            item = self._jobs.get()
+            try:
+                item = self._jobs.get(timeout=self._poll_interval)
+            except Empty:
+                # No new work. Only check whether a batch has aged out; nothing was taken
+                # off the queue, so no task_done() here.
+                self._flush_aged()
+                continue
+
             try:
                 if item is self._SENTINEL:
-                    # flush leftovers before exit
-                    self._flush_measurements(measurement_dfs)
+                    self._flush_all()
                     return
 
                 dfs, df_type = item
-                if not isinstance(df_type, str):
-                    raise TypeError("df_type must be a str")
-
-                # Accept any sequence/iterable of dfs
-                if not isinstance(dfs, Sequence):
-                    raise TypeError("dfs must be a Sequence[pl.DataFrame]")
-
-                if df_type == "measurement":
-                    for df in dfs:
-                        df = _add_id_to_measurement_df(df)
-                        if df.height > self._max_rows:
-                            # flush pending small ones first to keep batching consistent
-                            self._flush_measurements(measurement_dfs)
-                            measurement_dfs = []
-                            running_measurement_rows = 0
-
-                            for chunk in split_large_df(df, self._max_rows):
-                                path = write_temp_ipc(chunk)
-                                self._emit_path(path)
-                            continue
-
-                        # flush BEFORE overflow, so written batch stays <= _max_rows
-                        if running_measurement_rows + df.height > self._max_rows:
-                            self._flush_measurements(measurement_dfs)
-                            measurement_dfs = []
-                            running_measurement_rows = 0
-
-                        measurement_dfs.append(df)
-                        running_measurement_rows += df.height
-
-                elif df_type == "communication_measurement":
-                    comm_df = pl.concat(dfs, how="vertical")
-                    comm_df = _add_id_to_measurement_df(comm_df)
-                    path = write_temp_ipc(comm_df)
-                    self._emit_path(path)
-
-                else:
-                    raise ValueError(f"Unknown df_type: {df_type}")
+                self._buffer(dfs, df_type)
+                self._flush_aged()
 
             except Exception:
                 logger.exception("IPC writer failed")

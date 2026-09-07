@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 import polars as pl
 from loguru import logger
 
-from metrion.util import IpcAsyncWriterV2
+from metrion.util import IpcAsyncWriter
 
 
 @dataclass(slots=True)
@@ -73,7 +73,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         self._bpf = None
 
         # ipc writer
-        self._ipc_writer: None | IpcAsyncWriterV2 = None
+        self._ipc_writer: None | IpcAsyncWriter = None
 
     # -----------------------------
     # Singleton process management
@@ -121,7 +121,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
     # -----------------------------
     def run(self) -> None:
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        self._ipc_writer = IpcAsyncWriterV2(self._queue, max_rows=self._buffer_flush_threshold)
+        self._ipc_writer = IpcAsyncWriter(self._queue, max_rows=self._buffer_flush_threshold)
         try:
             self._bpf = self._create_bpf()
             self._setup_perf_events()
