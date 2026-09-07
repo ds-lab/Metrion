@@ -46,6 +46,7 @@ from metrion.monitoring.data_source.cpu.utils import (
 from metrion.monitoring.data_source.data_source_base import DataSource
 from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
 from metrion.monitoring.timing_context import TimingContext, TimingContextRegistry
+from metrion.queue_util import drain_remaining, drain_until_sentinel
 from metrion.util import check_entity_type, read_temp_ipc, split_large_df
 
 
@@ -777,6 +778,7 @@ class SchedSwitchMonitor(DataSource):
             self._total_work_data = 0
             self._raw_events_received = 0
             self._clock_validated = False
+            self._producer_finished = False
 
     def _core_entities_to_df(self) -> tuple[pl.DataFrame, list[Any]]:
         ids_cpu_cores = []
@@ -883,9 +885,12 @@ class SchedSwitchMonitor(DataSource):
         for _ in range(max_iterations):
             try:
                 item = self._queue_monitoring_data.get(timeout=timeout)
-                df_paths.append(item)
             except q.Empty:
                 break
+            if item == self._ring_buffer_config.sentinel:
+                self._producer_finished = True
+                break
+            df_paths.append(item)
 
         if len(df_paths) == 0:
             return pl.DataFrame()
@@ -1433,30 +1438,32 @@ class SchedSwitchMonitor(DataSource):
     def stop(self, metrics: list[Metric]) -> DataRecord | None:
         self._rb_sched_switch.stop()
 
-        # drain buffer until sentinal reached
-        df_paths = []
-        while True:
-            try:
-                item = self._queue_monitoring_data.get(timeout=0.5)
-                if item == self._ring_buffer_config.sentinel:
-                    break
-                df_paths.append(item)
-            except q.Empty:
-                continue
+        if self._producer_finished:
+            # The sentinel was already consumed during normal operation, so there is nothing
+            # left to wait for beyond the items still in flight.
+            df_paths = drain_remaining(self._queue_monitoring_data, name="sched_switch")
+        else:
+            df_paths, seen = drain_until_sentinel(
+                self._queue_monitoring_data,
+                self._ring_buffer_config.sentinel,
+                deadline_s=30.0,
+                name="sched_switch",
+            )
+            if not seen:
+                logger.warning("sched_switch: sentinel not received, continuing anyway")
 
-        df_list = []
-        for path in df_paths:
-            df = read_temp_ipc(path)
-            df_list.append(df)
-
-        df = pl.concat(df_list, how="vertical").unique()
+        df_list = [read_temp_ipc(path) for path in df_paths]
 
         # build final cache of metrics
-        self._calculate_and_cache_metrics(df)
+        if df_list:
+            df = pl.concat(df_list, how="vertical").unique()
+            self._calculate_and_cache_metrics(df)
         final_data_record = self.get_data(metrics)
 
-        self._rb_sched_switch.join(600)
+        self._rb_sched_switch.join(timeout=15)
         if self._rb_sched_switch.is_alive():
+            logger.warning("sched_switch BPF process did not exit, killing it")
             self._rb_sched_switch.kill()
+            self._rb_sched_switch.join(timeout=5)
 
         return final_data_record

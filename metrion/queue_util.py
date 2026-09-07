@@ -54,3 +54,43 @@ def drain_until_sentinel(
         if item == sentinel:
             return items, True
         items.append(item)
+
+
+def drain_remaining(
+    queue: Any,
+    idle_timeout: float = 0.5,
+    deadline_s: float = 5.0,
+    name: str = "queue",
+) -> list[Any]:
+    """
+    Drain whatever is still in a queue, without waiting for a sentinel.
+
+    Parameters
+    ----------
+    queue : queue.Queue | multiprocessing.Queue
+        The queue to drain.
+    idle_timeout : float
+        Return once nothing has arrived for this many seconds.
+    deadline_s : float
+        Hard upper bound on the total time spent, in seconds.
+    name : str
+        Label for the warning logged when the deadline is hit.
+
+    Returns
+    -------
+    list[Any]
+        The items read.
+    """
+    items: list[Any] = []
+    end = time.monotonic() + deadline_s
+
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            logger.warning(f"drain_remaining({name}): deadline of {deadline_s}s reached, {len(items)} items read")
+            return items
+
+        try:
+            items.append(queue.get(timeout=min(idle_timeout, remaining)))
+        except Empty:
+            return items
