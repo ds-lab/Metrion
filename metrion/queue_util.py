@@ -1,3 +1,4 @@
+import threading
 import time
 from queue import Empty
 from typing import Any
@@ -94,3 +95,37 @@ def drain_remaining(
             items.append(queue.get(timeout=min(idle_timeout, remaining)))
         except Empty:
             return items
+
+
+def close_and_join_feeder(queue: Any, timeout_s: float = 10.0, name: str = "queue") -> bool:
+    """
+    Close a multiprocessing queue and wait for its feeder thread to flush.
+
+    Falls back to ``cancel_join_thread`` when the timeout expires, which drops whatever
+    is still buffered. That only happens when nothing is reading the other end.
+
+    Parameters
+    ----------
+    queue : multiprocessing.Queue
+        The queue to close.
+    timeout_s : float
+        Maximum time to wait for the feeder thread, in seconds.
+    name : str
+        Label for the warning logged when the timeout is hit.
+
+    Returns
+    -------
+    bool
+        Whether the buffered data was flushed.
+    """
+    queue.close()
+
+    joiner = threading.Thread(target=queue.join_thread, daemon=True)
+    joiner.start()
+    joiner.join(timeout_s)
+
+    if joiner.is_alive():
+        logger.warning(f"close_and_join_feeder({name}): feeder did not flush within {timeout_s}s, dropping buffer")
+        queue.cancel_join_thread()
+        return False
+    return True

@@ -13,6 +13,7 @@ from metrion.data_storage.data_storage_factory import DataStorageFactory
 from metrion.energy_attribution.energy_attribution import DyncamicEnergyAttributionModel
 from metrion.entity.entity import Entity
 from metrion.measurement import Measurement
+from metrion.queue_util import close_and_join_feeder, drain_until_sentinel
 from metrion.util import (
     IpcAsyncWriter,
     read_temp_ipc,
@@ -120,51 +121,30 @@ class DataSaver:
         self._data_storage.save_measurements(dfs)
         del dfs
 
-    def _stop(self):
+    def _stop(self, deadline_s: float = 20.0):
         # Final drain of queues using sentinels
-        current_iter_e = 0
-        while not self._received_sent_e:
-            current_iter_e += 1
-            if current_iter_e > 1000:
-                logger.warning("Stuck waiting for ENTITY sentinel, breaking loop")
-                break
-            try:
-                item = self._entities_queue.get(timeout=1)
-
-                if item == DataCollector.SENT_E:
-                    self._received_sent_e = True
-                    break
+        if not self._received_sent_e:
+            items, seen = drain_until_sentinel(
+                self._entities_queue, DataCollector.SENT_E, deadline_s=deadline_s, name="entities"
+            )
+            for item in items:
                 self._data_storage.save_entities(item)
-            except Empty:
-                continue
+            self._received_sent_e = seen
+            if not seen:
+                logger.warning("Entity sentinel not received, some entities may be missing")
 
-        current_iter_m = 0
-        while not self._received_sent_m:
-            current_iter_m += 1
-            if current_iter_m > 1000:  # Safety break
-                logger.warning("Stuck waiting for MEASUREMENT sentinel, breaking loop")
-                break
-            try:
-                path = self._measurements_queue.get(timeout=1)
-                if path == DataCollector.SENT_M:
-                    self._received_sent_m = True
-                    break
-                df = read_temp_ipc(path)
-                self._data_storage.save_measurements([df])
-                del df
-            except Empty:
-                continue
+        if not self._received_sent_m:
+            items, seen = drain_until_sentinel(
+                self._measurements_queue, DataCollector.SENT_M, deadline_s=deadline_s, name="measurements"
+            )
+            for path in items:
+                self._data_storage.save_measurements([read_temp_ipc(path)])
+            self._received_sent_m = seen
+            if not seen:
+                logger.warning("Measurement sentinel not received, some measurements may be missing")
 
-        # Energies calculation logic from original _stop was commented out mostly
-        # energies = []
-        # self._data_storage.save_data_record(DataRecord(entities, energies), progressbar=True)
-        # Use simple close
-
+        # The queues belong to the producer; closing them here would only block this side.
         self._data_storage.close()
-        self._entities_queue.close()
-        self._measurements_queue.close()
-        self._entities_queue.join_thread()
-        self._measurements_queue.join_thread()
 
 
 def start_data_saver(data_saver: DataSaver):
@@ -256,7 +236,7 @@ class DataCollector:
             self._measurement_buffer = []
             self._buffer_row_count = 0
 
-    def stop(self):
+    def stop(self, join_timeout: float = 60.0):
         """Stop the data collection process gracefully."""
         # Flush any remaining measurements
         self._flush_measurements()
@@ -264,24 +244,25 @@ class DataCollector:
 
         self._entities_queue.put(DataCollector.SENT_E)
         self._measurements_queue.put(DataCollector.SENT_M)
+
+        # Let the feeder threads push the sentinels through before the saver is told to
+        # wind down. cancel_join_thread() here would be allowed to drop them.
+        close_and_join_feeder(self._entities_queue, name="entities")
+        close_and_join_feeder(self._measurements_queue, name="measurements")
+
         self._stop_event.set()
         logger.debug("Saving final data...")
 
-        self._entities_queue.close()
-        self._measurements_queue.close()
-        self._entities_queue.cancel_join_thread()
-        self._measurements_queue.cancel_join_thread()
-
         if self.process:
-            self.process.join(timeout=600)
+            self.process.join(timeout=join_timeout)
             if self.process.is_alive():
-                logger.warning("Process didn't stop gracefully, terminating...")
+                logger.warning(f"Saver process still running after {join_timeout}s, terminating...")
+                self.process.terminate()
+                self.process.join(timeout=5)
+            if self.process.is_alive():
+                logger.warning("Saver process ignored SIGTERM, killing it")
                 self.process.kill()
                 self.process.join(timeout=5)
             self.process = None
-
-        # close queues
-        self._entities_queue.close()
-        self._measurements_queue.close()
 
         logger.info("DataCollector stopped.")
