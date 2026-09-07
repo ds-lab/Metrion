@@ -211,6 +211,82 @@ class EnergyAttributionModelBase(ABC):
         )
         return (empty_df, empty_df, empty_df)
 
+    @staticmethod
+    def _join_overlapping(
+        measurements: pl.DataFrame | pl.LazyFrame,
+        intervals: pl.DataFrame | pl.LazyFrame,
+        predicates: Sequence[pl.Expr],
+        value_col: str | None = None,
+        meas_start: str = "meas_start",
+        meas_end: str = "meas_end",
+        interval_start: str = "interval_start",
+        interval_end: str = "interval_end",
+    ) -> pl.DataFrame | pl.LazyFrame:
+        """Join measurements to every energy interval they overlap.
+
+        Parameters
+        ----------
+        measurements : pl.DataFrame or pl.LazyFrame
+            Left frame, carrying the measurement window.
+        intervals : pl.DataFrame or pl.LazyFrame
+            Right frame, carrying the energy interval window.
+        predicates : Sequence[pl.Expr]
+            Additional join conditions, usually the entity binding. A column present in
+            both frames is addressed with the ``_right`` suffix on the interval side.
+        value_col : str, optional
+            Additive column, scaled by the share of the measurement that falls into the
+            interval. Leave at None for rates and levels, which must not be split.
+        meas_start, meas_end, interval_start, interval_end : str
+            Column names of the two windows.
+
+        Returns
+        -------
+        pl.DataFrame or pl.LazyFrame
+            One row per measurement and overlapped interval. With ``value_col`` set, the
+            shares of a single measurement add up to its original value. The measurement
+            window columns keep their original, unclipped values and therefore repeat
+            across the rows of one measurement; the interval columns say which slice a
+            row belongs to, so group and join on those.
+        """
+        # Point measurements (start_ts == end_ts) overlap no half-open interval, so they
+        # get the smallest representable width before the join.
+        measurements = measurements.with_columns(
+            pl.when(pl.col(meas_end) <= pl.col(meas_start))
+            .then(pl.col(meas_start) + pl.duration(microseconds=1))
+            .otherwise(pl.col(meas_end))
+            .alias(meas_end)
+        )
+
+        joined = measurements.join_where(
+            intervals,
+            *predicates,
+            pl.col(meas_start) < pl.col(interval_end),
+            pl.col(meas_end) > pl.col(interval_start),
+        )
+
+        if value_col is None:
+            return joined
+
+        return (
+            joined.with_columns(
+                pl.max_horizontal(
+                    pl.col(meas_start).dt.timestamp("ns"),
+                    pl.col(interval_start).dt.timestamp("ns"),
+                ).alias("_overlap_start_ns"),
+                pl.min_horizontal(
+                    pl.col(meas_end).dt.timestamp("ns"),
+                    pl.col(interval_end).dt.timestamp("ns"),
+                ).alias("_overlap_end_ns"),
+                (pl.col(meas_end).dt.timestamp("ns") - pl.col(meas_start).dt.timestamp("ns")).alias("_span_ns"),
+            )
+            .with_columns(
+                (
+                    pl.col(value_col) * (pl.col("_overlap_end_ns") - pl.col("_overlap_start_ns")) / pl.col("_span_ns")
+                ).alias(value_col)
+            )
+            .drop(["_overlap_start_ns", "_overlap_end_ns", "_span_ns"])
+        )
+
     @abstractmethod
     def attribute_energy(
         self,
@@ -287,6 +363,31 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
             return self._empty_result()
         return self._attribute_pkg_energy(measurement_df, cpu_df, core_df, start_time, end_time)
 
+    def _split_over_intervals(
+        self, measurements: pl.DataFrame, energy_intervals: pl.DataFrame, value_col: str
+    ) -> pl.DataFrame:
+        """Distribute measurements over the energy intervals they overlap.
+
+        A measurement touching two intervals appears in both, each time carrying the
+        share of its duration that falls into that interval, so the shares add up to the
+        original value.
+
+        Parameters
+        ----------
+        measurements : pl.DataFrame
+            Columns package_id, meas_start, meas_end and value_col.
+        energy_intervals : pl.DataFrame
+            Columns package_id, interval_start, interval_end.
+        value_col : str
+            Name of the column to split.
+        """
+        return self._join_overlapping(
+            measurements,
+            energy_intervals,
+            [pl.col("package_id") == pl.col("package_id_right")],
+            value_col=value_col,
+        )
+
     def _attribute_pkg_energy(
         self,
         measurement_df: pl.DataFrame,
@@ -344,8 +445,8 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
         measurement_core = (
             measurement_df.filter(
                 pl.col("metric_id").is_in([self._WORK_METRIC, self._TIME_METRIC])
-                & (pl.col("start_ts") >= start_time)
-                & (pl.col("end_ts") <= end_time)
+                & (pl.col("end_ts") >= start_time)
+                & (pl.col("start_ts") <= end_time)
                 & pl.col("value").is_not_null()
                 & (pl.col("value").abs() < 1e307)
             )
@@ -362,43 +463,37 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
             )
         )
 
-        work_measurements = (
-            measurement_core.filter(pl.col("metric_id") == self._WORK_METRIC)
-            .join_where(
-                energy_intervals,
-                pl.col("package_id") == pl.col("package_id"),
-                (pl.col("meas_start") >= pl.col("interval_start")) & (pl.col("meas_end") <= pl.col("interval_end")),
-            )
-            .select(
-                [
-                    "interval_start",
-                    "interval_end",
-                    "logical_entity_id",
-                    "package_id",
-                    pl.col("meas_value").alias("work_value"),
-                ]
-            )
+        # Work and time must be split the same way, otherwise the numerator and the
+        # denominator of the later share no longer describe the same set of measurements.
+        work_measurements = self._split_over_intervals(
+            measurement_core.filter(pl.col("metric_id") == self._WORK_METRIC),
+            energy_intervals,
+            "meas_value",
+        ).select(
+            [
+                "interval_start",
+                "interval_end",
+                "logical_entity_id",
+                "package_id",
+                pl.col("meas_value").alias("work_value"),
+            ]
         )
 
         if work_measurements.is_empty():
             return self._empty_result()
 
-        time_measurements = (
-            measurement_core.filter(pl.col("metric_id") == self._TIME_METRIC)
-            .join_where(
-                energy_intervals,
-                pl.col("package_id") == pl.col("package_id"),
-                (pl.col("meas_start") >= pl.col("interval_start")) & (pl.col("meas_end") <= pl.col("interval_end")),
-            )
-            .select(
-                [
-                    "interval_start",
-                    "interval_end",
-                    "logical_entity_id",
-                    "package_id",
-                    pl.col("meas_value").alias("exec_time_ms"),
-                ]
-            )
+        time_measurements = self._split_over_intervals(
+            measurement_core.filter(pl.col("metric_id") == self._TIME_METRIC),
+            energy_intervals,
+            "meas_value",
+        ).select(
+            [
+                "interval_start",
+                "interval_end",
+                "logical_entity_id",
+                "package_id",
+                pl.col("meas_value").alias("exec_time_ms"),
+            ]
         )
 
         work_per_thread = work_measurements.group_by(
@@ -675,13 +770,22 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             ]
         )
 
+        dram_memory_samples = measurement_lf.filter(
+            (pl.col("metric_id") == "DRAM_SOCKET_PID_MEMORY") & pl.col("value").is_not_null()
+        ).select(
+            "logical_entity_id",
+            "physical_entity_id",
+            pl.col("start_ts").alias("meas_start"),
+            pl.col("end_ts").alias("meas_end"),
+            "value",
+        )
+
         dram_memory_usage_by_thread = (
-            energy_intervals.join_where(
-                measurement_lf.filter(
-                    (pl.col("metric_id") == "DRAM_SOCKET_PID_MEMORY") & pl.col("value").is_not_null()
-                ),
-                pl.col("dram_id") == pl.col("physical_entity_id"),
-                (pl.col("start_ts") >= pl.col("interval_start")) & (pl.col("end_ts") <= pl.col("interval_end")),
+            self._join_overlapping(
+                dram_memory_samples,
+                energy_intervals,
+                [pl.col("physical_entity_id") == pl.col("dram_id")],
+                value_col="value",
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
             .agg(pl.col("value").sum().alias("total_memory_usage_by_thread"))
@@ -728,24 +832,44 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
 
         measurement_core_remote = measurement_core.rename({"parent_id": "source_cpu_id"})
 
+        local_read_samples = measurement_core.filter(
+            (pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM") & pl.col("value").is_not_null()
+        ).select(
+            "logical_entity_id",
+            "parent_id",
+            pl.col("start_ts").alias("meas_start"),
+            pl.col("end_ts").alias("meas_end"),
+            "value",
+        )
+
         dram_local_reads_by_thread = (
-            energy_intervals.join_where(
-                measurement_core.filter(
-                    (pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM") & pl.col("value").is_not_null()
-                ),
-                pl.col("cpu_id") == pl.col("parent_id"),
-                (pl.col("start_ts") >= pl.col("interval_start")) & (pl.col("end_ts") <= pl.col("interval_end")),
+            self._join_overlapping(
+                local_read_samples,
+                energy_intervals,
+                [pl.col("parent_id") == pl.col("cpu_id")],
+                value_col="value",
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
             .agg(pl.col("value").sum().alias("reads"))
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id", "reads"])
         )
 
+        remote_read_samples = measurement_core_remote.filter(
+            pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"
+        ).select(
+            "logical_entity_id",
+            "source_cpu_id",
+            pl.col("start_ts").alias("meas_start"),
+            pl.col("end_ts").alias("meas_end"),
+            "value",
+        )
+
         dram_remote_reads_by_thread = (
-            energy_intervals.join_where(
-                measurement_core_remote.filter(pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"),
-                pl.col("source_cpu_id") != pl.col("cpu_id"),
-                (pl.col("start_ts") >= pl.col("interval_start")) & (pl.col("end_ts") <= pl.col("interval_end")),
+            self._join_overlapping(
+                remote_read_samples,
+                energy_intervals,
+                [pl.col("source_cpu_id") != pl.col("cpu_id")],
+                value_col="value",
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
             .agg(pl.col("value").sum().alias("reads"))
@@ -1065,7 +1189,8 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
         util_samples = measurement_df.filter(pl.col("metric_id") == self._UTILIZATION_METRIC).select(
             pl.col("physical_entity_id").alias("gpu_id"),
             pl.col("logical_entity_id"),
-            pl.col("start_ts").alias("util_ts"),
+            pl.col("start_ts").alias("util_start"),
+            pl.col("end_ts").alias("util_end"),
             pl.col("value").alias("sm_util"),
         )
 
@@ -1080,11 +1205,14 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
                 }
             )
 
-        # Join utilization to energy intervals using temporal alignment
-        aligned = util_samples.join_where(
+        # Utilization is a rate, so it is not split: a sample counts in full in every
+        # interval it overlaps.
+        aligned = self._join_overlapping(
+            util_samples,
             energy_intervals,
-            pl.col("gpu_id") == pl.col("gpu_id"),
-            (pl.col("util_ts") >= pl.col("interval_start")) & (pl.col("util_ts") < pl.col("interval_end")),
+            [pl.col("gpu_id") == pl.col("gpu_id_right")],
+            meas_start="util_start",
+            meas_end="util_end",
         ).select(
             pl.col("gpu_id"),
             pl.col("interval_start"),
