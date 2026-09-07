@@ -20,6 +20,7 @@ from metrion.monitoring.data_source.cpu.utils import (
     get_pid_starttime_ns,
     read_starttime_from_stat_file_in_ns,
 )
+from metrion.queue_util import drain_remaining, drain_until_sentinel
 from metrion.util import build_cgroup_id_map, read_temp_ipc
 
 
@@ -96,6 +97,8 @@ class LogicalEntityRegistry:
 
         self._queue: mp.Queue = mp.Queue()
         self._stop_event: mp.Event = mp.Event()  # ty:ignore[invalid-type-form]
+        # update() runs below in __init__ already, so this has to exist by then
+        self._producer_finished = False
 
         self._config = RingBufferConfig(
             buffer_flush_threshold=100,
@@ -155,24 +158,25 @@ class LogicalEntityRegistry:
 
     def stop(self) -> list[LogicalEntity]:
         self._bpf_process.stop()
-        # drain queue until sentinel
 
-        df_paths = []
-        while True:
-            try:
-                item = self._queue.get_nowait()
-                if item == self._config.sentinel:
-                    break
-                df_paths.append(item)
-            except q.Empty:
-                continue
+        if self._producer_finished:
+            # update() already consumed the sentinel; only in-flight items are left.
+            df_paths = drain_remaining(self._queue, name="registry")
+        else:
+            df_paths, seen = drain_until_sentinel(self._queue, self._config.sentinel, deadline_s=20.0, name="registry")
+            if not seen:
+                logger.warning("LogicalEntityRegistry: sentinel not received, continuing anyway")
 
         self._cgroup_id_map = build_cgroup_id_map()
         for item in df_paths:
             df = read_temp_ipc(item)
             self._process_events(df)
 
-        self._bpf_process.join(timeout=5)
+        self._bpf_process.join(timeout=10)
+        if self._bpf_process.is_alive():
+            logger.warning("Registry BPF process did not exit, killing it")
+            self._bpf_process.kill()
+            self._bpf_process.join(timeout=5)
 
         return self.get_new_entities()
 
@@ -185,12 +189,13 @@ class LogicalEntityRegistry:
         for _ in range(max_iterations):
             try:
                 item = self._queue.get(timeout=timeout)
-                if item == self._config.sentinel:
-                    break
-                df_paths.append(item)
             except q.Empty:
                 # Queue is empty, done draining
                 break
+            if item == self._config.sentinel:
+                self._producer_finished = True
+                break
+            df_paths.append(item)
 
         if len(df_paths) == 0:
             return
