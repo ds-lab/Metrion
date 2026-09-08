@@ -37,7 +37,7 @@ from metrion.entity.metadata import Metadata
 from metrion.entity.network_interface import NetworkInterface
 from metrion.measurement import CommunicationMeasurement, Measurement
 from metrion.metric import Metric
-from metrion.util import _add_id_to_measurement_df
+from metrion.util import _add_id_to_measurement_df, naive_utc_timestamps
 
 
 def comma_separated(value) -> str | None:
@@ -48,20 +48,6 @@ def comma_separated(value) -> str | None:
         return str(value)
 
     return ",".join(str(item) for item in value)
-
-
-def naive_utc_timestamps(df: pl.DataFrame) -> pl.DataFrame:
-    """
-    Put start_ts and end_ts into the naive UTC that the DateTime columns hold.
-
-    A column that keeps its time zone reaches DuckDB as TIMESTAMPTZ, which then converts every
-    row on insert - measurably slower than doing it here. A naive column is read as UTC and
-    passes through unchanged.
-    """
-    return df.with_columns(
-        pl.col("start_ts").dt.convert_time_zone("UTC").dt.replace_time_zone(None),
-        pl.col("end_ts").dt.convert_time_zone("UTC").dt.replace_time_zone(None),
-    )
 
 
 class CommaSeparatedIntegers(TypeDecorator):

@@ -9,7 +9,7 @@ from metrion.data_record import DataRecord
 from metrion.data_storage.i_data_storage import DataStorageI
 from metrion.entity.entity import Entity
 from metrion.measurement import CommunicationMeasurement, Measurement
-from metrion.util import _add_id_to_measurement_df
+from metrion.util import _add_id_to_measurement_df, naive_utc_timestamps
 
 
 class _RotatingParquetWriter:
@@ -108,7 +108,7 @@ class ParquetDataStorage(DataStorageI):
                 continue
             writer = self._writer(name)
             for frame in batch:
-                writer.write(frame)
+                writer.write(naive_utc_timestamps(frame))
 
     def save_entities(self, entities: Sequence[Entity], progressbar: bool = False) -> None:
         """Write entities append-only, one stream per concrete type.
