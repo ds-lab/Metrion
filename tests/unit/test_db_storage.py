@@ -10,6 +10,7 @@ from metrion.entity.communication_endpoint import CommunicationEndpoint, Network
 from metrion.entity.core import Core
 from metrion.entity.cpu import CPU
 from metrion.entity.dram import DRAM
+from metrion.entity.entity import Entity
 from metrion.entity.gpu import GPU
 from metrion.entity.host import Host, HostType
 from metrion.entity.logical_entity import LogicalEntity
@@ -431,3 +432,120 @@ def test_a_measurement_object_keeps_its_utc_wall_clock(storage):
         row = session.execute(select(storage._measurement_table.c.start_ts)).one()
 
     assert row.start_ts == now.replace(tzinfo=None)
+
+
+def _cpu(host, idle_power=7.5, max_power=45.0, cores=None):
+    cpu = CPU(
+        manufacturer="Acme",
+        model="X1",
+        physical_cores=2,
+        logical_cores=4,
+        package_id=0,
+        cache=8,
+        hyperthreading=True,
+        topology={0: 0},
+        cores=[],
+        idle_power_package=idle_power,
+        max_power_package=max_power,
+        parent_id=host.id,
+    )
+    cpu.cores = cores if cores is not None else []
+    return cpu
+
+
+def test_a_later_version_only_fills_what_is_empty(storage):
+    """The rule the whole upsert is built on, now generated instead of written out per column."""
+    host = Host("upsert-host", HostType.SERVER, "Linux")
+
+    storage.save_entities([host, _cpu(host, idle_power=None, max_power=45.0)])
+    storage.save_entities([_cpu(host, idle_power=7.5, max_power=None)])
+
+    with storage.Session() as session:
+        row = session.execute(
+            select(
+                storage._cpu_table.c.idle_power_package,
+                storage._cpu_table.c.max_power_package,
+            )
+        ).one()
+
+    assert row.idle_power_package == pytest.approx(7.5), "the empty column has to be filled"
+    assert row.max_power_package == pytest.approx(45.0), "the full column has to survive"
+
+
+def test_an_empty_string_does_not_overwrite_a_full_column(storage):
+    """core_ids is a text column, so an empty list must not erase the cores that were found."""
+    host = Host("cores-host", HostType.SERVER, "Linux")
+    with_core = _cpu(host)
+    with_core.cores = [Core(core_id=0, package_id=0, thread_siblings=[0], mhz=3200, parent_id=with_core.id)]
+
+    storage.save_entities([host, with_core])
+    storage.save_entities([_cpu(host, cores=[])])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._cpu_table.c.core_ids)).one()
+
+    assert row.core_ids == [0]
+
+
+def test_a_later_parent_id_reaches_the_entity_table(storage):
+    """The entity table did nothing on a conflict, so the first version kept a missing parent."""
+    storage.save_entities([Entity(id="e-1", parent_id=None)])
+    storage.save_entities([Entity(id="e-1", parent_id="host-9")])
+
+    with storage.Session() as session:
+        row = session.execute(
+            select(storage._entity_table.c.parent_id).where(storage._entity_table.c.id == "e-1")
+        ).one()
+
+    assert row.parent_id == "host-9"
+
+
+def test_a_later_version_fills_the_parent_thread(storage):
+    """native_parent_tid was missing from the hand-written column list and never updated."""
+    now = datetime.now(UTC)
+    fields = dict(
+        native_thread_id=101,
+        native_pid=101,
+        native_parent_pid=1,
+        executable_name="proc",
+        cmdline="/usr/bin/proc",
+        start_time=now,
+        pid_start_time=now,
+        parent_pid_start_time=now,
+        parent_tid_start_time=now,
+    )
+
+    storage.save_entities([LogicalEntity(native_parent_thread_id=0, **fields)])
+    entity = LogicalEntity(native_parent_thread_id=7, **fields)
+    storage.save_entities([entity])
+
+    with storage.Session() as session:
+        row = session.execute(
+            select(storage._logical_entity_table.c.native_parent_tid).where(
+                storage._logical_entity_table.c.id == entity.id
+            )
+        ).one()
+
+    assert row.native_parent_tid == 7
+
+
+def test_the_last_row_of_a_batch_wins(storage):
+    """DuckDB keeps the first hit on a row and silently drops the rest, so the batch is deduplicated.
+
+    save_entities collects most rows in a dict keyed by id, but network_addresses and metadata
+    reach the upsert as lists, where the same id can appear twice.
+    """
+    storage._upsert(
+        "entity",
+        [
+            {"id": "e-2", "parent_id": "host-1", "entity_type": "Entity"},
+            {"id": "e-2", "parent_id": "host-2", "entity_type": "Entity"},
+        ],
+    )
+
+    with storage.Session() as session:
+        rows = session.execute(
+            select(storage._entity_table.c.parent_id).where(storage._entity_table.c.id == "e-2")
+        ).all()
+
+    assert [row.parent_id for row in rows] == ["host-2"]
