@@ -43,9 +43,6 @@ energy_interval_dram AS (
 SELECT dram_id, cpu_id, interval_start, interval_end, energy_j
 FROM energy_interval_dram;
 
---sqlite CREATE INDEX IF NOT EXISTS idx_ei_dram_end_start
---sqlite   ON energy_interval_dram_tmp (dram_id, cpu_id, interval_end, interval_start);
-
 -- 1) Final view: active via reads, idle via PID count
 CREATE TABLE IF NOT EXISTS dram_energy_per_thread_view AS
 WITH
@@ -57,7 +54,7 @@ dram_interval_powers AS (
         vi.interval_start,
         vi.interval_end,
         vi.energy_j,
-        ({date_method}(vi.interval_end) - {date_method}(vi.interval_start)) * 24.0 * 3600.0 AS duration_s,
+        (julian(vi.interval_end) - julian(vi.interval_start)) * 24.0 * 3600.0 AS duration_s,
         d.idle_power
     FROM energy_interval_dram_tmp AS vi
     JOIN dram AS d ON vi.dram_id = d.id
@@ -72,7 +69,7 @@ dram_interval_energy_split AS (
         idle_power,
         duration_s,
         (idle_power * duration_s) AS idle_energy_j_total,
-        {max_func}(energy_j - (idle_power * duration_s), 0.0) AS active_energy_j_total
+        greatest(energy_j - (idle_power * duration_s), 0.0) AS active_energy_j_total
     FROM dram_interval_powers
 ),
 

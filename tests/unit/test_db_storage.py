@@ -18,15 +18,9 @@ from metrion.measurement import Measurement
 from metrion.metric import CPU_CORE_PID_TIME, CPU_SOCKET_PKG_ENERGY
 
 
-@pytest.fixture(params=["sqlite", "duckdb"])
-def storage(request, tmp_path):
-    backend = request.param
-    if backend == "duckdb":
-        db_url = f"duckdb:///{tmp_path / 'test_duck.db'}"
-    else:
-        db_url = f"sqlite:///{tmp_path / 'test.db'}"
-
-    storage = SQLDatabaseStorage(db_url)
+@pytest.fixture
+def storage(tmp_path):
+    storage = SQLDatabaseStorage(f"duckdb:///{tmp_path / 'test_duck.db'}")
     try:
         yield storage
     finally:
@@ -285,10 +279,6 @@ def test_logical_entity_upsert_enriches_metadata(storage):
 
 
 def test_measurement_df_without_id_persisted(storage):
-    backend = storage.engine.dialect.name
-    driver_module = "adbc_driver_sqlite" if backend == "sqlite" else "adbc_driver_duckdb"
-    pytest.importorskip(driver_module)
-
     host = Host("df-host", HostType.SERVER, "Linux")
     now = datetime.now(UTC)
     measurement_df = pl.DataFrame(
@@ -323,10 +313,6 @@ def test_measurement_df_without_id_persisted(storage):
 
 
 def test_measurement_df_with_id_persisted(storage):
-    backend = storage.engine.dialect.name
-    driver_module = "adbc_driver_sqlite" if backend == "sqlite" else "adbc_driver_duckdb"
-    pytest.importorskip(driver_module)
-
     host = Host("df-host", HostType.SERVER, "Linux")
     now = datetime.now(UTC)
     measurement = Measurement(

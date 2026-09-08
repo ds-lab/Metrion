@@ -17,13 +17,13 @@ class TestLoadSQLQueries:
 
     def test_load_sql_queries_returns_six_queries(self):
         """Verify load_sql_queries returns six query strings."""
-        queries = load_sql_queries("sqlite")
+        queries = load_sql_queries()
         assert len(queries) == 6
         assert all(isinstance(q, str) for q in queries)
 
     def test_load_sql_queries_gpu_contains_expected_content(self):
         """Verify GPU queries contain expected SQL patterns."""
-        queries = load_sql_queries("sqlite")
+        queries = load_sql_queries()
         gpu_analysis_query = queries[4]
         gpu_group_query = queries[5]
 
@@ -35,23 +35,10 @@ class TestLoadSQLQueries:
         # GPU group query should reference the view
         assert "gpu_energy_per_thread_view" in gpu_group_query
 
-    def test_load_sql_queries_sqlite_strips_markers(self):
-        """Verify --sqlite markers are stripped for sqlite dialect."""
-        queries = load_sql_queries("sqlite")
-        gpu_analysis_query = queries[4]
-
-        # Should have CREATE INDEX without --sqlite prefix
-        assert "CREATE INDEX IF NOT EXISTS" in gpu_analysis_query
-        # Should not have --sqlite marker
-        assert "--sqlite" not in gpu_analysis_query
-
-    def test_load_sql_queries_duckdb_keeps_markers(self):
-        """Verify --sqlite markers remain as comments for duckdb."""
-        queries = load_sql_queries("duckdb")
-        gpu_analysis_query = queries[4]
-
-        # For duckdb, --sqlite lines remain as comments
-        assert "--sqlite" in gpu_analysis_query
+    def test_the_analysis_queries_only_wait_for_the_time_window(self):
+        """A leftover dialect placeholder would make this raise KeyError."""
+        for query in load_sql_queries()[::2]:
+            query.format(start_time="2026-01-01 00:00:00", end_time="2026-01-02 00:00:00")
 
 
 class TestGPUDataProcessing:
@@ -116,7 +103,7 @@ class TestGPUSQLQueries:
 
     def test_gpu_analysis_query_has_wrap_around_handling(self):
         """Verify GPU query handles energy counter wrap-around."""
-        queries = load_sql_queries("sqlite")
+        queries = load_sql_queries()
         gpu_query = queries[4]
 
         # Should have wrap-around value for 64-bit counter
@@ -124,7 +111,7 @@ class TestGPUSQLQueries:
 
     def test_gpu_analysis_query_has_idle_dynamic_split(self):
         """Verify GPU query splits energy into idle and dynamic."""
-        queries = load_sql_queries("sqlite")
+        queries = load_sql_queries()
         gpu_query = queries[4]
 
         assert "idle_energy_j" in gpu_query
@@ -133,7 +120,7 @@ class TestGPUSQLQueries:
 
     def test_gpu_analysis_query_uses_utilization(self):
         """Verify GPU query uses SM utilization for attribution."""
-        queries = load_sql_queries("sqlite")
+        queries = load_sql_queries()
         gpu_query = queries[4]
 
         assert "util_share" in gpu_query
@@ -142,7 +129,7 @@ class TestGPUSQLQueries:
 
     def test_gpu_group_query_aggregates_by_cmdline(self):
         """Verify GPU group query aggregates by process attributes."""
-        queries = load_sql_queries("sqlite")
+        queries = load_sql_queries()
         gpu_group_query = queries[5]
 
         assert "GROUP BY" in gpu_group_query

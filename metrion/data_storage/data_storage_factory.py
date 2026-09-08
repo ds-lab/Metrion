@@ -9,11 +9,11 @@ class DataStorageFactory:
         Parameters
         ----------
         storage_type : str
-            One of 'duckdb', 'sqlite', 'postgresql', 'parquet'.
+            One of 'duckdb', 'parquet'.
         target : str
-            Connection string for the database backends, output directory for parquet.
+            Connection string for DuckDB, output directory for parquet.
         """
-        if storage_type in ("postgresql", "sqlite", "duckdb"):
+        if storage_type == "duckdb":
             from metrion.data_storage.db_data_storage import SQLDatabaseStorage
 
             return SQLDatabaseStorage(target)

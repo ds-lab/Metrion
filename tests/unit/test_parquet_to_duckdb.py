@@ -405,21 +405,18 @@ def test_the_analysis_accepts_a_run_directory(tmp_path):
 
     seen = {}
 
-    def fake_connect(db_path, type):
+    def fake_connect(db_path):
         seen["db_path"] = db_path
-        seen["type"] = type
         return None
 
     original = energy_attribution_cli.connect_to_db
     energy_attribution_cli.connect_to_db = fake_connect
     try:
-        # sqlite on purpose: the file built here is always DuckDB, whatever was asked for.
         energy_attribution_cli.prepare_data(
-            tmp_path / "run", "python", datetime(2026, 1, 1), datetime(2026, 1, 2), unit="J", type="sqlite"
+            tmp_path / "run", "python", datetime(2026, 1, 1), datetime(2026, 1, 2), unit="J"
         )
     finally:
         energy_attribution_cli.connect_to_db = original
 
     assert seen["db_path"] == tmp_path / "run" / "monitor.db", "the directory has to become a file"
-    assert seen["type"] == "duckdb"
     assert _query(seen["db_path"], "SELECT count(*) FROM measurement")[0][0] == 2

@@ -1,16 +1,3 @@
---sqlite CREATE INDEX IF not EXISTS idx_meas_energy_socket_start ON measurement (metric_id, physical_entity_id, "start");
-
---sqlite CREATE INDEX IF not EXISTS idx_meas_work_metric_start_end ON measurement (metric_id, "start", "end");
-
---sqlite CREATE INDEX IF not EXISTS idx_work_cover ON measurement (
---sqlite     metric_id,
---sqlite     physical_entity_id,
---sqlite     "start",
---sqlite     "end",
---sqlite     logical_entity_id,
---sqlite     value
---sqlite );
-
 -- materialize intervals
 
 CREATE TABLE IF NOT EXISTS
@@ -66,8 +53,6 @@ SELECT
     energy_j
 FROM
     energy_interval;
-
---sqlite CREATE INDEX IF not EXISTS idx_ei_socket_end_start ON energy_interval_pkg_tmp (package_id, interval_end, interval_start);
 
 CREATE TABLE
     IF NOT EXISTS total_energy_per_thread_view AS
@@ -166,7 +151,7 @@ WITH
             t.exec_time_s,
             (
                 c.idle_power_package * (
-                    {date_method} (w.interval_end) - {date_method} (w.interval_start)
+                    julian(w.interval_end) - julian(w.interval_start)
                 ) * 24 * 60 * 60
             ) AS idle_energy_j
         FROM

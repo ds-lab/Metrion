@@ -116,7 +116,6 @@ def load_energy_data_per_database(
     unit: Literal["J", "Wh"] = "J",
     filter_condition: str | None = None,
     force: bool = False,
-    dialect: Literal["sqlite", "duckdb"] = "duckdb",
 ) -> list[EnergyData]:
     """Collect energy data for each monitoring database.
 
@@ -164,7 +163,7 @@ def load_energy_data_per_database(
             energy_data_per_database.append(cached)
         else:
             data = energy_attribution_cli.prepare_data(
-                db_path, workload, time_start, time_end, unit=unit, filter=filter_condition, force=force, type=dialect
+                db_path, workload, time_start, time_end, unit=unit, filter=filter_condition, force=force
             )
             if data:
                 filtered_dfs, _ = data

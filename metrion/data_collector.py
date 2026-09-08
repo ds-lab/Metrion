@@ -163,7 +163,7 @@ class DataCollector:
         Initialize the DataCollector.
 
         Args:
-            storage_type: Backend to write to, e.g. 'duckdb' or 'sqlite'
+            storage_type: Backend to write to, 'duckdb' or 'parquet'
             storage_path: Target the backend is opened with
             flush_interval: Seconds the IPC writer holds rows before writing a file
         """

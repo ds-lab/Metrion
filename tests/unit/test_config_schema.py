@@ -30,21 +30,26 @@ class TestStorageConfig:
         assert config.path == "./monitor.db"
 
     def test_custom_values(self):
-        config = StorageConfig(type="sqlite", path="/custom/path/db.sqlite")
-        assert config.type == "sqlite"
-        assert config.path == "/custom/path/db.sqlite"
+        config = StorageConfig(type="parquet", path="/custom/path/run")
+        assert config.type == "parquet"
+        assert config.path == "/custom/path/run"
 
     def test_relative_path_is_resolved_against_the_base(self):
         config = StorageConfig(type="duckdb", path="./test.db")
         assert config.get_target(Path("/base")) == "duckdb:////base/test.db"
 
     def test_absolute_path_is_kept(self):
-        config = StorageConfig(type="sqlite", path="/absolute/path/db.sqlite")
-        assert config.get_target() == "sqlite:////absolute/path/db.sqlite"
+        config = StorageConfig(type="duckdb", path="/absolute/path/db.duckdb")
+        assert config.get_target() == "duckdb:////absolute/path/db.duckdb"
 
     def test_rejects_unknown_type(self):
         with pytest.raises(ValidationError):
             StorageConfig(type="mongodb")
+
+    def test_rejects_the_dropped_backends(self):
+        for dropped in ("sqlite", "postgresql"):
+            with pytest.raises(ValidationError):
+                StorageConfig(type=dropped)
 
 
 class TestSubcomponentEnergyConfig:
@@ -300,7 +305,7 @@ class TestAgentConfig:
 debug: true
 
 storage:
-  type: sqlite
+  type: duckdb
   path: ./test.db
 
 timing:
@@ -324,7 +329,7 @@ energy_model:
 
             config = AgentConfig.from_yaml_file(f.name)
 
-            assert config.storage.type == "sqlite"
+            assert config.storage.type == "duckdb"
             assert config.debug is True
             assert config.timing.cycle == 10.0
             assert config.energy_model.granularity == "compressed"

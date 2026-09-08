@@ -39,13 +39,13 @@ class StorageConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["sqlite", "duckdb", "parquet"] = "duckdb"
+    type: Literal["duckdb", "parquet"] = "duckdb"
     path: str = "./monitor.db"
 
     @field_validator("path")
     @classmethod
     def warn_if_parquet_path_looks_like_a_database(cls, value: str, info: ValidationInfo) -> str:
-        if info.data.get("type") == "parquet" and Path(value).suffix in (".db", ".sqlite", ".duckdb"):
+        if info.data.get("type") == "parquet" and Path(value).suffix in (".db", ".duckdb"):
             logger.warning(
                 f"storage.type is parquet, but storage.path '{value}' names a database file. "
                 "Parquet writes into a directory of that name."

@@ -2,6 +2,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 
 import polars as pl
+from duckdb_engine import insert
 from loguru import logger
 from sqlalchemy import (
     BigInteger,
@@ -77,16 +78,6 @@ class SQLDatabaseStorage(DataStorageI):
         self.registry = registry()
         self._create_tables()
         self.save_all_metrics()
-
-        if "duckdb" in db_url:
-            from duckdb_engine import insert
-
-            self._insert = insert
-
-        elif "sqlite" in db_url:
-            from sqlalchemy.dialects.sqlite import insert
-
-            self._insert = insert
 
     @contextmanager
     def session_scope(self):
@@ -475,11 +466,11 @@ class SQLDatabaseStorage(DataStorageI):
         return rows
 
     def _entity_upsert_stmt(self):
-        stmt = self._insert(self._entity_table)
+        stmt = insert(self._entity_table)
         return stmt.on_conflict_do_nothing(index_elements=[self._entity_table.c.id])
 
     def _cpu_upsert_stmt(self):
-        stmt = self._insert(self._cpu_table)
+        stmt = insert(self._cpu_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._cpu_table.c.id],
             set_={
@@ -501,7 +492,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _core_upsert_stmt(self):
-        stmt = self._insert(self._core_table)
+        stmt = insert(self._core_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._core_table.c.id],
             set_={
@@ -515,7 +506,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _network_interface_upsert_stmt(self):
-        stmt = self._insert(self._network_interface_table)
+        stmt = insert(self._network_interface_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._network_interface_table.c.id],
             set_={
@@ -526,7 +517,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _network_address_upsert_stmt(self):
-        stmt = self._insert(self._network_addresses_table)
+        stmt = insert(self._network_addresses_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._network_addresses_table.c.id],
             set_={
@@ -540,7 +531,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _dram_upsert_stmt(self):
-        stmt = self._insert(self._dram_table)
+        stmt = insert(self._dram_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._dram_table.c.id],
             set_={
@@ -552,7 +543,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _gpu_upsert_stmt(self):
-        stmt = self._insert(self._gpu_table)
+        stmt = insert(self._gpu_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._gpu_table.c.id],
             set_={
@@ -577,7 +568,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _host_upsert_stmt(self):
-        stmt = self._insert(self._host_table)
+        stmt = insert(self._host_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._host_table.c.id],
             set_={
@@ -588,7 +579,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _communication_endpoint_upsert_stmt(self):
-        stmt = self._insert(self._communication_endpoint_table)
+        stmt = insert(self._communication_endpoint_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._communication_endpoint_table.c.id],
             set_={
@@ -603,7 +594,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _metadata_upsert_stmt(self):
-        stmt = self._insert(self._metadata_table)
+        stmt = insert(self._metadata_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._metadata_table.c.id],
             set_={
@@ -614,7 +605,7 @@ class SQLDatabaseStorage(DataStorageI):
         )
 
     def _logical_entity_upsert_stmt(self):
-        stmt = self._insert(self._logical_entity_table)
+        stmt = insert(self._logical_entity_table)
         return stmt.on_conflict_do_update(
             index_elements=[self._logical_entity_table.c.id],
             set_={
