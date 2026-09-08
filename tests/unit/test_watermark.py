@@ -205,3 +205,40 @@ def test_a_surviving_anchor_is_not_injected_twice():
 
     pkg = model._buffer.get_all().filter(pl.col("metric_id") == CPUEnergyAttributionModel._PKG_METRIC)
     assert pkg.get_column("end_ts").n_unique() == pkg.height, "ein Zeitstempel steht zweimal im Puffer"
+
+
+def _drain_with_a_lagging_component(cycles=5):
+    """CPU läuft, eine GPU-Komponente hängt zwei Sekunden zurück und hält den Löschpunkt fest."""
+    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
+    model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
+
+    total = 0.0
+    intervals = []
+    for k in range(cycles):
+        model.update_measurements(_cpu_batch([2 * k, 2 * k + 1]))
+        lag = [_t(max(0, 2 * k - 2)), _t(max(0, 2 * k - 1))]
+        model.update_measurements(_rows(GPUEnergyAttributionModel._ENERGY_METRIC, lag))
+        model.update_measurements(_rows(GPUEnergyAttributionModel._UTILIZATION_METRIC, lag))
+        (attributed, _, _), _, _ = model.attribute_energy()
+        if attributed.is_empty():
+            continue
+        total += float(attributed["value"].sum())
+        intervals += list(
+            zip(attributed["start_ts"], attributed["end_ts"], attributed["logical_entity_id"], strict=True)
+        )
+    return total, intervals
+
+
+def test_a_lagging_component_does_not_inflate_the_others():
+    """Der Zähler läuft 100 -> 397 über neun Sekunden, mehr als 297 J gibt es nicht."""
+    total, _ = _drain_with_a_lagging_component()
+
+    assert total == pytest.approx(297.0)
+
+
+def test_intervals_are_emitted_once():
+    """Kein Intervall darf in zwei Zyklen erscheinen, solange der Puffer es noch vorhält."""
+    _, intervals = _drain_with_a_lagging_component()
+
+    assert len(intervals) == len(set(intervals)), "ein Intervall wurde zweimal abgerechnet"

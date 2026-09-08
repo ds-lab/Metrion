@@ -1508,6 +1508,9 @@ class DyncamicEnergyAttributionModel:
         self._reported_stalls: set[str] = set()
         # Lower bound so that cutoff=0.0 does not declare every stream stalled at once.
         self._stall_after = stall_after if stall_after is not None else max(30.0, 3 * cutoff)
+        # How far each component has already been attributed. The buffer is trimmed at the
+        # slowest component, so a faster one keeps seeing rows it has already accounted for.
+        self._processed_until: dict[str, dt.datetime] = {}
 
     @property
     def _measurements_df(self) -> pl.DataFrame:
@@ -1698,11 +1701,7 @@ class DyncamicEnergyAttributionModel:
                 key = (metric, row["physical_entity_id"])
                 self._last_energy_samples[key] = (row["end_ts"], row["value"])
 
-        # Remove processed measurements from the buffer. Never delete past the oldest anchor
-        # just cached: the next batch rebuilds its first interval from that timestamp, and the
-        # per-thread measurements covering that interval have to survive with it. Only energy
-        # samples are re-injected, not the streams that split them. Under force the component
-        # bound runs ahead of the energy stream, and without this cap it would take them along.
+        # Remove processed measurements from the buffer.
         anchors = [
             ts for (metric, _), (ts, _) in self._last_energy_samples.items() if metric not in self._reported_stalls
         ]
@@ -1738,6 +1737,18 @@ class DyncamicEnergyAttributionModel:
             self._buffer.add(cached_df)
 
         return relevant_measurements, bounds_dict
+
+    def _energy_frontier(self, component: str) -> dt.datetime | None:
+        """Time up to which this component's energy has been turned into intervals.
+
+        An entity's intervals end at its last cached energy sample, so that anchor is where
+        the next window has to start. The oldest anchor decides: under force the component
+        bound runs ahead of the energy stream, and starting the next window there would drop
+        the interval in between. Returns None while no energy sample has been seen yet.
+        """
+        metric = self._COMPONENT_ENERGY[component]
+        anchors = [ts for (m, _), (ts, _) in self._last_energy_samples.items() if m == metric]
+        return min(anchors) if anchors else None
 
     def attribute_energy(
         self, force: bool = False
@@ -1777,6 +1788,10 @@ class DyncamicEnergyAttributionModel:
         dram_model = DRAMEnergyAttributionModel()
         gpu_model = GPUEnergyAttributionModel()
 
+        # Each component runs over the window it has not covered yet: from where it last got
+        # to, up to its own bound. Without the lower bound it would re-attribute everything
+        # between the deletion point and its bound, because the buffer is trimmed at the
+        # slowest component and those rows are still there.
         # CPU attribution (with CPU-specific bound)
         cpu_bound = bounds_dict.get("cpu")
         if cpu_bound is not None:
@@ -1785,7 +1800,12 @@ class DyncamicEnergyAttributionModel:
                 measurement_df=cpu_measurements,
                 cpu_df=self._cpu_df,
                 core_df=self._core_df,
+                start_time=self._processed_until.get("cpu"),
+                end_time=cpu_bound,
             )
+            frontier = self._energy_frontier("cpu")
+            if frontier is not None:
+                self._processed_until["cpu"] = frontier
         else:
             pkg_result = empty_result
 
@@ -1797,7 +1817,12 @@ class DyncamicEnergyAttributionModel:
                 measurement_df=dram_measurements,
                 core_df=self._core_df,
                 dram_df=self._dram_df,
+                start_time=self._processed_until.get("dram"),
+                end_time=dram_bound,
             )
+            frontier = self._energy_frontier("dram")
+            if frontier is not None:
+                self._processed_until["dram"] = frontier
         else:
             dram_result = empty_result
 
@@ -1808,7 +1833,12 @@ class DyncamicEnergyAttributionModel:
             gpu_result = gpu_model.attribute_gpu_energy(
                 measurement_df=gpu_measurements,
                 gpu_df=self._gpu_df,
+                start_time=self._processed_until.get("gpu"),
+                end_time=gpu_bound,
             )
+            frontier = self._energy_frontier("gpu")
+            if frontier is not None:
+                self._processed_until["gpu"] = frontier
         else:
             gpu_result = empty_result
 
