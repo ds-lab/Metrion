@@ -67,29 +67,45 @@ def test_memory_on_every_node_is_counted():
     per_node, total = parse_numa_maps(lines, 4, 2048)
 
     assert sorted(per_node) == [0, 1, 2, 3]
-    assert all(per_node[node]["Private"] == pytest.approx(1.0) for node in per_node)
+    assert all(per_node[node] == pytest.approx(1.0) for node in per_node)
     assert total == pytest.approx(4.0)
 
 
-def test_categories_are_kept_apart():
+def test_transparent_huge_pages_are_not_dropped():
+    """Regression: 'huge' matches inside anon_huge=, which booked ordinary anonymous memory away."""
+    line = "7f2c40000000 default anon=131072 dirty=131072 anon_huge=131072 N1=131072 kernelpagesize_kB=4"
+
+    per_node, total = parse_numa_maps([line], 4, 2048)
+
+    assert per_node[1] == pytest.approx(512.0)
+    assert total == pytest.approx(512.0)
+
+
+def test_heap_stack_and_file_maps_all_count():
+    """Only 'Private' used to reach the metric, so heap, stack and huge mappings went missing."""
     lines = [
-        "7f00 default anon=1 N0=256 kernelpagesize_kB=4",
-        "7f01 default heap anon=1 N0=256 kernelpagesize_kB=4",
-        "7f02 default stack anon=1 N0=256 kernelpagesize_kB=4",
+        "00400000 default file=/usr/bin/postgres mapped=256 N0=256 kernelpagesize_kB=4",
+        "00e2b000 default heap anon=256 dirty=256 N0=256 kernelpagesize_kB=4",
+        "7ffd3c7e1000 default stack anon=256 dirty=256 N0=256 kernelpagesize_kB=4",
+        "7f2c80000000 default huge dirty=1 N0=1 kernelpagesize_kB=2048",
     ]
 
-    per_node, _ = parse_numa_maps(lines, 4, 2048)
+    per_node, total = parse_numa_maps(lines, 4, 2048)
 
-    assert per_node[0]["Private"] == pytest.approx(1.0)
-    assert per_node[0]["Heap"] == pytest.approx(1.0)
-    assert per_node[0]["Stack"] == pytest.approx(1.0)
-    assert per_node[0]["Huge"] == 0.0
+    assert per_node[0] == pytest.approx(5.0)  # 3 x 1 MB of 4 kB pages plus one 2 MB huge page
+    assert total == pytest.approx(5.0)
 
 
-def test_huge_pages_use_the_huge_page_size():
+def test_huge_pages_without_an_explicit_page_size_use_the_huge_size():
     per_node, _ = parse_numa_maps(["7f00 default huge N0=1"], 4, 2048)
 
-    assert per_node[0]["Huge"] == pytest.approx(2.0)
+    assert per_node[0] == pytest.approx(2.0)
+
+
+def test_an_explicit_page_size_wins_over_the_huge_guess():
+    per_node, _ = parse_numa_maps(["7f00 default huge N0=1 kernelpagesize_kB=4"], 4, 2048)
+
+    assert per_node[0] == pytest.approx(4 / 1024)
 
 
 def test_no_lines_means_no_nodes():
@@ -121,7 +137,7 @@ def _source(nodes_per_package):
 
 
 def _measured(*node_values):
-    return {node: {"Private": value, "Huge": 0.0, "Heap": 0.0, "Stack": 0.0} for node, value in node_values}
+    return dict(node_values)
 
 
 def test_socket_memory_sums_all_its_nodes():
