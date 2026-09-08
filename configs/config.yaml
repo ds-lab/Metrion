@@ -11,7 +11,8 @@ debug: true
 storage:
   # duckdb, sqlite or parquet.
   #   duckdb  - what the SQL analyses under metrion/energy_attribution/ expect. path is a file.
-  #   parquet - append-only files, cheapest during the run. path is a directory.
+  #   parquet - append-only files, cheapest during the run. path is a directory, and
+  #             `metrion analyze --db-path <that directory>` builds the database it needs.
   type: duckdb
   # A relative path is resolved against the repository root.
   path: ./monitor.db

@@ -117,7 +117,8 @@ class ParquetDataStorage(DataStorageI):
         for entity in entities:
             # CPUs carry their cores as sub-objects; the DB path writes those as well.
             for item in (entity, *getattr(entity, "cores", ())):
-                by_type.setdefault(type(item).__name__.lower(), []).append(item._to_df())
+                frame = item._to_df().with_columns(pl.lit(type(item).__name__).alias("_entity_type"))
+                by_type.setdefault(type(item).__name__.lower(), []).append(frame)
 
         # One sequence number per call, so a later version of an entity can be told from an
         # earlier one on read. A timestamp would not be enough: two calls can share a

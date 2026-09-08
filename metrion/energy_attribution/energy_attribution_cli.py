@@ -2120,7 +2120,7 @@ def prepare_data(
     Parameters
     ----------
     db_path : Path
-        Path to the database file.
+        Database file, or the directory of a Parquet run to build one from.
     filter_cmdline : str
         Command line pattern to filter processes.
     start_time : datetime.datetime
@@ -2141,6 +2141,14 @@ def prepare_data(
     tuple or None
         (filtered_dfs, all_dfs) where each is a list of (origin, DataFrame) tuples.
     """
+    if db_path.is_dir():
+        # A Parquet run. The analyses are SQL, so build the database now - this is the point
+        # where it is needed, and it is skipped when the file is already up to date.
+        from metrion.data_storage.parquet_to_duckdb import ensure_duckdb
+
+        db_path = ensure_duckdb(db_path)
+        type = "duckdb"
+
     # Connect to database
     engine = connect_to_db(db_path, type=type)
     if not engine:
