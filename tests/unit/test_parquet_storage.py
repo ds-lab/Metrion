@@ -44,6 +44,26 @@ def test_repeated_saves_append_and_do_not_overwrite(tmp_path):
     assert df["id"].n_unique() == 20
 
 
+def test_a_second_run_does_not_overwrite_the_first(tmp_path):
+    for batch in range(2):
+        storage = ParquetDataStorage(str(tmp_path))
+        storage.save_measurements([_measurement_df(3, offset=batch * 100)])
+        storage.close()
+
+    df = pl.read_parquet(tmp_path / "measurements" / "*.parquet")
+    assert sorted(df["id"].to_list()) == [1000, 1001, 1002, 1100, 1101, 1102]
+
+
+def test_a_second_run_starts_a_new_part_file(tmp_path):
+    for _ in range(2):
+        storage = ParquetDataStorage(str(tmp_path))
+        storage.save_measurements([_measurement_df(3)])
+        storage.close()
+
+    parts = sorted(path.name for path in (tmp_path / "measurements").glob("*.parquet"))
+    assert parts == ["part-00000.parquet", "part-00001.parquet"]
+
+
 def test_rotation_creates_multiple_parts(tmp_path):
     storage = ParquetDataStorage(str(tmp_path), rotate_rows=10)
     for _ in range(5):

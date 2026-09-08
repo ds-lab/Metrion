@@ -22,7 +22,10 @@ class _RotatingParquetWriter:
         self._compression = compression
         self._pending: list[pl.DataFrame] = []
         self._pending_rows = 0
-        self._part = 0
+        # Continue behind the parts an earlier run left here; starting at zero again would
+        # overwrite them.
+        existing = [int(path.stem.split("-")[1]) for path in self._dir.glob("part-*.parquet")]
+        self._part = max(existing) + 1 if existing else 0
         self._total_rows = 0
 
     @property

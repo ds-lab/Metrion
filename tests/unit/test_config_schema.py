@@ -2,6 +2,7 @@
 Unit tests for the new configuration schema.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -447,10 +448,9 @@ energy_model:
             assert config.storage.type == "duckdb"
             assert config.debug is False
 
-    def test_read_config_with_debug_mode(self):
-        """Test that debug mode adds timestamp to database path."""
+    def test_the_storage_path_gets_a_timestamp(self):
         yaml_content = """
-debug: true
+debug: false
 
 storage:
   type: duckdb
@@ -468,9 +468,28 @@ energy_model:
 
             config = ConfigReader.read_config(f.name)
 
-            # In debug mode, the path should have a timestamp added
-            assert "test_" in config.storage.path
-            assert ".db" in config.storage.path
+            assert config.storage.path != "test.db"
+            assert re.fullmatch(r"test_\d{4}(_\d{2}){5}\.db", config.storage.path)
+
+    def test_a_parquet_directory_keeps_its_suffixless_name(self):
+        yaml_content = """
+storage:
+  type: parquet
+  path: ./runs/prod
+
+timing:
+  cycle: 5
+
+energy_model:
+  granularity: detailed
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            config = ConfigReader.read_config(f.name)
+
+            assert re.fullmatch(r"runs/prod_\d{4}(_\d{2}){5}", config.storage.path)
 
 
 class TestMetricsConfig:
