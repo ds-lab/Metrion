@@ -724,7 +724,9 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.col("value"),
                 pl.col("metric_id"),
                 pl.col("physical_entity_id").alias("dram_id"),
-                pl.col("parent_id").alias("cpu_id"),
+                # The module's own socket. parent_id would be the host, identical for every
+                # module, so no read could ever be local to one of them.
+                pl.col("cpu_id"),
                 pl.col("logical_entity_id"),
                 pl.col("start_ts"),
                 pl.col("end_ts"),

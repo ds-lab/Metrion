@@ -222,6 +222,7 @@ class SQLDatabaseStorage(DataStorageI):
             self.registry.metadata,
             Column("id", String, ForeignKey("entity.id"), primary_key=True, nullable=False),
             Column("package_id", BigInteger, nullable=False),
+            Column("cpu_id", String, ForeignKey("entity.id")),
             Column("idle_power", Float),
             Column("max_power", Float),
             Column("total_memory", Float),

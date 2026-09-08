@@ -7,14 +7,13 @@ WITH energy_samples_dram AS (
         m.value,
         m.metric_id,
         m.physical_entity_id AS dram_id,
-        e.parent_id AS cpu_id,
+        d.cpu_id,
         m.logical_entity_id,
         m.start_ts,
         m."end_ts"
     FROM
         measurement AS m
         JOIN dram AS d ON m.physical_entity_id = d.id
-        JOIN entity AS e ON m.physical_entity_id = e.id
     WHERE
         m.metric_id = 'DRAM_SOCKET_TOTAL_ENERGY'
         AND m.start_ts >= '{start_time}'

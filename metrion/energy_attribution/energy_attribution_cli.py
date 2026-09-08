@@ -2299,7 +2299,7 @@ def main(
     if export_raw_data:
         output_dir = Path(__file__).parent / "output"
         output_dir.mkdir(exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         for device, df in filtered_dfs:
             csv_path = output_dir / f"raw_{device}_{timestamp}.csv"
             df.write_csv(csv_path)

@@ -18,6 +18,7 @@ class DRAM(Entity):
         schema = {
             "id": pl.String,
             "package_id": pl.String,
+            "cpu_id": pl.String,
             "idle_power": pl.Float64,
             "max_power": pl.Float64,
             "total_memory": pl.Float64,
@@ -26,6 +27,7 @@ class DRAM(Entity):
         data = {
             "id": [self.id],
             "package_id": [self.cpu.package_id],
+            "cpu_id": [self.cpu.id],
             "idle_power": [self.idle_power],
             "max_power": [self._max_power],
             "total_memory": [self.total_memory],
