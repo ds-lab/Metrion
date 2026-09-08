@@ -345,3 +345,89 @@ def test_measurement_df_with_id_persisted(storage):
     assert row.physical_entity_id == host.id
     assert row.value == pytest.approx(1.45)
     assert row.id == measurement.id
+
+
+def _measurement_df(start_ts, end_ts=None, measurement_id=None):
+    row = {
+        "value": [2.5],
+        "metric_id": [CPU_CORE_PID_TIME.name],
+        "physical_entity_id": ["core_0"],
+        "logical_entity_id": [None],
+        "start_ts": [start_ts],
+        "end_ts": [end_ts or start_ts],
+    }
+    if measurement_id is not None:
+        row["id"] = [measurement_id]
+    return pl.DataFrame(row)
+
+
+def test_measurement_timestamps_keep_their_utc_wall_clock(storage):
+    """A column that keeps its time zone is stored in the session time zone - an hour off here."""
+    now = datetime.now(UTC).replace(microsecond=123456)
+
+    storage.save_measurements([_measurement_df(now)])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == now.replace(tzinfo=None)
+
+
+def test_a_timestamp_in_another_time_zone_arrives_as_utc(storage):
+    """Only the conversion makes the stored wall clock independent of where the frame came from."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    berlin = _measurement_df(now).with_columns(
+        pl.col("start_ts").dt.convert_time_zone("Europe/Berlin"),
+        pl.col("end_ts").dt.convert_time_zone("Europe/Berlin"),
+    )
+
+    storage.save_measurements([berlin])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == now.replace(tzinfo=None)
+
+
+def test_a_timestamp_without_a_time_zone_is_taken_as_utc(storage):
+    """polars reads a naive column as UTC, so it needs no special case."""
+    naive = datetime(2026, 3, 1, 12, 30, 15, 500000)
+
+    storage.save_measurements([_measurement_df(naive)])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == naive
+
+
+def test_the_same_measurement_id_may_be_written_twice(storage):
+    """Without a primary key a repeated batch costs rows, not an exception."""
+    now = datetime.now(UTC)
+
+    storage.save_measurements([_measurement_df(now, measurement_id=999_001)])
+    storage.save_measurements([_measurement_df(now, measurement_id=999_001)])
+
+    with storage.Session() as session:
+        rows = session.execute(select(storage._measurement_table.c.id)).all()
+
+    assert [row.id for row in rows] == [999_001, 999_001]
+
+
+def test_a_measurement_object_keeps_its_utc_wall_clock(storage):
+    """The object path hands DuckDB an aware datetime, so it depends on the session time zone."""
+    now = datetime.now(UTC).replace(microsecond=42)
+    measurement = Measurement(
+        value=1.0,
+        metric_id=CPU_CORE_PID_TIME.name,
+        physical_entity_id="core_0",
+        start_ts=now,
+        end_ts=now,
+    )
+
+    storage.save_measurements([measurement])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == now.replace(tzinfo=None)

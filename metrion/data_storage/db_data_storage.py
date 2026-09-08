@@ -46,6 +46,20 @@ def prefer_text(new_expr, old_expr):
     return func.coalesce(func.nullif(new_expr, ""), old_expr)
 
 
+def naive_utc_timestamps(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Put start_ts and end_ts into the naive UTC that the DateTime columns hold.
+
+    A column that keeps its time zone reaches DuckDB as TIMESTAMPTZ, which then converts every
+    row on insert - measurably slower than doing it here. A naive column is read as UTC and
+    passes through unchanged.
+    """
+    return df.with_columns(
+        pl.col("start_ts").dt.convert_time_zone("UTC").dt.replace_time_zone(None),
+        pl.col("end_ts").dt.convert_time_zone("UTC").dt.replace_time_zone(None),
+    )
+
+
 class CommaSeparatedIntegers(TypeDecorator):
     impl = StringDB
     cache_ok = True
@@ -72,6 +86,13 @@ class SQLDatabaseStorage(DataStorageI):
         self._db_url = db_url
         # Create a new SQLAlchemy engine.
         self.engine = create_engine(db_url)
+        with self.engine.begin() as connection:
+            # A timestamp that still carries a time zone is stored in the session time zone, so
+            # without this the machine's locale decides what lands in the table.
+            connection.exec_driver_sql("SET GLOBAL TimeZone='UTC'")
+            # DuckDB keeps the insertion order of a table by default, which costs time and space
+            # on an append-only write path that nothing reads in order.
+            connection.exec_driver_sql("SET GLOBAL preserve_insertion_order=false")
         # Create a configured "Session" class.
         self.Session = sessionmaker(bind=self.engine)
         # Create all tables for the provided models.
@@ -110,7 +131,9 @@ class SQLDatabaseStorage(DataStorageI):
         self._measurement_table = Table(
             "measurement",
             self.registry.metadata,
-            Column("id", BigInteger, primary_key=True, autoincrement=False),
+            # No primary key: the ids are snowflakes, nothing joins on them, and the index
+            # costs a fifth of the file.
+            Column("id", BigInteger),
             Column("value", Float),
             Column("metric_id", String),
             Column("physical_entity_id", String),
@@ -857,10 +880,7 @@ class SQLDatabaseStorage(DataStorageI):
             ddb_conn = sa_conn.connection
             # 1) Insert measurement rows (measurement_dfs)
             self._count += measurement_df.filter(pl.col("metric_id") == "CPU_CORE_PID_WORK").height
-            measurement_df = measurement_df.with_columns(
-                pl.col("start_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("start_ts"),
-                pl.col("end_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("end_ts"),
-            )
+            measurement_df = naive_utc_timestamps(measurement_df)
             ddb_conn.register("tmp_df", measurement_df)
             try:
                 ddb_conn.execute("""
@@ -878,10 +898,7 @@ class SQLDatabaseStorage(DataStorageI):
     def _save_comm_measurement_df(self, comm_df: pl.DataFrame):
         with self.engine.begin() as sa_conn:
             ddb_conn = sa_conn.connection
-            comm_df = comm_df.with_columns(
-                pl.col("start_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("start_ts"),
-                pl.col("end_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("end_ts"),
-            )
+            comm_df = naive_utc_timestamps(comm_df)
             comm_meas_arrow = comm_df.select(
                 [
                     "id",
