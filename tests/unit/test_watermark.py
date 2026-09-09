@@ -313,3 +313,25 @@ def test_a_dead_component_does_not_pin_the_buffer():
         model._get_relevant_measurements()
 
     assert model._measurements_df.height <= 4, "the buffer was never trimmed"
+
+
+def test_the_buffer_stores_the_id_columns_as_categorical():
+    """Three repeating id columns dominate a row; the buffer holds them dictionary-encoded."""
+    n = 5000
+    rows = pl.DataFrame(
+        {
+            "metric_id": [CPU_STREAMS[i % len(CPU_STREAMS)] for i in range(n)],
+            "physical_entity_id": [f"{i % 32:032x}" for i in range(n)],
+            "logical_entity_id": [f"{i % 256:032x}" for i in range(n)],
+            "value": [1.0] * n,
+            "start_ts": [_t(i) for i in range(n)],
+            "end_ts": [_t(i) for i in range(n)],
+        }
+    )
+    model = DyncamicEnergyAttributionModel(cutoff=30.0)
+
+    model.update_measurements(rows)
+
+    buffered = model._measurements_df
+    assert all(buffered.schema[c] == pl.Categorical for c in model._BUFFER_CATEGORICALS)
+    assert rows.estimated_size() / buffered.estimated_size() > 2.5

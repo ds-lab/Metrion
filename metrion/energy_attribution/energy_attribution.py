@@ -1384,6 +1384,9 @@ class DyncamicEnergyAttributionModel:
     _GPU_METRIC = GPUEnergyAttributionModel._ENERGY_METRIC
     _COMPONENT_ENERGY: dict[str, str] = {"cpu": _CPU_METRIC, "dram": _DRAM_METRIC, "gpu": _GPU_METRIC}
 
+    # Held as Categorical while in the buffer, handed to the models as strings again.
+    _BUFFER_CATEGORICALS = ["metric_id", "physical_entity_id", "logical_entity_id"]
+
     # Every stream a component reads, not just its energy counter. The energy stream is the
     # numerator of the attribution, the per-thread streams are the denominator. Without the
     # denominator the energy is split among whichever threads happen to have arrived already:
@@ -1454,7 +1457,12 @@ class DyncamicEnergyAttributionModel:
             return
 
         measurement_df = naive_utc_timestamps(measurement_df)
-        self._measurements_df = pl.concat([self._measurements_df, measurement_df])
+        # Categorical only inside the buffer: the three id columns repeat a few dozen values and
+        # cost 84 of the 113 bytes a row takes as strings, 40 as Categorical. The buffer holds
+        # seconds to minutes of rows, everything below still works on the plain string batch.
+        self._measurements_df = pl.concat(
+            [self._measurements_df, measurement_df.with_columns(pl.col(self._BUFFER_CATEGORICALS).cast(pl.Categorical))]
+        )
         self._advance_watermarks(measurement_df)
 
         # Rows whose window is already closed. Only countable here: the continuity samples go
@@ -1622,7 +1630,11 @@ class DyncamicEnergyAttributionModel:
 
         # Get all measurements up to the maximum bound (each model will filter further)
         max_bound = max(valid_bounds)
-        relevant_measurements = measurements_df.filter(pl.col("end_ts") <= max_bound)
+        # Back to strings for the models: the entity frames carry plain string ids, and polars
+        # does not join a categorical key against a string one.
+        relevant_measurements = measurements_df.filter(pl.col("end_ts") <= max_bound).with_columns(
+            pl.col(self._BUFFER_CATEGORICALS).cast(pl.String)
+        )
 
         # CROSS-BATCH CONTINUITY: Cache last energy sample per entity per metric
         for component, bound in bounds_dict.items():
@@ -1669,7 +1681,7 @@ class DyncamicEnergyAttributionModel:
             cached_df = cached_df.select(
                 [
                     pl.col(name).cast(dtype) if name in cached_df.columns else pl.lit(None, dtype).alias(name)
-                    for name, dtype in relevant_measurements.schema.items()
+                    for name, dtype in self._measurements_df.schema.items()
                 ]
             )
             self._measurements_df = pl.concat([self._measurements_df, cached_df])
