@@ -79,7 +79,7 @@ def test_the_buffer_takes_measurement_objects():
     model = DyncamicEnergyAttributionModel()
     model.update_measurements([Measurement(1.0, "CPU_CORE_PID_WORK", "core_0")])
 
-    assert model._buffer.height() == 1
+    assert model._measurements_df.height == 1
 
 
 def test_sched_switch_hands_over_naive_utc():

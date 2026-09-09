@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import datetime as dt
 from datetime import UTC
-import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 import polars as pl
 from loguru import logger
@@ -30,118 +28,6 @@ from metrion.metric import (
     GPU_DEVICE_PID_DYNAMIC_ENERGY,
 )
 from metrion.util import naive_utc_timestamps
-
-
-class MeasurementBuffer:
-    """Hybrid memory/disk buffer for measurements with automatic spill.
-
-    Stores measurements in memory up to a configurable limit, then spills
-    oldest data to Parquet files on disk. Required for handling late-arriving
-    measurements (up to 60+ seconds delay) without unbounded memory growth.
-
-    Parameters
-    ----------
-    memory_limit_rows : int
-        Maximum rows to keep in memory before spilling to disk.
-    spill_dir : Path, optional
-        Directory for spill files. Defaults to system temp directory.
-
-    Examples
-    --------
-    >>> buffer = MeasurementBuffer(memory_limit_rows=100_000)
-    >>> buffer.add(new_measurements_df)
-    >>> all_data = buffer.get_all()
-    >>> buffer.remove_before(cutoff_time)
-    """
-
-    def __init__(self, memory_limit_rows: int = 500_000, spill_dir: Path | None = None) -> None:
-        self._memory_df = pl.DataFrame()
-        self._spill_dir = spill_dir or Path(tempfile.gettempdir()) / "metrion_spill"
-        self._spill_files: list[Path] = []
-        self._memory_limit = memory_limit_rows
-
-    def add(self, df: pl.DataFrame) -> None:
-        """Add measurements to buffer, spilling to disk if needed.
-
-        Parameters
-        ----------
-        df : pl.DataFrame
-            Measurements to add with end_ts column for ordering.
-        """
-        if df.is_empty():
-            return
-        self._memory_df = pl.concat([self._memory_df, df])
-        if self._memory_df.height > self._memory_limit:
-            self._spill_to_disk()
-
-    def _spill_to_disk(self) -> None:
-        """Write oldest half of buffer to Parquet file."""
-        self._spill_dir.mkdir(parents=True, exist_ok=True)
-        half = self._memory_df.height // 2
-        # Sort by end_ts to spill oldest first
-        sorted_df = self._memory_df.sort("end_ts")
-        to_spill = sorted_df.head(half)
-        self._memory_df = sorted_df.tail(self._memory_df.height - half)
-
-        spill_path = self._spill_dir / f"spill_{dt.datetime.now(UTC).timestamp()}.parquet"
-        to_spill.write_parquet(spill_path)
-        self._spill_files.append(spill_path)
-        logger.debug(f"Spilled {half} measurement rows to {spill_path}")
-
-    def get_all(self) -> pl.DataFrame:
-        """Read all data from disk and memory.
-
-        Returns
-        -------
-        pl.DataFrame
-            Combined measurements from all spill files and memory.
-        """
-        dfs = []
-        for f in self._spill_files:
-            if f.exists():
-                dfs.append(pl.read_parquet(f))
-        dfs.append(self._memory_df)
-        return pl.concat(dfs) if dfs else pl.DataFrame()
-
-    def remove_before(self, cutoff: dt.datetime) -> None:
-        """Remove measurements older than cutoff from memory and disk.
-
-        Parameters
-        ----------
-        cutoff : dt.datetime
-            Remove all measurements with end_ts <= cutoff.
-        """
-        self._memory_df = self._memory_df.filter(pl.col("end_ts") > cutoff)
-        # Clean up spill files that are entirely before cutoff
-        for f in self._spill_files[:]:
-            if not f.exists():
-                self._spill_files.remove(f)
-                continue
-            df = pl.read_parquet(f)
-            remaining = df.filter(pl.col("end_ts") > cutoff)
-            if remaining.is_empty():
-                f.unlink()
-                self._spill_files.remove(f)
-                logger.debug(f"Removed spill file {f}")
-            elif remaining.height < df.height:
-                # Partial cleanup - rewrite file
-                remaining.write_parquet(f)
-
-    def height(self) -> int:
-        """Total row count across memory and disk."""
-        disk_rows = sum(pl.read_parquet(f).height for f in self._spill_files if f.exists())
-        return disk_rows + self._memory_df.height
-
-    def is_empty(self) -> bool:
-        """Check if buffer has no data."""
-        return self._memory_df.is_empty() and not self._spill_files
-
-    def cleanup(self) -> None:
-        """Remove all spill files."""
-        for f in self._spill_files:
-            if f.exists():
-                f.unlink()
-        self._spill_files.clear()
 
 
 class EnergyAttributionModelBase(ABC):
@@ -1443,12 +1329,8 @@ class DyncamicEnergyAttributionModel:
     ----------
     cutoff : float
         Seconds to wait before processing measurements.
-    memory_limit_rows : int
-        Max rows in memory before spilling to disk.
-    spill_dir : Path, optional
-        Directory for spill files.
     stall_after : float, optional
-        Seconds a stream may lag behind the fastest stream of its component before it
+        Seconds a stream may lag behind the newest measurement of any stream before it
         stops being required for the window bound. Defaults to ``max(30.0, 3 * cutoff)``.
 
     Examples
@@ -1490,12 +1372,11 @@ class DyncamicEnergyAttributionModel:
     def __init__(
         self,
         cutoff: float = 30.0,
-        memory_limit_rows: int = 500_000,
-        spill_dir: Path | None = None,
         stall_after: float | None = None,
     ) -> None:
         self.cutoff = cutoff
-        self._buffer = MeasurementBuffer(memory_limit_rows=memory_limit_rows, spill_dir=spill_dir)
+        # Everything not yet attributed. _component_bound keeps its span below stall_after.
+        self._measurements_df = pl.DataFrame()
         self._core_df = pl.DataFrame()
         self._cpu_df = pl.DataFrame()
         self._dram_df = pl.DataFrame()
@@ -1512,11 +1393,6 @@ class DyncamicEnergyAttributionModel:
         # How far each component has already been attributed. The buffer is trimmed at the
         # slowest component, so a faster one keeps seeing rows it has already accounted for.
         self._processed_until: dict[str, dt.datetime] = {}
-
-    @property
-    def _measurements_df(self) -> pl.DataFrame:
-        """Get all measurements from buffer (compatibility property)."""
-        return self._buffer.get_all()
 
     def update_measurements(self, measurement: pl.DataFrame | Sequence[Measurement]) -> None:
         """Add new measurements to the buffer.
@@ -1541,11 +1417,11 @@ class DyncamicEnergyAttributionModel:
             return
 
         measurement_df = naive_utc_timestamps(measurement_df)
-        self._buffer.add(measurement_df)
+        self._measurements_df = pl.concat([self._measurements_df, measurement_df])
         self._advance_watermarks(measurement_df)
 
         # Rows whose window is already closed. Only countable here: the continuity samples go
-        # through _buffer.add and never pass this way.
+        # through the buffer directly and never pass this way.
         late = self._count_late(measurement_df)
         if late:
             self._late_rows += late
@@ -1602,16 +1478,19 @@ class DyncamicEnergyAttributionModel:
         """Time up to which every stream of one component is complete.
 
         The minimum of the known streams' high-water marks, capped by the cutoff time.
-        A stream lagging more than stall_after seconds behind the fastest stream of the
-        same component counts as dried up and is no longer required, otherwise a finished
-        workload would hold up attribution forever. With force the maximum applies
-        instead: the shutdown drain is meant to empty the buffer.
+        A stream lagging more than stall_after seconds behind the newest measurement of any
+        stream counts as dried up and is no longer required, otherwise a finished workload
+        would hold up attribution forever. The reference has to be the newest measurement
+        overall: a component whose streams all stop together stays current relative to
+        itself and would pin the buffer for the rest of the run. Because every live mark is
+        within stall_after of the newest row, the buffer can never span more than that.
+        With force the maximum applies instead: the shutdown drain is meant to empty it.
         """
         marks = {metric: self._watermarks[metric] for metric in metrics if metric in self._watermarks}
         if not marks:
             return None
 
-        newest = max(marks.values())
+        newest = max(self._watermarks.values())
         stalled_before = newest - dt.timedelta(seconds=self._stall_after)
 
         live = []
@@ -1619,8 +1498,8 @@ class DyncamicEnergyAttributionModel:
             if mark < stalled_before:
                 if metric not in self._reported_stalls:
                     logger.warning(
-                        f"Stream {metric} lags more than {self._stall_after:.0f}s behind the other "
-                        "streams of its component; it is no longer required for the window bound"
+                        f"Stream {metric} lags more than {self._stall_after:.0f}s behind the newest "
+                        "measurement; it is no longer required for the window bound"
                     )
                     self._reported_stalls.add(metric)
                 continue
@@ -1629,7 +1508,7 @@ class DyncamicEnergyAttributionModel:
         if not live:
             return None
         if force:
-            return newest
+            return max(live)
         return min(min(live), cutoff_time)
 
     def update_entites(self, entities: Sequence[Entity]) -> None:
@@ -1681,7 +1560,7 @@ class DyncamicEnergyAttributionModel:
             to the bound of that component.
         """
         now = dt.datetime.now(UTC).replace(tzinfo=None)
-        measurements_df = self._buffer.get_all()
+        measurements_df = self._measurements_df
         empty_bounds: dict[str, dt.datetime | None] = dict.fromkeys(self._COMPONENT_INPUTS)
 
         if measurements_df.is_empty():
@@ -1728,10 +1607,10 @@ class DyncamicEnergyAttributionModel:
             ts for (metric, _), (ts, _) in self._last_energy_samples.items() if metric not in self._reported_stalls
         ]
         deletion_point = min(min_bound, *anchors) if anchors else min_bound
-        self._buffer.remove_before(deletion_point)
+        self._measurements_df = self._measurements_df.filter(pl.col("end_ts") > deletion_point)
 
-        # Put back the anchors the deletion just took. remove_before keeps end_ts > cutoff, so a
-        # newer anchor is still in the buffer; re-adding it would leave two rows at the same
+        # Put back the anchors the deletion just took. The filter keeps end_ts > deletion_point,
+        # so a newer anchor is still in the buffer; re-adding it would leave two rows at the same
         # timestamp and one interval of zero length.
         cached_rows = [
             {
@@ -1756,7 +1635,7 @@ class DyncamicEnergyAttributionModel:
                     for name, dtype in relevant_measurements.schema.items()
                 ]
             )
-            self._buffer.add(cached_df)
+            self._measurements_df = pl.concat([self._measurements_df, cached_df])
 
         return relevant_measurements, bounds_dict
 
@@ -1797,7 +1676,7 @@ class DyncamicEnergyAttributionModel:
         """
         empty_result = EnergyAttributionModelBase._empty_result()
 
-        if self._buffer.is_empty():
+        if self._measurements_df.is_empty():
             logger.debug("No measurements available for energy attribution.")
             return empty_result, empty_result, empty_result
 
@@ -1865,7 +1744,3 @@ class DyncamicEnergyAttributionModel:
             gpu_result = empty_result
 
         return pkg_result, dram_result, gpu_result
-
-    def cleanup(self) -> None:
-        """Clean up disk spill files."""
-        self._buffer.cleanup()

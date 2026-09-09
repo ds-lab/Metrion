@@ -208,7 +208,7 @@ def test_a_surviving_anchor_is_not_injected_twice():
 
     model._get_relevant_measurements()
 
-    pkg = model._buffer.get_all().filter(pl.col("metric_id") == CPUEnergyAttributionModel._PKG_METRIC)
+    pkg = model._measurements_df.filter(pl.col("metric_id") == CPUEnergyAttributionModel._PKG_METRIC)
     assert pkg.get_column("end_ts").n_unique() == pkg.height, "a timestamp appears twice in the buffer"
 
 
@@ -291,3 +291,25 @@ def test_a_row_behind_its_own_component_is_late():
     model.update_measurements(_rows(CPUEnergyAttributionModel._WORK_METRIC, [_t(0)]))
 
     assert model._late_rows == 1
+
+
+def test_a_component_that_stops_completely_is_declared_stalled():
+    """Regression: against its own streams a dead component always looks current."""
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0)
+    _feed(model, GPU_STREAMS, [_t(0)])
+    _feed(model, CPU_STREAMS, [_t(31)])
+
+    _, bounds = model._get_relevant_measurements()
+
+    assert bounds["gpu"] is None, "the GPU went quiet 31s ago and must not bound the window"
+
+
+def test_a_dead_component_does_not_pin_the_buffer():
+    """The buffer never spans more than stall_after, because the mark is relative to it."""
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0)
+    _feed(model, GPU_STREAMS, [_t(0)])  # the GPU speaks once and never again
+    for second in range(1, 120):
+        _feed(model, CPU_STREAMS, [_t(second)])
+        model._get_relevant_measurements()
+
+    assert model._measurements_df.height <= 4, "the buffer was never trimmed"
