@@ -12,7 +12,7 @@ WITH
             m.logical_entity_id,
             m."start_ts",
             m."end_ts",
-            -- The socket reports the value its counter wraps at; the constant is what runs
+            -- The socket reports the value its counter wraps at the constant is what runs
             -- recorded before that value was read from sysfs.
             COALESCE(c.max_energy_range_j, 262143328850.0 / 1000000.0) AS energy_wrap_j
         FROM

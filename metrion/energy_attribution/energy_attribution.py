@@ -1482,7 +1482,9 @@ class DyncamicEnergyAttributionModel:
 
         Each component runs at its own pace, so a row can only be late against the edge of
         the component that reads it. Against a single global edge every stream of a slower
-        component would look late while it is simply still waiting its turn.
+        component would look late while it is simply still waiting its turn. A row counts as
+        late once it starts before the edge: what is lost is its overlap with an interval
+        that has already been attributed, however far past the edge the row reaches.
         """
         # determine for each metric_id the latest end_ts that has already been processed for its component
         edges = {
@@ -1498,7 +1500,7 @@ class DyncamicEnergyAttributionModel:
             schema={"metric_id": pl.String, "edge": pl.Datetime("us")},
         )
         return (
-            measurement_df.join(edge_df, on="metric_id", how="inner").filter(pl.col("end_ts") < pl.col("edge")).height
+            measurement_df.join(edge_df, on="metric_id", how="inner").filter(pl.col("start_ts") < pl.col("edge")).height
         )
 
     def _advance_watermarks(self, measurement_df: pl.DataFrame) -> None:
@@ -1628,11 +1630,13 @@ class DyncamicEnergyAttributionModel:
         # Find the minimum bound across all components (for buffer cleanup)
         min_bound = min(valid_bounds)
 
-        # Get all measurements up to the maximum bound (each model will filter further)
+        # Everything that starts within the bound (each model will filter further). A row
+        # reaching past the bound still belongs to the intervals it overlaps, and the models
+        # weight it by that overlap; selecting on end_ts would drop exactly those rows.
         max_bound = max(valid_bounds)
         # Back to strings for the models: the entity frames carry plain string ids, and polars
         # does not join a categorical key against a string one.
-        relevant_measurements = measurements_df.filter(pl.col("end_ts") <= max_bound).with_columns(
+        relevant_measurements = measurements_df.filter(pl.col("start_ts") <= max_bound).with_columns(
             pl.col(self._BUFFER_CATEGORICALS).cast(pl.String)
         )
 
@@ -1642,14 +1646,14 @@ class DyncamicEnergyAttributionModel:
             if bound is None:
                 continue
             last_samples = (
-                relevant_measurements.filter((pl.col("metric_id") == metric) & (pl.col("end_ts") <= bound))
-                .sort("end_ts")
+                relevant_measurements.filter((pl.col("metric_id") == metric) & (pl.col("start_ts") <= bound))
+                .sort("start_ts")
                 .group_by("physical_entity_id")
                 .last()
             )
             for row in last_samples.iter_rows(named=True):
                 key = (metric, row["physical_entity_id"])
-                self._last_energy_samples[key] = (row["end_ts"], row["value"])
+                self._last_energy_samples[key] = (row["start_ts"], row["value"])
 
         # Remove processed measurements from the buffer.
         anchors = [
@@ -1745,7 +1749,7 @@ class DyncamicEnergyAttributionModel:
         # CPU attribution (with CPU-specific bound)
         cpu_bound = bounds_dict.get("cpu")
         if cpu_bound is not None:
-            cpu_measurements = relevant_measurements.filter(pl.col("end_ts") <= cpu_bound)
+            cpu_measurements = relevant_measurements.filter(pl.col("start_ts") <= cpu_bound)
             pkg_result = cpu_model.attribute_energy(
                 measurement_df=cpu_measurements,
                 cpu_df=self._cpu_df,
@@ -1762,7 +1766,7 @@ class DyncamicEnergyAttributionModel:
         # DRAM attribution (with DRAM-specific bound)
         dram_bound = bounds_dict.get("dram")
         if dram_bound is not None:
-            dram_measurements = relevant_measurements.filter(pl.col("end_ts") <= dram_bound)
+            dram_measurements = relevant_measurements.filter(pl.col("start_ts") <= dram_bound)
             dram_result = dram_model.attribute_energy(
                 measurement_df=dram_measurements,
                 core_df=self._core_df,
@@ -1779,7 +1783,7 @@ class DyncamicEnergyAttributionModel:
         # GPU attribution (with GPU-specific bound)
         gpu_bound = bounds_dict.get("gpu")
         if gpu_bound is not None and not self._gpu_df.is_empty():
-            gpu_measurements = relevant_measurements.filter(pl.col("end_ts") <= gpu_bound)
+            gpu_measurements = relevant_measurements.filter(pl.col("start_ts") <= gpu_bound)
             gpu_result = gpu_model.attribute_gpu_energy(
                 measurement_df=gpu_measurements,
                 gpu_df=self._gpu_df,
