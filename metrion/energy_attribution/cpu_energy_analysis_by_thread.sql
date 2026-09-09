@@ -153,10 +153,13 @@ WITH
             w.work,
             ei.energy_j,
             t.exec_time_s,
-            (
-                c.idle_power_package * (
+            -- Capped at the measured energy, so an over-estimated idle power cannot leave a
+            -- negative remainder for the threads to share.
+            LEAST(
+                COALESCE(c.idle_power_package, 0) * (
                     julian(w.interval_end) - julian(w.interval_start)
-                ) * 24 * 60 * 60
+                ) * 24 * 60 * 60,
+                ei.energy_j
             ) AS idle_energy_j
         FROM
             work_per_thread_per_socket w,

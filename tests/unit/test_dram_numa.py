@@ -5,11 +5,11 @@ import pytest
 
 from metrion.energy_attribution.energy_attribution import DRAMEnergyAttributionModel
 
-# Zwei Sockel, je ein Riegel, drei Threads:
-#   p1 auf core-A liest lokal    -> dram-0   (100 Zugriffe)
-#   p2 auf core-B liest lokal    -> dram-1   (300 Zugriffe)
-#   p3 auf core-A liest entfernt -> dram-1   (200 Zugriffe)
-# dram-0 gehoert damit allein p1, dram-1 teilen sich p2 und p3 im Verhaeltnis 60:40.
+# Two sockets, one module each, three threads:
+#   p1 on core-A reads locally  -> dram-0   (100 accesses)
+#   p2 on core-B reads locally  -> dram-1   (300 accesses)
+#   p3 on core-A reads remotely -> dram-1   (200 accesses)
+# dram-0 therefore belongs to p1 alone, and p2 and p3 share dram-1 60:40.
 
 LOCAL = DRAMEnergyAttributionModel._READ_LOCAL_METRIC
 REMOTE = DRAMEnergyAttributionModel._READ_REMOTE_METRIC
@@ -24,7 +24,7 @@ def _frames():
         {
             "id": ["dram-0", "dram-1"],
             "cpu_id": ["cpu-A", "cpu-B"],
-            # Beide Riegel haengen am selben Host — genau daran scheiterte die alte Bindung.
+            # Both modules hang off the same host, which is what the old binding tripped over.
             "parent_id": ["host-1", "host-1"],
             "idle_power": [0.0, 0.0],
         }
@@ -49,7 +49,7 @@ def _rows(metric, entity, logical, values, seconds):
 def _measurements():
     parts = []
     for module in ("dram-0", "dram-1"):
-        # 100 J je Riegel ueber [0, 1); idle_power ist 0, alles ist dynamisch
+        # 100 J per module over [0, 1); idle_power is 0, so all of it is dynamic
         parts.append(_rows("DRAM_SOCKET_TOTAL_ENERGY", module, [None] * 2, [0.0, 100.0], [0, 1]))
         for thread in ("p1", "p2", "p3"):
             parts.append(_rows("DRAM_SOCKET_PID_MEMORY", module, [thread], [1000.0], [0]))
@@ -73,26 +73,26 @@ def _dynamic_on(module):
 
 
 def test_local_reads_reach_their_own_module():
-    """Der Regressionstest: mit der alten Bindung fiel jeder lokale Zugriff heraus."""
+    """The regression test: with the old binding every local access dropped out."""
     on_dram_0 = _dynamic_on("dram-0")
 
     p1 = on_dram_0.filter(pl.col("logical_entity_id") == "p1")["value"].sum()
-    assert p1 == pytest.approx(100.0), "p1 liest als einziger auf dram-0 und bekommt dessen Energie"
+    assert p1 == pytest.approx(100.0), "p1 is the only reader on dram-0 and gets all of its energy"
 
 
 def test_a_remote_read_does_not_count_on_its_own_module():
-    """p3 sitzt auf cpu-A; dram-0 ist sein eigener Riegel, dort ist der Zugriff nicht remote."""
+    """p3 sits on cpu-A, so dram-0 is its own module and the access is not remote there."""
     on_dram_0 = _dynamic_on("dram-0")
 
     p3 = on_dram_0.filter(pl.col("logical_entity_id") == "p3")["value"].sum()
-    assert p3 == pytest.approx(0.0), "der entfernte Zugriff darf nicht auf dem eigenen Riegel landen"
+    assert p3 == pytest.approx(0.0), "a remote access must not land on its own module"
 
 
 def test_shares_differ_between_modules():
-    """Mit der alten Bindung waren die Anteile auf beiden Riegeln identisch."""
+    """With the old binding the shares were identical on both modules."""
     on_dram_1 = _dynamic_on("dram-1")
 
     shares = {row["logical_entity_id"]: row["value"] for row in on_dram_1.iter_rows(named=True)}
-    assert shares.get("p2") == pytest.approx(60.0), "300 von 500 Zugriffen"
-    assert shares.get("p3") == pytest.approx(40.0), "200 von 500 Zugriffen"
+    assert shares.get("p2") == pytest.approx(60.0), "300 of 500 accesses"
+    assert shares.get("p3") == pytest.approx(40.0), "200 of 500 accesses"
     assert "p1" not in shares or shares["p1"] == pytest.approx(0.0)

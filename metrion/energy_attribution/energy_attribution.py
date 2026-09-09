@@ -452,7 +452,15 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                     ).alias("interval_seconds"),
                 ]
             )
-            .with_columns((pl.col("idle_power_package") * pl.col("interval_seconds")).alias("idle_energy_j"))
+            # Capped at the measured energy: an over-estimated idle power would otherwise leave a
+            # negative remainder for the threads to share. Capping here rather than clamping the
+            # remainder keeps the attributed energy equal to the measured energy.
+            .with_columns(
+                pl.min_horizontal(
+                    pl.col("idle_power_package") * pl.col("interval_seconds"),
+                    pl.col("energy_j"),
+                ).alias("idle_energy_j")
+            )
         )
 
         attribution = (
