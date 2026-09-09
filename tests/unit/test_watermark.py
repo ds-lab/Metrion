@@ -10,6 +10,11 @@ from metrion.energy_attribution.energy_attribution import (
     GPUEnergyAttributionModel,
 )
 
+GPU_STREAMS = (
+    GPUEnergyAttributionModel._ENERGY_METRIC,
+    GPUEnergyAttributionModel._UTILIZATION_METRIC,
+)
+
 CPU_STREAMS = (
     CPUEnergyAttributionModel._PKG_METRIC,
     CPUEnergyAttributionModel._WORK_METRIC,
@@ -194,21 +199,21 @@ def test_the_forced_drain_loses_no_energy_either():
 
 
 def test_a_surviving_anchor_is_not_injected_twice():
-    """Anker über dem Löschpunkt bleiben im Puffer — sie dürfen nicht zusätzlich eingespeist werden."""
+    """An anchor above the deletion point stays in the buffer and must not be added again."""
     model = DyncamicEnergyAttributionModel(cutoff=0.0)
     model.update_measurements(_cpu_batch([0, 1, 2, 3]))
-    # Eine zweite Komponente, die zwei Sekunden zurückhängt und den Löschpunkt festhält
+    # A second component two seconds behind, holding the deletion point back
     model.update_measurements(_rows(GPUEnergyAttributionModel._ENERGY_METRIC, [_t(0), _t(1)]))
     model.update_measurements(_rows(GPUEnergyAttributionModel._UTILIZATION_METRIC, [_t(0), _t(1)]))
 
     model._get_relevant_measurements()
 
     pkg = model._buffer.get_all().filter(pl.col("metric_id") == CPUEnergyAttributionModel._PKG_METRIC)
-    assert pkg.get_column("end_ts").n_unique() == pkg.height, "ein Zeitstempel steht zweimal im Puffer"
+    assert pkg.get_column("end_ts").n_unique() == pkg.height, "a timestamp appears twice in the buffer"
 
 
 def _drain_with_a_lagging_component(cycles=5):
-    """CPU läuft, eine GPU-Komponente hängt zwei Sekunden zurück und hält den Löschpunkt fest."""
+    """CPU runs ahead while a GPU component lags two seconds and pins the deletion point."""
     model = DyncamicEnergyAttributionModel(cutoff=0.0)
     model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
     model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
@@ -231,14 +236,58 @@ def _drain_with_a_lagging_component(cycles=5):
 
 
 def test_a_lagging_component_does_not_inflate_the_others():
-    """Der Zähler läuft 100 -> 397 über neun Sekunden, mehr als 297 J gibt es nicht."""
+    """The counter runs 100 -> 397 over nine seconds, so 297 J is all there is."""
     total, _ = _drain_with_a_lagging_component()
 
     assert total == pytest.approx(297.0)
 
 
 def test_intervals_are_emitted_once():
-    """Kein Intervall darf in zwei Zyklen erscheinen, solange der Puffer es noch vorhält."""
+    """No interval may appear in two cycles while the buffer still holds it."""
     _, intervals = _drain_with_a_lagging_component()
 
-    assert len(intervals) == len(set(intervals)), "ein Intervall wurde zweimal abgerechnet"
+    assert len(intervals) == len(set(intervals)), "an interval was billed twice"
+
+
+def test_continuity_samples_do_not_count_as_late():
+    """The false alarm: re-injected samples must not trip the late counter.
+
+    The lagging component is what makes this bite. Its anchor ends up below the edge,
+    while the fast component's anchor sits exactly on it and would pass either way.
+    """
+    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    _feed(model, CPU_STREAMS, [_t(0), _t(10)])
+    _feed(
+        model, (GPUEnergyAttributionModel._ENERGY_METRIC, GPUEnergyAttributionModel._UTILIZATION_METRIC), [_t(0), _t(2)]
+    )
+
+    model._get_relevant_measurements()  # injects the continuity samples
+    model._get_relevant_measurements()  # the old warning fired here
+
+    assert model._late_rows == 0
+
+
+def test_a_slower_component_may_still_deliver():
+    """The edge is per component, so a GPU row the GPU has not reached yet is not late."""
+    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
+    model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
+    model.update_measurements(_cpu_batch([0, 1, 2]))  # CPU runs well ahead
+    _feed(model, GPU_STREAMS, [_t(0)])
+    model.attribute_energy()
+
+    model.update_measurements(_rows(GPUEnergyAttributionModel._UTILIZATION_METRIC, [_t(2)]))
+
+    assert model._late_rows == 0, "the GPU has not attributed t=2 yet"
+
+
+def test_a_row_behind_its_own_component_is_late():
+    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
+    model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
+    model.update_measurements(_cpu_batch([0, 1, 2, 3]))
+    model.attribute_energy()
+
+    model.update_measurements(_rows(CPUEnergyAttributionModel._WORK_METRIC, [_t(0)]))
+
+    assert model._late_rows == 1

@@ -1501,8 +1501,6 @@ class DyncamicEnergyAttributionModel:
         self._dram_df = pl.DataFrame()
         self._gpu_df = pl.DataFrame()
 
-        # "Arrived too late" only means something once a window has actually been closed.
-        self._last_cutoff_check: dt.datetime | None = None
         # Cross-batch continuity: cache last energy sample per (metric, entity)
         self._last_energy_samples: dict[tuple[str, str], tuple[dt.datetime, float]] = {}
 
@@ -1510,6 +1508,7 @@ class DyncamicEnergyAttributionModel:
         self._reported_stalls: set[str] = set()
         # Lower bound so that cutoff=0.0 does not declare every stream stalled at once.
         self._stall_after = stall_after if stall_after is not None else max(30.0, 3 * cutoff)
+        self._late_rows = 0
         # How far each component has already been attributed. The buffer is trimmed at the
         # slowest component, so a faster one keeps seeing rows it has already accounted for.
         self._processed_until: dict[str, dt.datetime] = {}
@@ -1544,6 +1543,42 @@ class DyncamicEnergyAttributionModel:
         measurement_df = naive_utc_timestamps(measurement_df)
         self._buffer.add(measurement_df)
         self._advance_watermarks(measurement_df)
+
+        # Rows whose window is already closed. Only countable here: the continuity samples go
+        # through _buffer.add and never pass this way.
+        late = self._count_late(measurement_df)
+        if late:
+            self._late_rows += late
+            logger.warning(
+                f"{late} measurement rows arrived after their component had already attributed "
+                f"their window (cutoff={self.cutoff:.1f}s). That energy is missing from the live "
+                "result: raise timing.cycle or attribution cutoff, or lower timing.ebpf_flush "
+                "and timing.storage_flush so the rows arrive sooner."
+            )
+
+    def _count_late(self, measurement_df: pl.DataFrame) -> int:
+        """Rows whose window their own component has already attributed.
+
+        Each component runs at its own pace, so a row can only be late against the edge of
+        the component that reads it. Against a single global edge every stream of a slower
+        component would look late while it is simply still waiting its turn.
+        """
+        # determine for each metric_id the latest end_ts that has already been processed for its component
+        edges = {
+            metric: self._processed_until[component]
+            for component, metrics in self._COMPONENT_INPUTS.items()
+            if component in self._processed_until
+            for metric in metrics
+        }
+        if not edges:
+            return 0
+        edge_df = pl.DataFrame(
+            {"metric_id": list(edges), "edge": list(edges.values())},
+            schema={"metric_id": pl.String, "edge": pl.Datetime("us")},
+        )
+        return (
+            measurement_df.join(edge_df, on="metric_id", how="inner").filter(pl.col("end_ts") < pl.col("edge")).height
+        )
 
     def _advance_watermarks(self, measurement_df: pl.DataFrame) -> None:
         """Raise the per-stream high-water mark to the newest end_ts in this batch.
@@ -1654,20 +1689,6 @@ class DyncamicEnergyAttributionModel:
 
         cutoff_time = now if force else now - dt.timedelta(seconds=self.cutoff)
 
-        # Check for missed data
-        missed_data_count = (
-            0
-            if self._last_cutoff_check is None
-            else measurements_df.filter(pl.col("end_ts") < self._last_cutoff_check).height
-        )
-        if missed_data_count > 0:
-            logger.warning("Live Energy Attribution will no longer be accurate due to missing data")
-            logger.debug(
-                f"Last cutoff check: {self._last_cutoff_check}, new cutoff time: {cutoff_time}"
-                + f" number of missed data={missed_data_count} and"
-                + f" oldest missed timestamp {measurements_df.get_column('end_ts').min()}",
-            )
-
         # Compute a measurement bound for EACH component, over all of its input streams
         bounds_dict: dict[str, dt.datetime | None] = {
             name: self._component_bound(metrics, cutoff_time, force) for name, metrics in self._COMPONENT_INPUTS.items()
@@ -1677,12 +1698,11 @@ class DyncamicEnergyAttributionModel:
         valid_bounds = [b for b in bounds_dict.values() if b is not None]
 
         if not valid_bounds:
-            self._last_cutoff_check = cutoff_time
+            # Nothing was processed, so the mark must not move either.
             return pl.DataFrame(), empty_bounds
 
         # Find the minimum bound across all components (for buffer cleanup)
         min_bound = min(valid_bounds)
-        self._last_cutoff_check = cutoff_time
 
         # Get all measurements up to the maximum bound (each model will filter further)
         max_bound = max(valid_bounds)
