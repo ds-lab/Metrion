@@ -1,4 +1,5 @@
 import json
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -15,13 +16,15 @@ from metrion.util import _add_id_to_measurement_df, naive_utc_timestamps
 class _RotatingParquetWriter:
     """Collects frames and writes one numbered Parquet file per `rotate_rows` rows."""
 
-    def __init__(self, directory: Path, rotate_rows: int, compression: str = "zstd"):
+    def __init__(self, directory: Path, rotate_rows: int, compression: str = "zstd", max_age_s: float | None = None):
         self._dir = directory
         self._dir.mkdir(parents=True, exist_ok=True)
         self._rotate_rows = rotate_rows
         self._compression = compression
+        self._max_age_s = max_age_s
         self._pending: list[pl.DataFrame] = []
         self._pending_rows = 0
+        self._oldest_pending: float | None = None
         # Continue behind the parts an earlier run left here; starting at zero again would
         # overwrite them.
         existing = [int(path.stem.split("-")[1]) for path in self._dir.glob("part-*.parquet")]
@@ -36,6 +39,8 @@ class _RotatingParquetWriter:
         if df.is_empty():
             return
 
+        if not self._pending:
+            self._oldest_pending = time.monotonic()
         self._pending.append(df)
         self._pending_rows += df.height
         self._total_rows += df.height
@@ -54,7 +59,19 @@ class _RotatingParquetWriter:
 
         self._pending.clear()
         self._pending_rows = 0
+        self._oldest_pending = None
         self._part += 1
+
+    def flush_aged(self) -> None:
+        """Write the buffer out once its oldest row has waited max_age_s.
+
+        For streams with a low row rate: without it the first file appears only when
+        rotate_rows is reached, which for the attribution results can take hours.
+        """
+        if self._max_age_s is None or self._oldest_pending is None:
+            return
+        if time.monotonic() - self._oldest_pending >= self._max_age_s:
+            self.flush()
 
 
 class ParquetDataStorage(DataStorageI):

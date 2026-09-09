@@ -10,7 +10,10 @@ WITH energy_samples_dram AS (
         d.cpu_id,
         m.logical_entity_id,
         m.start_ts,
-        m."end_ts"
+        m."end_ts",
+        -- The module reports the value its counter wraps at; the constant is what runs
+        -- recorded before that value was read from sysfs.
+        COALESCE(d.max_energy_range_j, 65712999613.0 / 1000000.0) AS energy_wrap_j
     FROM
         measurement AS m
         JOIN dram AS d ON m.physical_entity_id = d.id
@@ -32,7 +35,7 @@ energy_interval_dram AS (
             CASE
                 WHEN LEAD(value) OVER w IS NULL THEN 0
                 WHEN LEAD(value) OVER w >= value THEN LEAD(value) OVER w - value
-                ELSE ((65712999613.0 / 1000000.0) - value) + LEAD(value) OVER w
+                ELSE (energy_wrap_j - value) + LEAD(value) OVER w
             END AS energy_j
         FROM energy_samples_dram
         WINDOW w AS (PARTITION BY dram_id ORDER BY "start_ts")

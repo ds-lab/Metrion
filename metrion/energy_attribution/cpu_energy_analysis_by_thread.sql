@@ -5,19 +5,23 @@ CREATE TABLE IF NOT EXISTS
 WITH
     energy_samples AS (
         SELECT
-            id,
-            value,
-            metric_id,
-            physical_entity_id AS package_id,
-            logical_entity_id,
-            "start_ts",
-            "end_ts"
+            m.id,
+            m.value,
+            m.metric_id,
+            m.physical_entity_id AS package_id,
+            m.logical_entity_id,
+            m."start_ts",
+            m."end_ts",
+            -- The socket reports the value its counter wraps at; the constant is what runs
+            -- recorded before that value was read from sysfs.
+            COALESCE(c.max_energy_range_j, 262143328850.0 / 1000000.0) AS energy_wrap_j
         FROM
-            measurement
+            measurement m
+            LEFT JOIN cpu c ON c.id = m.physical_entity_id
         WHERE
-            metric_id = 'CPU_SOCKET_PKG_ENERGY'
-            AND "start_ts" >= '{start_time}'
-            AND "start_ts" <= '{end_time}'
+            m.metric_id = 'CPU_SOCKET_PKG_ENERGY'
+            AND m."start_ts" >= '{start_time}'
+            AND m."start_ts" <= '{end_time}'
     ),
     energy_interval AS (
         SELECT
@@ -31,7 +35,7 @@ WITH
                     CASE
                         WHEN lead (value) over w IS NULL THEN 0
                         WHEN lead (value) over w >= value THEN lead (value) over w - value
-                        ELSE ((262143328850.0 / 1000000.0) - value) + lead (value) over w
+                        ELSE (energy_wrap_j - value) + lead (value) over w
                     END AS energy_j
                 FROM
                     energy_samples

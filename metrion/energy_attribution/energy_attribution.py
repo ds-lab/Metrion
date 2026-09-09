@@ -30,6 +30,13 @@ from metrion.metric import (
 from metrion.util import naive_utc_timestamps
 
 
+def _wrap_column(entity_df: pl.DataFrame | pl.LazyFrame) -> pl.Expr:
+    """The value an entity's RAPL counter wraps at, null for runs that did not record it."""
+    if "max_energy_range_j" in entity_df.collect_schema().names():
+        return pl.col("max_energy_range_j")
+    return pl.lit(None, dtype=pl.Float64)
+
+
 class EnergyAttributionModelBase(ABC):
     """Abstract base class for energy attribution models.
 
@@ -206,7 +213,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
     _TIME_METRIC : str
         Metric ID for per-process execution time.
     _ENERGY_WRAP_CPU : float
-        Energy counter wrap-around value in Joules.
+        Energy counter wrap-around value in Joules, used where the CPU entity carries none.
     """
 
     _PKG_METRIC = "CPU_SOCKET_PKG_ENERGY"
@@ -307,6 +314,14 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
         if energy_samples.is_empty():
             return self._empty_result()
 
+        # The socket reports the value its counter wraps at; the constant is what runs
+        # recorded before that value was read from sysfs.
+        energy_samples = energy_samples.join(
+            cpu_df.select(pl.col("id").alias("package_id"), _wrap_column(cpu_df).alias("energy_wrap_j")),
+            on="package_id",
+            how="left",
+        )
+
         energy_intervals = (
             energy_samples.sort(["package_id", "start_ts"])
             .with_columns(
@@ -319,7 +334,9 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                 .then(0.0)
                 .when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
-                .otherwise(pl.lit(self._ENERGY_WRAP_CPU) - pl.col("value") + pl.col("lead_value"))
+                .otherwise(
+                    pl.col("energy_wrap_j").fill_null(self._ENERGY_WRAP_CPU) - pl.col("value") + pl.col("lead_value")
+                )
                 .alias("energy_j")
             )
             .filter(pl.col("interval_end").is_not_null())
@@ -534,7 +551,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
     _READ_LOCAL_METRIC, _READ_REMOTE_METRIC : str
         Metric IDs for per-process L3 misses to local and remote DRAM.
     _ENERGY_WRAP_DRAM : float
-        Energy counter wrap-around value in Joules.
+        Energy counter wrap-around value in Joules, used where the DRAM entity carries none.
     """
 
     _DRAM_METRIC = "DRAM_SOCKET_TOTAL_ENERGY"
@@ -616,6 +633,9 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.col("logical_entity_id"),
                 pl.col("start_ts"),
                 pl.col("end_ts"),
+                # The module reports the value its counter wraps at; the constant is what
+                # runs recorded before that value was read from sysfs.
+                _wrap_column(dram_lf).alias("energy_wrap_j"),
             )
         )
 
@@ -631,7 +651,9 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 .then(0.0)
                 .when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
-                .otherwise(pl.lit(self._ENERGY_WRAP_DRAM) - pl.col("value") + pl.col("lead_value"))
+                .otherwise(
+                    pl.col("energy_wrap_j").fill_null(self._ENERGY_WRAP_DRAM) - pl.col("value") + pl.col("lead_value")
+                )
                 .alias("energy_j")
             )
             .filter(pl.col("interval_end").is_not_null())

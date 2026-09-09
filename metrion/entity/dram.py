@@ -7,12 +7,21 @@ from metrion.entity.entity import Entity
 
 
 class DRAM(Entity):
-    def __init__(self, total_memory: float, cpu: CPU, idle_power: float, max_power: float, parent_id: str | None):
+    def __init__(
+        self,
+        total_memory: float,
+        cpu: CPU,
+        idle_power: float,
+        max_power: float,
+        parent_id: str | None,
+        max_energy_range_j: float | None = None,
+    ):
         super().__init__(parent_id=parent_id)
         self._cpu = cpu
         self._total_memory = total_memory
         self._idle_power = idle_power
         self._max_power = max_power
+        self._max_energy_range_j = max_energy_range_j
 
     def _to_df(self):
         schema = {
@@ -21,6 +30,7 @@ class DRAM(Entity):
             "cpu_id": pl.String,
             "idle_power": pl.Float64,
             "max_power": pl.Float64,
+            "max_energy_range_j": pl.Float64,
             "total_memory": pl.Float64,
             "parent_id": pl.String,
         }
@@ -30,6 +40,7 @@ class DRAM(Entity):
             "cpu_id": [self.cpu.id],
             "idle_power": [self.idle_power],
             "max_power": [self._max_power],
+            "max_energy_range_j": [self._max_energy_range_j],
             "total_memory": [self.total_memory],
             "parent_id": [self.parent_id],
         }
@@ -66,6 +77,11 @@ class DRAM(Entity):
     @max_power.setter
     def max_power(self, value: float):
         self._max_power = value
+
+    @property
+    def max_energy_range_j(self) -> float | None:
+        """Returns the value the RAPL DRAM energy counter wraps at, in joules."""
+        return self._max_energy_range_j
 
     @override
     def __str__(self):

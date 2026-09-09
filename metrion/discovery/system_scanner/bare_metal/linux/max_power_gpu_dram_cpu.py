@@ -124,6 +124,26 @@ def read_power_uw(file_path: Path) -> str:
     return f"{micro_watts / 1e6:.4f}"
 
 
+def read_energy_range_j(domain_path: Path) -> float | None:
+    """Read the value a RAPL domain's energy counter wraps at, in joules.
+
+    Parameters
+    ----------
+    domain_path : Path
+        Directory of the package or sub-domain, the one holding energy_uj.
+
+    Returns
+    -------
+    float or None
+        None if the file is missing or unreadable.
+    """
+    try:
+        micro_joules = float((domain_path / "max_energy_range_uj").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return micro_joules / 1e6
+
+
 def scan_rapl_packages() -> list[Path]:
     """Find RAPL package (CPU socket) domains with energy counters."""
     if not BASE_RAPL.is_dir():

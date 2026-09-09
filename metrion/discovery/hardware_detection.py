@@ -420,6 +420,7 @@ class HardwareDetection:
                     cores=[],
                     idle_power_package=idle_power_package,
                     max_power_package=max_power_package,
+                    max_energy_range_j=cpu_data.get("max_energy_range_j"),
                 )
 
                 # Create core entities for this CPU
@@ -586,6 +587,7 @@ class HardwareDetection:
                         parent_id=host_entity.id,
                         idle_power=dram_idle_power,
                         max_power=dram_max_power,
+                        max_energy_range_j=socket_data.get("max_energy_range_j"),
                     )
                     dram_entities.append(dram_entity)
 

@@ -1,9 +1,10 @@
 import json
+import time
 from datetime import UTC, datetime
 
 import polars as pl
 
-from metrion.data_storage.parquet_data_storage import ParquetDataStorage
+from metrion.data_storage.parquet_data_storage import ParquetDataStorage, _RotatingParquetWriter
 from metrion.measurement import Measurement
 from metrion.metric import CPU_CORE_PID_WORK
 
@@ -304,3 +305,39 @@ def test_two_versions_in_one_call_are_both_kept(tmp_path):
     df = pl.read_parquet(tmp_path / "entities" / "logicalentity" / "*.parquet")
     assert df.height == 2
     assert df["id"].n_unique() == 1
+
+
+def test_flush_aged_writes_before_rotate_rows(tmp_path, monkeypatch):
+    """The point of the exercise: a file appears long before a million rows do."""
+    writer = _RotatingParquetWriter(tmp_path, rotate_rows=1_000_000, max_age_s=5.0)
+    writer.write(pl.DataFrame({"a": [1]}))
+    assert list(tmp_path.glob("*.parquet")) == []
+
+    later = time.monotonic() + 10.0
+    monkeypatch.setattr(time, "monotonic", lambda: later)
+    writer.flush_aged()
+
+    assert len(list(tmp_path.glob("*.parquet"))) == 1
+
+
+def test_flush_aged_is_a_noop_without_max_age(tmp_path):
+    writer = _RotatingParquetWriter(tmp_path, rotate_rows=1_000_000)
+    writer.write(pl.DataFrame({"a": [1]}))
+    writer.flush_aged()
+
+    assert list(tmp_path.glob("*.parquet")) == []
+
+
+def test_flush_aged_on_an_empty_buffer_writes_nothing(tmp_path):
+    writer = _RotatingParquetWriter(tmp_path, rotate_rows=10, max_age_s=0.0)
+    writer.flush_aged()
+
+    assert list(tmp_path.glob("*.parquet")) == []
+
+
+def test_the_age_clock_starts_at_the_first_pending_frame(tmp_path):
+    """A flush clears it, so the next file is not dated from the previous one."""
+    writer = _RotatingParquetWriter(tmp_path, rotate_rows=1, max_age_s=5.0)
+    writer.write(pl.DataFrame({"a": [1]}))
+
+    assert writer._oldest_pending is None

@@ -21,6 +21,7 @@ class CPU(PhysicalEntity):
         cores: list[Core],
         idle_power_package: float,
         max_power_package: float | None = None,
+        max_energy_range_j: float | None = None,
         parent_id: str | None = None,
     ):
         self._manufacturer = manufacturer
@@ -34,6 +35,7 @@ class CPU(PhysicalEntity):
         self._cores = cores
         self._idle_power_package = idle_power_package
         self._max_power_package = max_power_package
+        self._max_energy_range_j = max_energy_range_j
         super().__init__(id=None, parent_id=parent_id)
 
     def _to_df(self) -> pl.DataFrame:
@@ -50,6 +52,7 @@ class CPU(PhysicalEntity):
             "core_ids": pl.String,
             "idle_power_package": pl.Float64,
             "max_power_package": pl.Float64,
+            "max_energy_range_j": pl.Float64,
             "parent_id": pl.String,
         }
         data = {
@@ -64,6 +67,7 @@ class CPU(PhysicalEntity):
             "core_ids": [core_numbers_string],
             "idle_power_package": [self.idle_power_package],
             "max_power_package": [self._max_power_package],
+            "max_energy_range_j": [self._max_energy_range_j],
             "parent_id": [self.parent_id],
         }
         return pl.DataFrame(data, schema=schema)
@@ -171,6 +175,11 @@ class CPU(PhysicalEntity):
     def max_power_package(self, value: float | None):
         """Sets the maximum power consumption of the package in watts."""
         self._max_power_package = value
+
+    @property
+    def max_energy_range_j(self) -> float | None:
+        """Returns the value the RAPL package energy counter wraps at, in joules."""
+        return self._max_energy_range_j
 
     def get_core_by_core_number(self, core_id: int) -> Core | None:
         """Returns the Core object with the specified core_id."""

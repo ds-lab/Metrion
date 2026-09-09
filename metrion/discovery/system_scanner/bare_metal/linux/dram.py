@@ -3,7 +3,10 @@ import re
 
 from loguru import logger
 
-from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_rapl_caps
+from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
+    collect_rapl_caps,
+    read_energy_range_j,
+)
 from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, get_nodes_per_package
 
 
@@ -95,6 +98,18 @@ def _auto_max_power_data() -> dict[int, float]:
     return power_data
 
 
+def _rapl_energy_ranges() -> dict[int, float]:
+    """Value the DRAM energy counter wraps at, per socket, in joules."""
+    ranges: dict[int, float] = {}
+    for pkg_caps in collect_rapl_caps():
+        for dram_cap in pkg_caps.dram:
+            energy_range = read_energy_range_j(dram_cap.path)
+            if energy_range is not None:
+                ranges[int(pkg_caps.package)] = energy_range
+                break
+    return ranges
+
+
 def _combine_power_data(idle_power: dict[int, float], max_power: dict[int, float]) -> dict[int, dict[str, float]]:
     """Merge idle/max maps into a per-socket dict."""
     combined: dict[int, dict[str, float]] = {}
@@ -175,8 +190,12 @@ def get_info(config: dict) -> list[dict]:
         - power_mode (str): "auto" or "manual".
         - idle_power (float): Idle DRAM power in watts for the package.
         - max_power (float): Max DRAM power cap in watts for the package.
+        - max_energy_range_j (float | None): Value the energy counter wraps at, in joules.
     """
     power_mode, power_data = _resolve_power_data(config.get("power", "auto"))
+    # Deliberately not part of power_data: the wrap value is hardware, not a setting, so it
+    # must not travel through the auto/manual branch that may replace the power values.
+    energy_ranges = _rapl_energy_ranges()
     sockets = []
 
     for package_id, total_memory in sorted(get_memory_per_package().items()):
@@ -194,6 +213,7 @@ def get_info(config: dict) -> list[dict]:
                 "power_mode": power_mode,
                 "idle_power": package_power.get("idle", 0.0),
                 "max_power": package_power.get("max", 0.0),
+                "max_energy_range_j": energy_ranges.get(package_id),
             }
         )
 

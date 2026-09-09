@@ -202,6 +202,7 @@ class SQLDatabaseStorage(DataStorageI):
             Column("core_ids", CommaSeparatedIntegers),
             Column("idle_power_package", Float),
             Column("max_power_package", Float),
+            Column("max_energy_range_j", Float),
         )
 
         # Core
@@ -225,6 +226,7 @@ class SQLDatabaseStorage(DataStorageI):
             Column("cpu_id", String, ForeignKey("entity.id")),
             Column("idle_power", Float),
             Column("max_power", Float),
+            Column("max_energy_range_j", Float),
             Column("total_memory", Float),
         )
 
@@ -301,6 +303,7 @@ class SQLDatabaseStorage(DataStorageI):
             "hyperthreading": cpu.hyperthreading,
             "core_ids": comma_separated(cpu.get_core_numbers()),
             "idle_power_package": cpu.idle_power_package,
+            "max_energy_range_j": cpu.max_energy_range_j,
             "max_power_package": cpu.max_power_package,
         }
 
@@ -320,6 +323,7 @@ class SQLDatabaseStorage(DataStorageI):
             "idle_power": dram.idle_power,
             "package_id": dram.cpu.package_id,
             "max_power": dram.max_power,
+            "max_energy_range_j": dram.max_energy_range_j,
         }
 
     def _gpu_row(self, gpu: GPU) -> dict:
