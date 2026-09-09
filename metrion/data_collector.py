@@ -44,25 +44,18 @@ class DataSaver:
 
     def _collect_attribute_energies(
         self, entities: Sequence[Entity], measurements: Sequence[Measurement] | pl.DataFrame, force: bool = False
-    ):
+    ) -> list[pl.DataFrame]:
+        """Feed the attribution model and return its non-empty result frames.
+
+        attribute_energy returns three triples (CPU, DRAM, GPU), each of them
+        (total, idle, dynamic), so up to nine frames in the measurement schema.
+        """
         self.dyn_eam.update_entites(entities)
         self.dyn_eam.update_measurements(measurements)
 
-        (
-            (cpu_pid_total_energy, cpu_pid_idle_energy, cpu_pid_dynamic_energy),
-            (dram_pid_total_energy, dram_pid_idle_energy, dram_pid_dynamic_energy),
-        ) = self.dyn_eam.attribute_energy(force=force)
+        cpu_result, dram_result, gpu_result = self.dyn_eam.attribute_energy(force=force)
 
-        energies = [
-            cpu_pid_total_energy,
-            cpu_pid_idle_energy,
-            cpu_pid_dynamic_energy,
-            dram_pid_total_energy,
-            dram_pid_idle_energy,
-            dram_pid_dynamic_energy,
-        ]
-
-        return energies
+        return [df for df in (*cpu_result, *dram_result, *gpu_result) if not df.is_empty()]
 
     def store_data(self):
         ds_factory = DataStorageFactory()
