@@ -85,9 +85,9 @@ dram_memory_usage_by_thread AS (
         dei.interval_start,
         dei.interval_end,
         m.logical_entity_id,
-        SUM(m.value * CASE WHEN m."end_ts" = m.start_ts THEN 1.0
-            ELSE (epoch(LEAST(m."end_ts", dei.interval_end)) - epoch(GREATEST(m.start_ts, dei.interval_start)))
-               / (epoch(m."end_ts") - epoch(m.start_ts)) END) AS total_memory_usage_by_thread
+        -- Not scaled by the overlap: resident memory is a level, not an amount. A sample that
+        -- overlaps the interval only partly still reports the whole memory the process holds.
+        SUM(m.value) AS total_memory_usage_by_thread
     FROM energy_interval_dram_tmp AS dei
     JOIN measurement AS m
       ON m.physical_entity_id = dei.dram_id

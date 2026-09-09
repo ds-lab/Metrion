@@ -715,12 +715,13 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             "value",
         )
 
+        # No value_col: resident memory is a level, not an amount. A sample that overlaps the
+        # interval only partly still reports the whole memory the process holds.
         dram_memory_usage_by_thread = (
             self._join_overlapping(
                 dram_memory_samples,
                 energy_intervals,
                 [pl.col("physical_entity_id") == pl.col("dram_id")],
-                value_col="value",
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
             .agg(pl.col("value").sum().alias("total_memory_usage_by_thread"))
