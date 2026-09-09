@@ -120,36 +120,51 @@ class TestGPUEnergyAttributionModel:
         assert intervals["energy_j"][0] == 100.0  # 1100 - 1000
         assert intervals["interval_seconds"][0] == 10.0
 
-    def test_idle_energy_calculated(
+    def test_idle_energy_capped_at_measured_energy(
         self,
         gpu_df: pl.DataFrame,
         energy_measurements: pl.DataFrame,
     ):
-        """Idle energy = idle_power × interval_duration."""
+        """Idle energy = idle_power × interval_duration, never more than the GPU used."""
         model = GPUEnergyAttributionModel()
         intervals = model._calculate_energy_intervals(
             measurement_df=energy_measurements,
             gpu_df=gpu_df,
         )
 
-        # 50W idle × 10s = 500J idle energy
-        assert intervals["idle_energy_j"][0] == 500.0
+        # 50W idle × 10s would be 500J, but only 100J were measured
+        assert intervals["idle_energy_j"][0] == 100.0
 
     def test_dynamic_energy_calculated(
         self,
         gpu_df: pl.DataFrame,
         energy_measurements: pl.DataFrame,
     ):
-        """Dynamic energy = total - idle (clamped to 0)."""
+        """Dynamic energy = total - idle, and idle never exceeds total."""
         model = GPUEnergyAttributionModel()
         intervals = model._calculate_energy_intervals(
             measurement_df=energy_measurements,
             gpu_df=gpu_df,
         )
 
-        # 100J total - 500J idle = 0J (clamped, idle > total)
-        # In this case idle > total, so dynamic should be 0
+        # 500J idle claimed for 100J measured, so the cap leaves nothing dynamic
         assert intervals["dynamic_energy_j"][0] == 0.0
+
+    def test_idle_power_above_measured_energy_keeps_the_sum(
+        self,
+        gpu_df: pl.DataFrame,
+        energy_measurements: pl.DataFrame,
+        utilization_measurements: pl.DataFrame,
+    ):
+        """The attributed energy stays the measured energy even when idle_power is too high."""
+        model = GPUEnergyAttributionModel()
+        total_df, _, dynamic_df = model.attribute_gpu_energy(
+            measurement_df=pl.concat([energy_measurements, utilization_measurements]),
+            gpu_df=gpu_df,
+        )
+
+        assert (dynamic_df["value"] >= 0.0).all()
+        assert total_df["value"].sum() == pytest.approx(100.0)
 
     def test_attribution_by_utilization_ratio(self, gpu_df: pl.DataFrame, base_time: dt.datetime):
         """Energy attributed proportional to SM utilization."""

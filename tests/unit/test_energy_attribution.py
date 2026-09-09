@@ -190,17 +190,11 @@ MEASURED_ENERGY_J = 50.0
 CLAIMED_IDLE_POWER_W = 200.0
 
 
-def _quiet_socket_measurements() -> pl.DataFrame:
-    start = dt.datetime(2026, 1, 1)
-    end = start + dt.timedelta(seconds=1)
-    rows = [
-        ("CPU_SOCKET_PKG_ENERGY", "cpu-A", None, 100.0, start, start),
-        ("CPU_SOCKET_PKG_ENERGY", "cpu-A", None, 100.0 + MEASURED_ENERGY_J, end, end),
-        ("CPU_CORE_PID_WORK", "core-A", "p1", 3000.0, start, end),
-        ("CPU_CORE_PID_WORK", "core-A", "p2", 1000.0, start, end),
-        ("CPU_CORE_PID_TIME", "core-A", "p1", 750.0, start, end),
-        ("CPU_CORE_PID_TIME", "core-A", "p2", 250.0, start, end),
-    ]
+START = dt.datetime(2026, 1, 1)
+END = START + dt.timedelta(seconds=1)
+
+
+def _measurement_frame(rows: list[tuple]) -> pl.DataFrame:
     return pl.DataFrame(
         rows,
         schema={
@@ -215,12 +209,51 @@ def _quiet_socket_measurements() -> pl.DataFrame:
     )
 
 
-def test_idle_power_above_the_measured_energy_leaves_no_negative_share() -> None:
+def test_cpu_idle_power_above_the_measured_energy_leaves_no_negative_share() -> None:
+    measurements = _measurement_frame(
+        [
+            ("CPU_SOCKET_PKG_ENERGY", "cpu-A", None, 100.0, START, START),
+            ("CPU_SOCKET_PKG_ENERGY", "cpu-A", None, 100.0 + MEASURED_ENERGY_J, END, END),
+            ("CPU_CORE_PID_WORK", "core-A", "p1", 3000.0, START, END),
+            ("CPU_CORE_PID_WORK", "core-A", "p2", 1000.0, START, END),
+            ("CPU_CORE_PID_TIME", "core-A", "p1", 750.0, START, END),
+            ("CPU_CORE_PID_TIME", "core-A", "p2", 250.0, START, END),
+        ]
+    )
     cpu_df = pl.DataFrame({"id": ["cpu-A"], "idle_power_package": [CLAIMED_IDLE_POWER_W]})
     core_df = pl.DataFrame({"id": ["core-A"], "parent_id": ["cpu-A"]})
 
     total, _, dynamic = CPUEnergyAttributionModel().attribute_energy(
-        measurement_df=_quiet_socket_measurements(), cpu_df=cpu_df, core_df=core_df
+        measurement_df=measurements, cpu_df=cpu_df, core_df=core_df
+    )
+
+    assert (dynamic["value"] >= 0.0).all()
+    assert total["value"].sum() == pytest.approx(MEASURED_ENERGY_J)
+
+
+def test_dram_idle_power_above_the_measured_energy_leaves_no_negative_share() -> None:
+    measurements = _measurement_frame(
+        [
+            ("DRAM_SOCKET_TOTAL_ENERGY", "dram-0", None, 100.0, START, START),
+            ("DRAM_SOCKET_TOTAL_ENERGY", "dram-0", None, 100.0 + MEASURED_ENERGY_J, END, END),
+            ("DRAM_SOCKET_PID_MEMORY", "dram-0", "p1", 1000.0, START, START),
+            ("DRAM_SOCKET_PID_MEMORY", "dram-0", "p2", 1000.0, START, START),
+            (DRAMEnergyAttributionModel._READ_LOCAL_METRIC, "core-A", "p1", 300.0, START, START),
+            (DRAMEnergyAttributionModel._READ_LOCAL_METRIC, "core-A", "p2", 100.0, START, START),
+        ]
+    )
+    dram_df = pl.DataFrame(
+        {
+            "id": ["dram-0"],
+            "cpu_id": ["cpu-A"],
+            "parent_id": ["host-1"],
+            "idle_power": [CLAIMED_IDLE_POWER_W],
+        }
+    )
+    core_df = pl.DataFrame({"id": ["core-A"], "parent_id": ["cpu-A"]})
+
+    total, _, dynamic = DRAMEnergyAttributionModel().attribute_energy(
+        measurement_df=measurements, core_df=core_df, dram_df=dram_df
     )
 
     assert (dynamic["value"] >= 0.0).all()

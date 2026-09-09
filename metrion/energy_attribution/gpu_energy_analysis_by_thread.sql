@@ -64,8 +64,10 @@ gpu_interval_energy_split AS (
         energy_j,
         idle_power,
         duration_s,
-        (idle_power * duration_s) AS idle_energy_j_total,
-        greatest(energy_j - (idle_power * duration_s), 0.0) AS dynamic_energy_j_total
+        -- Capped at the measured energy, so an over-estimated idle power cannot leave a
+        -- negative remainder for the processes to share.
+        LEAST(COALESCE(idle_power, 0) * duration_s, energy_j) AS idle_energy_j_total,
+        energy_j - idle_energy_j_total AS dynamic_energy_j_total
     FROM gpu_interval_powers
 ),
 

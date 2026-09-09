@@ -683,7 +683,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                     )
                     * 1e-9
                 ).alias("interval_duration_s"),
-                "idle_power",
+                pl.col("idle_power").fill_null(0.0),
             ]
         )
 
@@ -696,13 +696,14 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 "energy_j",
                 "idle_power",
                 "interval_duration_s",
-                (pl.col("idle_power") * pl.col("interval_duration_s")).alias("idle_energy_j"),
-                pl.max_horizontal(
-                    pl.lit(0.0),
-                    pl.col("energy_j") - (pl.col("idle_power") * pl.col("interval_duration_s")),
-                ).alias("active_energy_j"),
+                # Capped at the measured energy: an over-estimated idle power would otherwise leave
+                # a negative remainder for the processes to share.
+                pl.min_horizontal(
+                    pl.col("idle_power") * pl.col("interval_duration_s"),
+                    pl.col("energy_j"),
+                ).alias("idle_energy_j"),
             ]
-        )
+        ).with_columns((pl.col("energy_j") - pl.col("idle_energy_j")).alias("active_energy_j"))
 
         dram_memory_samples = measurement_lf.filter(
             (pl.col("metric_id") == self._MEMORY_METRIC) & pl.col("value").is_not_null()
@@ -1068,10 +1069,15 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
                     / 1_000_000_000.0
                 ).alias("interval_seconds"),
             )
-            .with_columns((pl.col("idle_power_w") * pl.col("interval_seconds")).alias("idle_energy_j"))
+            # Capped at the measured energy: an over-estimated idle power would otherwise leave a
+            # negative remainder for the processes to share.
             .with_columns(
-                pl.max_horizontal(pl.col("energy_j") - pl.col("idle_energy_j"), pl.lit(0.0)).alias("dynamic_energy_j")
+                pl.min_horizontal(
+                    pl.col("idle_power_w") * pl.col("interval_seconds"),
+                    pl.col("energy_j"),
+                ).alias("idle_energy_j")
             )
+            .with_columns((pl.col("energy_j") - pl.col("idle_energy_j")).alias("dynamic_energy_j"))
             .select(
                 [
                     "gpu_id",
