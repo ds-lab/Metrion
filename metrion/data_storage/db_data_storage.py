@@ -8,8 +8,8 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Double,
     Enum,
-    Float,
     ForeignKey,
     Integer,
     String,
@@ -120,7 +120,7 @@ class SQLDatabaseStorage(DataStorageI):
             # No primary key: the ids are snowflakes, nothing joins on them, and the index
             # costs a fifth of the file.
             Column("id", BigInteger),
-            Column("value", Float),
+            Column("value", Double),
             Column("metric_id", String),
             Column("physical_entity_id", String),
             Column("logical_entity_id", String),
@@ -200,9 +200,9 @@ class SQLDatabaseStorage(DataStorageI):
             Column("cache", BigInteger),
             Column("hyperthreading", Boolean),
             Column("core_ids", CommaSeparatedIntegers),
-            Column("idle_power_package", Float),
-            Column("max_power_package", Float),
-            Column("max_energy_range_j", Float),
+            Column("idle_power_package", Double),
+            Column("max_power_package", Double),
+            Column("max_energy_range_j", Double),
         )
 
         # Core
@@ -224,10 +224,10 @@ class SQLDatabaseStorage(DataStorageI):
             Column("id", String, ForeignKey("entity.id"), primary_key=True, nullable=False),
             Column("package_id", BigInteger, nullable=False),
             Column("cpu_id", String, ForeignKey("entity.id")),
-            Column("idle_power", Float),
-            Column("max_power", Float),
-            Column("max_energy_range_j", Float),
-            Column("total_memory", Float),
+            Column("idle_power", Double),
+            Column("max_power", Double),
+            Column("max_energy_range_j", Double),
+            Column("total_memory", Double),
         )
 
         # GPU
@@ -241,8 +241,8 @@ class SQLDatabaseStorage(DataStorageI):
             Column("serial_number", String),
             Column("uuid", String),
             Column("pci_id", String),
-            Column("idle_power", Float),
-            Column("max_power", Float),
+            Column("idle_power", Double),
+            Column("max_power", Double),
             Column("compute_capability_major", Integer),
             Column("compute_capability_minor", Integer),
         )

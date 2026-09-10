@@ -16,7 +16,7 @@ from metrion.entity.host import Host, HostType
 from metrion.entity.logical_entity import LogicalEntity
 from metrion.entity.metadata import Metadata
 from metrion.measurement import Measurement
-from metrion.metric import CPU_CORE_PID_TIME, CPU_SOCKET_PKG_ENERGY
+from metrion.metric import CPU_CORE_PID_TIME, CPU_SOCKET_PKG_ENERGY, GPU_DEVICE_TOTAL_ENERGY
 
 
 @pytest.fixture
@@ -70,6 +70,19 @@ def test_host_persisted_with_measurement(storage):
     assert measurement_row.metric_id == measurement.metric_id
     assert measurement_row.physical_entity_id == host.id
     assert measurement_row.value == pytest.approx(measurement.value)
+
+
+def test_a_large_energy_counter_keeps_its_precision(storage):
+    """GPU energy counters reach 10^9 J, where a 32-bit float only resolves 64 J steps."""
+    host = Host("gpu-host", HostType.SERVER, "Linux")
+    counter = 659_852_301.25
+    measurement = Measurement(value=counter, metric_id=GPU_DEVICE_TOTAL_ENERGY.name, physical_entity_id=host.id)
+    storage.save_data_record(DataRecord([host], [measurement]))
+
+    with storage.Session() as session:
+        stored = session.execute(select(storage._measurement_table.c.value)).scalar_one()
+
+    assert stored == counter
 
 
 def test_cpu_and_core_persisted(storage):
