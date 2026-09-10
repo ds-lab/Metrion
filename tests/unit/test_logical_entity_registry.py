@@ -27,10 +27,11 @@ def registry(monkeypatch):
     registry._producer_finished = False
     registry._clk_tck = 100
     registry._boot_time_dt = datetime(2026, 9, 10, tzinfo=UTC)
+    registry._cgroup_id_map = {}
     return registry
 
 
-def _event(event_type, tid, comm, cmdline):
+def _event(event_type, tid, comm, cmdline, cgroup_id=0):
     return {
         "tid": tid,
         "tgid": tid,
@@ -43,7 +44,7 @@ def _event(event_type, tid, comm, cmdline):
         "event_type": event_type,
         "uid": 1000,
         "gid": 1000,
-        "cgroup_id": 0,
+        "cgroup_id": cgroup_id,
         "old_tid": 0,
         "comm": comm,
         "cmdline": cmdline,
@@ -82,3 +83,23 @@ def test_an_exec_after_the_report_is_reported_again(registry):
     assert first == ["bash"]
     assert unchanged == [], "nothing changed, so nothing is reported"
     assert after_exec == ["python3"]
+
+
+def test_the_cgroup_map_is_walked_only_for_an_id_it_does_not_know(registry, monkeypatch):
+    """In run 2, 263 threads sat in one cgroup the walk never finds; each must not walk /sys/fs/cgroup again."""
+    walks = 0
+
+    def walk():
+        nonlocal walks
+        walks += 1
+        return {7: "/system.slice/train.service"}
+
+    monkeypatch.setattr(ler, "build_cgroup_id_map", walk)
+
+    for tid, cgroup_id in [(1000, 7), (1001, 7), (1002, 99), (1003, 99)]:
+        _deliver(registry, [_event(NEW, tid, "python3", "python3 train.py", cgroup_id)])
+        registry.update()
+
+    names = [registry._entities[(tid, START_NS + tid)].resource_group_name for tid in range(1000, 1004)]
+    assert names == ["/system.slice/train.service"] * 2 + ["unknown"] * 2
+    assert walks == 2, "one walk for each id the map did not know, none for the ones it did"

@@ -169,7 +169,6 @@ class LogicalEntityRegistry:
                 if not seen:
                     logger.warning("LogicalEntityRegistry: sentinel not received, continuing anyway")
 
-            self._cgroup_id_map = build_cgroup_id_map()
             for item in df_paths:
                 df = read_temp_ipc(item)
                 self._process_events(df)
@@ -186,12 +185,12 @@ class LogicalEntityRegistry:
         """Consume events from queue and update registry."""
         with self._state_lock:
             df_paths = []
-            timeout = 0.01  # 10ms timeout for non-blocking behavior
             max_iterations = 1000  # Prevent infinite loop
 
             for _ in range(max_iterations):
                 try:
-                    item = self._queue.get(timeout=timeout)
+                    # Take what is there; the next call picks up what arrives later.
+                    item = self._queue.get_nowait()
                 except q.Empty:
                     # Queue is empty, done draining
                     break
@@ -203,7 +202,6 @@ class LogicalEntityRegistry:
             if len(df_paths) == 0:
                 return
 
-            self._cgroup_id_map = build_cgroup_id_map()
             dfs = []
             for item in df_paths:
                 df = read_temp_ipc(item)
@@ -482,7 +480,7 @@ class LogicalEntityRegistry:
             parent_tid_start_time=self._ns_to_datetime(resolved_parent_tid_ns),
             parent_pid_start_time=self._ns_to_datetime(resolved_parent_pid_ns),
             resource_group_id=row.get("cgroup_id"),
-            resource_group_name=self._cgroup_id_map.get(row["cgroup_id"], "unknown"),
+            resource_group_name=self._cgroup_name(row["cgroup_id"]),
             user_id=row.get("uid"),
             group_id=row.get("gid"),
         )
@@ -601,6 +599,14 @@ class LogicalEntityRegistry:
                 return res
         except Exception:
             return ""
+
+    def _cgroup_name(self, cgroup_id: int) -> str:
+        """Path of the cgroup; the map is rebuilt only for an id it does not know yet."""
+        if cgroup_id not in self._cgroup_id_map:
+            self._cgroup_id_map = build_cgroup_id_map()
+            # Still missing after a fresh walk: a later walk will not find it either.
+            self._cgroup_id_map.setdefault(cgroup_id, "unknown")
+        return self._cgroup_id_map[cgroup_id]
 
     def _get_task_starttime_ns(self, tid: int, tgid: int) -> int | None:
         """
