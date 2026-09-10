@@ -75,3 +75,59 @@ def test_group_data_uses_the_scaled_threshold():
 
     assert result.height == 1, "both rows sit inside one bucket and share a group key"
     assert result["execution_time"].item() == 3.0
+
+
+def _one_second_context():
+    return TimingContext(
+        source_name="test",
+        start_time_ms=0,
+        interval_seconds=1.0,
+        start_datetime=datetime.now(UTC),
+    )
+
+
+def _events(starts_ms, ends_ms, values):
+    return pl.DataFrame(
+        {
+            "pid": [1] * len(starts_ms),
+            "pid_start": [0] * len(starts_ms),
+            "cpu_core": [0] * len(starts_ms),
+            "time_start": [ms * 1_000_000 for ms in starts_ms],
+            "time_end": [ms * 1_000_000 for ms in ends_ms],
+            "execution_time": values,
+        }
+    )
+
+
+def test_guard_band_events_are_summed():
+    """Three fragments in the opening 100 ms guard band become one row, not three."""
+    monitor = _bare_monitor()
+
+    result = monitor._group_data(
+        _events([10, 20, 30], [11, 21, 31], [1.0, 2.0, 3.0]), ["execution_time"], _one_second_context()
+    )
+
+    assert result.height == 1
+    assert result["execution_time"].item() == 6.0
+
+
+def test_guard_band_stays_apart_from_the_usable_window():
+    """A guard band event and a window event share a group key but must not be summed together."""
+    monitor = _bare_monitor()
+
+    result = monitor._group_data(_events([10, 500], [11, 501], [1.0, 2.0]), ["execution_time"], _one_second_context())
+
+    assert result.height == 2
+    assert sorted(result["execution_time"].to_list()) == [1.0, 2.0]
+
+
+def test_straddling_event_is_not_read_as_inside_the_window():
+    """An event crossing the interval end wraps pos_end, which would otherwise look early."""
+    monitor = _bare_monitor()
+
+    result = monitor._group_data(
+        _events([500, 500], [600, 1200], [1.0, 2.0]), ["execution_time"], _one_second_context()
+    )
+
+    assert result.height == 2
+    assert sorted(result["execution_time"].to_list()) == [1.0, 2.0]
