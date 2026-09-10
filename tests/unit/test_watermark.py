@@ -48,7 +48,7 @@ def _feed(model: DyncamicEnergyAttributionModel, metrics, times) -> None:
 
 def test_energy_alone_does_not_open_a_window():
     """The actual regression test: RAPL without sched_switch must not attribute anything."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model.update_measurements(_rows(CPUEnergyAttributionModel._PKG_METRIC, [_t(0), _t(1)]))
     model.update_measurements(_rows(CPUEnergyAttributionModel._WORK_METRIC, [_t(0)]))
     model.update_measurements(_rows(CPUEnergyAttributionModel._TIME_METRIC, [_t(0)]))
@@ -59,7 +59,7 @@ def test_energy_alone_does_not_open_a_window():
 
 
 def test_bound_advances_when_the_slow_stream_catches_up():
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     _feed(model, CPU_STREAMS, [_t(0), _t(1), _t(2)])
 
     _, bounds = model._get_relevant_measurements()
@@ -69,7 +69,7 @@ def test_bound_advances_when_the_slow_stream_catches_up():
 
 def test_never_seen_stream_is_not_required():
     """Without a GPU in the machine the GPU bound must not block the CPU."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     _feed(model, CPU_STREAMS, [_t(0)])
 
     _, bounds = model._get_relevant_measurements()
@@ -80,7 +80,7 @@ def test_never_seen_stream_is_not_required():
 
 def test_watermark_is_monotonic_across_batches():
     """The bound must not fall back once the buffer has been trimmed."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     _feed(model, CPU_STREAMS, [_t(0), _t(1)])
     model._get_relevant_measurements()  # trims the buffer
 
@@ -91,7 +91,7 @@ def test_watermark_is_monotonic_across_batches():
 
 def test_stalled_stream_stops_blocking():
     """A dried-up stream must not hold up attribution forever."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=10.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=10.0, max_out_of_orderness=0.0)
     _feed(model, CPU_STREAMS, [_t(0)])
     # WORK stops here, the other two keep going
     model.update_measurements(_rows(CPUEnergyAttributionModel._PKG_METRIC, [_t(100)]))
@@ -104,7 +104,7 @@ def test_stalled_stream_stops_blocking():
 
 def test_force_drains_past_the_slowest_stream():
     """The shutdown drain must not get stuck on the slowest stream."""
-    model = DyncamicEnergyAttributionModel(cutoff=15.0)
+    model = DyncamicEnergyAttributionModel(cutoff=15.0, max_out_of_orderness=0.0)
     model.update_measurements(_rows(CPUEnergyAttributionModel._PKG_METRIC, [_t(0), _t(5)]))
     model.update_measurements(_rows(CPUEnergyAttributionModel._WORK_METRIC, [_t(0)]))
     model.update_measurements(_rows(CPUEnergyAttributionModel._TIME_METRIC, [_t(0)]))
@@ -118,7 +118,7 @@ def test_force_drains_past_the_slowest_stream():
 
 def test_dram_bound_waits_for_the_read_counters():
     """DRAM energy is split by L3 misses, so those streams gate the DRAM bound too."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model.update_measurements(_rows(DRAMEnergyAttributionModel._DRAM_METRIC, [_t(0), _t(10)]))
     model.update_measurements(_rows(DRAMEnergyAttributionModel._MEMORY_METRIC, [_t(0), _t(10)]))
     model.update_measurements(_rows(DRAMEnergyAttributionModel._READ_LOCAL_METRIC, [_t(0)]))
@@ -131,7 +131,7 @@ def test_dram_bound_waits_for_the_read_counters():
 
 def test_aware_and_naive_timestamps_mix():
     """Measurement.to_df yields tz-aware rows, Parquet yields naive ones; both must land."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     aware = [t.replace(tzinfo=dt.UTC) for t in (_t(0), _t(1))]
     for metric in CPU_STREAMS:
         model.update_measurements(_rows(metric, aware))
@@ -175,7 +175,7 @@ def _cpu_batch(seconds):
 
 
 def _drain_two_batches(force):
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
     model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
 
@@ -200,7 +200,7 @@ def test_the_forced_drain_loses_no_energy_either():
 
 def test_a_surviving_anchor_is_not_injected_twice():
     """An anchor above the deletion point stays in the buffer and must not be added again."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model.update_measurements(_cpu_batch([0, 1, 2, 3]))
     # A second component two seconds behind, holding the deletion point back
     model.update_measurements(_rows(GPUEnergyAttributionModel._ENERGY_METRIC, [_t(0), _t(1)]))
@@ -214,7 +214,7 @@ def test_a_surviving_anchor_is_not_injected_twice():
 
 def _drain_with_a_lagging_component(cycles=5):
     """CPU runs ahead while a GPU component lags two seconds and pins the deletion point."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
     model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
 
@@ -255,7 +255,7 @@ def test_continuity_samples_do_not_count_as_late():
     The lagging component is what makes this bite. Its anchor ends up below the edge,
     while the fast component's anchor sits exactly on it and would pass either way.
     """
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     _feed(model, CPU_STREAMS, [_t(0), _t(10)])
     _feed(
         model, (GPUEnergyAttributionModel._ENERGY_METRIC, GPUEnergyAttributionModel._UTILIZATION_METRIC), [_t(0), _t(2)]
@@ -269,7 +269,7 @@ def test_continuity_samples_do_not_count_as_late():
 
 def test_a_slower_component_may_still_deliver():
     """The edge is per component, so a GPU row the GPU has not reached yet is not late."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
     model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
     model.update_measurements(_cpu_batch([0, 1, 2]))  # CPU runs well ahead
@@ -282,7 +282,7 @@ def test_a_slower_component_may_still_deliver():
 
 
 def test_a_row_behind_its_own_component_is_late():
-    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, max_out_of_orderness=0.0)
     model._cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
     model._core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
     model.update_measurements(_cpu_batch([0, 1, 2, 3]))
@@ -293,9 +293,68 @@ def test_a_row_behind_its_own_component_is_late():
     assert model._late_rows == 1
 
 
+def _energy_rows(seconds) -> list[dict]:
+    return [
+        {
+            "metric_id": CPUEnergyAttributionModel._PKG_METRIC,
+            "physical_entity_id": "pkg0",
+            "logical_entity_id": None,
+            "value": 100.0 + 33.0 * i,
+            "start_ts": _t(i),
+            "end_ts": _t(i),
+        }
+        for i in seconds
+    ]
+
+
+def _slice_rows(thread: str, core: str, start: float, end: float) -> list[dict]:
+    """One sched_switch slice, its WORK and TIME proportional to its length."""
+    return [
+        {
+            "metric_id": metric,
+            "physical_entity_id": core,
+            "logical_entity_id": thread,
+            "value": 1e9 * (end - start),
+            "start_ts": _t(start),
+            "end_ts": _t(end),
+        }
+        for metric in (CPUEnergyAttributionModel._WORK_METRIC, CPUEnergyAttributionModel._TIME_METRIC)
+    ]
+
+
+def test_a_slice_still_running_at_the_watermark_is_not_lost():
+    """sched_switch reports a slice when it ends, after the watermark may have passed its start.
+
+    p2's second slice starts at 2.5 s but only arrives with the second batch. Attributed up to
+    the raw watermark of 3 s, the interval 2..3 would already have been split without it.
+    """
+    first = _energy_rows(range(4)) + _slice_rows("p1", "c0", 0, 3) + _slice_rows("p2", "c1", 0, 2.5)
+    second = _energy_rows(range(4, 6)) + _slice_rows("p1", "c0", 3, 5) + _slice_rows("p2", "c1", 2.5, 5)
+    cpu_df = pl.DataFrame({"id": ["pkg0"], "idle_power_package": [0.0]})
+    core_df = pl.DataFrame({"id": ["c0", "c1"], "parent_id": ["pkg0", "pkg0"]})
+
+    model = DyncamicEnergyAttributionModel(cutoff=0.0)
+    model._cpu_df, model._core_df = cpu_df, core_df
+    results = []
+    for batch in (first, second):
+        model.update_measurements(pl.DataFrame(batch, schema_overrides={"logical_entity_id": pl.String}))
+        results.append(model.attribute_energy()[0][0])
+    results.append(model.attribute_energy(force=True)[0][0])
+    one_pass, _, _ = CPUEnergyAttributionModel().attribute_energy(
+        measurement_df=pl.DataFrame(first + second, schema_overrides={"logical_entity_id": pl.String}),
+        cpu_df=cpu_df,
+        core_df=core_df,
+    )
+
+    incremental = pl.concat([result for result in results if not result.is_empty()])
+    per_thread = dict(incremental.group_by("logical_entity_id").agg(pl.col("value").sum()).iter_rows())
+    expected = dict(one_pass.group_by("logical_entity_id").agg(pl.col("value").sum()).iter_rows())
+    assert per_thread == pytest.approx(expected)
+
+
 def test_a_component_that_stops_completely_is_declared_stalled():
     """Regression: against its own streams a dead component always looks current."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0, max_out_of_orderness=0.0)
     _feed(model, GPU_STREAMS, [_t(0)])
     _feed(model, CPU_STREAMS, [_t(31)])
 
@@ -306,7 +365,7 @@ def test_a_component_that_stops_completely_is_declared_stalled():
 
 def test_a_dead_component_does_not_pin_the_buffer():
     """The buffer never spans more than stall_after, because the mark is relative to it."""
-    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0)
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0, max_out_of_orderness=0.0)
     _feed(model, GPU_STREAMS, [_t(0)])  # the GPU speaks once and never again
     for second in range(1, 120):
         _feed(model, CPU_STREAMS, [_t(second)])

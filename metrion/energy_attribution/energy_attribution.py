@@ -1413,8 +1413,14 @@ class DyncamicEnergyAttributionModel:
         self,
         cutoff: float = 30.0,
         stall_after: float | None = None,
+        max_out_of_orderness: float = 1.0,
     ) -> None:
         self.cutoff = cutoff
+        # A row arrives when it ends but counts from when it starts: a sched_switch slice still
+        # running at the watermark shows up later with a start before it. Holding the bound back
+        # by the longest slice keeps such rows in (bounded out-of-orderness). The longest slice
+        # on a fully loaded host was 0.8 s.
+        self._max_out_of_orderness = dt.timedelta(seconds=max_out_of_orderness)
         # Everything not yet attributed. _component_bound keeps its span below stall_after.
         self._measurements_df = pl.DataFrame()
         self._core_df = pl.DataFrame()
@@ -1485,6 +1491,11 @@ class DyncamicEnergyAttributionModel:
         component would look late while it is simply still waiting its turn. A row counts as
         late once it starts before the edge: what is lost is its overlap with an interval
         that has already been attributed, however far past the edge the row reaches.
+
+        The edge is the component's oldest anchor. Where one socket or GPU has been
+        attributed further than another, rows starting in between are not counted; their
+        samples are read in one go, so with max_out_of_orderness that gap stays within
+        milliseconds.
         """
         # determine for each metric_id the latest end_ts that has already been processed for its component
         edges = {
@@ -1524,14 +1535,15 @@ class DyncamicEnergyAttributionModel:
     ) -> dt.datetime | None:
         """Time up to which every stream of one component is complete.
 
-        The minimum of the known streams' high-water marks, capped by the cutoff time.
-        A stream lagging more than stall_after seconds behind the newest measurement of any
-        stream counts as dried up and is no longer required, otherwise a finished workload
-        would hold up attribution forever. The reference has to be the newest measurement
-        overall: a component whose streams all stop together stays current relative to
-        itself and would pin the buffer for the rest of the run. Because every live mark is
-        within stall_after of the newest row, the buffer can never span more than that.
-        With force the maximum applies instead: the shutdown drain is meant to empty it.
+        The minimum of the known streams' high-water marks, held back by max_out_of_orderness
+        and capped by the cutoff time. A stream lagging more than stall_after seconds behind
+        the newest measurement of any stream counts as dried up and is no longer required,
+        otherwise a finished workload would hold up attribution forever. The reference has to
+        be the newest measurement overall: a component whose streams all stop together stays
+        current relative to itself and would pin the buffer for the rest of the run. Because
+        every live mark is within stall_after of the newest row, the buffer can never span
+        more than that plus max_out_of_orderness. With force the maximum applies instead: the
+        shutdown drain is meant to empty it.
         """
         marks = {metric: self._watermarks[metric] for metric in metrics if metric in self._watermarks}
         if not marks:
@@ -1556,7 +1568,7 @@ class DyncamicEnergyAttributionModel:
             return None
         if force:
             return max(live)
-        return min(min(live), cutoff_time)
+        return min(min(live) - self._max_out_of_orderness, cutoff_time)
 
     def update_entites(self, entities: Sequence[Entity]) -> None:
         """Add new entities to the internal buffer."""

@@ -52,7 +52,7 @@ def _cpu_with_cores(count=2):
         model="i9",
         physical_cores=count,
         logical_cores=count,
-        package_id="0",
+        package_id=0,
         cache=1024,
         hyperthreading=False,
         topology={i: i for i in range(count)},
@@ -60,7 +60,7 @@ def _cpu_with_cores(count=2):
         idle_power_package=1.0,
         parent_id="host_0",
     )
-    cpu.cores = [Core(core_id=i, package_id="0", thread_siblings=[i], mhz=3000, parent_id=cpu.id) for i in range(count)]
+    cpu.cores = [Core(core_id=i, package_id=0, thread_siblings=[i], mhz=3000, parent_id=cpu.id) for i in range(count)]
     return cpu
 
 
