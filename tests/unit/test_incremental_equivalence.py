@@ -11,8 +11,6 @@ from metrion.energy_attribution.energy_attribution import (
     DyncamicEnergyAttributionModel,
     GPUEnergyAttributionModel,
 )
-from metrion.entity.gpu import GPU
-from metrion.metric import GPU_DEVICE_PID_COMPUTE_UTILIZATION, GPU_DEVICE_TOTAL_ENERGY
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -23,8 +21,6 @@ PARTS = ["total", "idle", "dynamic"]
 
 COLUMNS = ["logical_entity_id", "value", "metric_id", "physical_entity_id", "start_ts", "end_ts"]
 SORT_KEYS = ["start_ts", "end_ts", "logical_entity_id", "physical_entity_id"]
-
-GPU_ID = "GPU-uuid-a100"
 
 
 def _chunks(measurement_df: pl.DataFrame, seconds: float):
@@ -53,7 +49,8 @@ def _feed(measurement_df, seconds, cpu_df=None, core_df=None, dram_df=None, gpu_
         model.update_measurements(batch)
         results.append(model.attribute_energy())
     # The shutdown drain. Without it every component still holds back the interval whose
-    # right edge lies past its slowest stream: 4.2 % of the CPU energy in this fixture.
+    # right edge lies past its slowest stream: at 5-s batches 1.7 % of the CPU and 8.4 % of the
+    # DRAM energy in this fixture.
     results.append(model.attribute_energy(force=True))
     return results
 
@@ -84,72 +81,11 @@ def _assert_same(actual: pl.DataFrame, expected: pl.DataFrame) -> None:
     )
 
 
-def _gpu_entity() -> GPU:
-    return GPU(
-        manufacturer="NVIDIA",
-        model="A100-SXM4-40GB",
-        serial_number="SN-A100",
-        uuid=GPU_ID,
-        pci_id="0000:00:01.0",
-        idle_power=50.0,
-        max_power=400.0,
-        compute_capability_major=8,
-        compute_capability_minor=0,
-    )
-
-
-def _gpu_measurements(start: dt.datetime, seconds: float, schema: pl.Schema) -> pl.DataFrame:
-    """A GPU stream on the given timeline: counter once a second, utilization every 500 ms.
-
-    measurement.parquet holds no GPU metrics, so the GPU path needs rows of its own. They ride
-    on the recorded timeline rather than on a separate one, because the incremental model only
-    exercises its bookkeeping when the components run at different speeds: whichever component
-    is the slowest of all never needs a lower window bound.
-    """
-    rows = []
-    for step in range(int(seconds) + 1):
-        ts = start + dt.timedelta(seconds=step)
-        rows.append(
-            {
-                "metric_id": GPU_DEVICE_TOTAL_ENERGY.name,
-                "logical_entity_id": None,
-                "value": 1000.0 + 90.0 * step,
-                "start_ts": ts,
-                "end_ts": ts,
-            }
-        )
-    for step in range(int(seconds * 2)):
-        ts = start + dt.timedelta(seconds=0.3 + 0.5 * step)
-        for pid, base in (("pid-a", 60.0), ("pid-b", 25.0), ("pid-c", 10.0)):
-            rows.append(
-                {
-                    "metric_id": GPU_DEVICE_PID_COMPUTE_UTILIZATION.name,
-                    "logical_entity_id": pid,
-                    "value": base + (step % 5) * 3.0,
-                    "start_ts": ts,
-                    "end_ts": ts,
-                }
-            )
-
-    return (
-        pl.DataFrame(rows, schema_overrides={"logical_entity_id": pl.String})
-        .with_columns(id=pl.lit(None, pl.Int64), physical_entity_id=pl.lit(GPU_ID))
-        .cast({"value": pl.Float32})
-        .select(schema.names())
-    )
-
-
 @pytest.fixture(scope="module")
 def recorded() -> dict[str, pl.DataFrame]:
     """The recorded run: measurements plus the entities they are resolved against."""
-    frames = {name: pl.read_parquet(FIXTURE_DIR / f"{name}.parquet") for name in ("measurement", "cpu", "core", "dram")}
-    measurement = frames["measurement"]
-    span = (measurement["end_ts"].max() - measurement["start_ts"].min()).total_seconds()
-    frames["measurement"] = pl.concat(
-        [measurement, _gpu_measurements(measurement["start_ts"].min(), span, measurement.schema)]
-    )
-    frames["gpu"] = _gpu_entity()._to_df()
-    return frames
+    names = ("measurement", "cpu", "core", "dram", "gpu")
+    return {name: pl.read_parquet(FIXTURE_DIR / f"{name}.parquet") for name in names}
 
 
 @pytest.fixture(scope="module")

@@ -8,6 +8,7 @@ import pytest
 from metrion.energy_attribution.energy_attribution import (
     CPUEnergyAttributionModel,
     DRAMEnergyAttributionModel,
+    GPUEnergyAttributionModel,
 )
 from metrion.metric import (
     CPU_PKG_PID_DYNAMIC_ENERGY,
@@ -16,6 +17,9 @@ from metrion.metric import (
     DRAM_SOCKET_PID_DYNAMIC_ENERGY,
     DRAM_SOCKET_PID_IDLE_ENERGY,
     DRAM_SOCKET_PID_TOTAL_ENERGY,
+    GPU_DEVICE_PID_DYNAMIC_ENERGY,
+    GPU_DEVICE_PID_IDLE_ENERGY,
+    GPU_DEVICE_PID_TOTAL_ENERGY,
 )
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -180,6 +184,80 @@ def test_dram_total_energy_matches(dram_expected_frames, dram_model_results) -> 
     _, _, expected_total_df = dram_expected_frames
 
     res_total_energy_df, _, _ = dram_model_results
+
+    _sort_and_assert(res_total_energy_df, expected_total_df)
+
+
+@pytest.fixture(scope="module")
+def gpu_input_data() -> tuple[pl.DataFrame, pl.DataFrame]:
+    measurement_df = _read_parquet("measurement.parquet")
+    gpu_df = _read_parquet("gpu.parquet")
+    return measurement_df, gpu_df
+
+
+@pytest.fixture(scope="module")
+def gpu_expected_frames() -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    # The SQL leaves two 0 J rows without a thread per idle GPU and interval (NULL never matches
+    # in its full outer join); the model writes none where no process ran.
+    expected_df = _read_parquet("gpu_energy_results.parquet").filter(pl.col("logical_entity_id").is_not_null())
+
+    expected_idle_df = expected_df.select(
+        pl.col("logical_entity_id"),
+        pl.col("idle_energy_j").alias("value"),
+        pl.lit(GPU_DEVICE_PID_IDLE_ENERGY.name).alias("metric_id"),
+        pl.col("gpu_id").alias("physical_entity_id"),
+        pl.col("interval_start").alias("start_ts"),
+        pl.col("interval_end").alias("end_ts"),
+    )
+
+    expected_active_df = expected_df.select(
+        pl.col("logical_entity_id"),
+        pl.col("active_energy_j").alias("value"),
+        pl.lit(GPU_DEVICE_PID_DYNAMIC_ENERGY.name).alias("metric_id"),
+        pl.col("gpu_id").alias("physical_entity_id"),
+        pl.col("interval_start").alias("start_ts"),
+        pl.col("interval_end").alias("end_ts"),
+    )
+
+    expected_total_df = expected_df.select(
+        pl.col("logical_entity_id"),
+        pl.col("total_energy_j").alias("value"),
+        pl.lit(GPU_DEVICE_PID_TOTAL_ENERGY.name).alias("metric_id"),
+        pl.col("gpu_id").alias("physical_entity_id"),
+        pl.col("interval_start").alias("start_ts"),
+        pl.col("interval_end").alias("end_ts"),
+    )
+
+    return expected_idle_df, expected_active_df, expected_total_df
+
+
+@pytest.fixture(scope="module")
+def gpu_model_results(gpu_input_data) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """Run GPUEnergyAttributionModel once per module and return (total, idle, dynamic) frames."""
+    measurement_df, gpu_df = gpu_input_data
+    return GPUEnergyAttributionModel().attribute_gpu_energy(measurement_df, gpu_df)
+
+
+def test_gpu_idle_energy_matches(gpu_expected_frames, gpu_model_results) -> None:
+    expected_idle_df, _, _ = gpu_expected_frames
+
+    _, res_idle_energy_df, _ = gpu_model_results
+
+    _sort_and_assert(res_idle_energy_df, expected_idle_df)
+
+
+def test_gpu_dynamic_energy_matches(gpu_expected_frames, gpu_model_results) -> None:
+    _, expected_active_df, _ = gpu_expected_frames
+
+    _, _, res_dynamic_energy_df = gpu_model_results
+
+    _sort_and_assert(res_dynamic_energy_df, expected_active_df)
+
+
+def test_gpu_total_energy_matches(gpu_expected_frames, gpu_model_results) -> None:
+    _, _, expected_total_df = gpu_expected_frames
+
+    res_total_energy_df, _, _ = gpu_model_results
 
     _sort_and_assert(res_total_energy_df, expected_total_df)
 
