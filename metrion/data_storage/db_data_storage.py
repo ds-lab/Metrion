@@ -322,6 +322,7 @@ class SQLDatabaseStorage(DataStorageI):
             "total_memory": dram.total_memory,
             "idle_power": dram.idle_power,
             "package_id": dram.cpu.package_id,
+            "cpu_id": dram.cpu.id,
             "max_power": dram.max_power,
             "max_energy_range_j": dram.max_energy_range_j,
         }

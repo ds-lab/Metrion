@@ -151,6 +151,7 @@ def test_dram_persisted(storage):
                 storage._dram_table.c.id,
                 storage._dram_table.c.total_memory,
                 storage._dram_table.c.package_id,
+                storage._dram_table.c.cpu_id,
                 storage._dram_table.c.idle_power,
                 storage._dram_table.c.max_power,
             )
@@ -159,6 +160,7 @@ def test_dram_persisted(storage):
     assert dram_row.id == dram.id
     assert dram_row.total_memory == pytest.approx(dram.total_memory)
     assert dram_row.package_id == cpu.package_id
+    assert dram_row.cpu_id == cpu.id, "the attribution joins DRAM to its cores through cpu_id"
     assert dram_row.idle_power == pytest.approx(dram.idle_power)
     assert dram_row.max_power == pytest.approx(dram.max_power)
 
