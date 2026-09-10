@@ -6,13 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, override
 
-import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
 import numpy as np
 import polars as pl
 import psutil
 from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
+import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
 from metrion.config_reader.config_schema import TimingConfig
 from metrion.data_record import DataRecord
 from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
@@ -50,6 +50,30 @@ from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
 from metrion.monitoring.timing_context import TimingContext, TimingContextRegistry
 from metrion.queue_util import drain_remaining, drain_until_sentinel
 from metrion.util import check_entity_type, read_temp_ipc, split_large_df
+
+# Where an event sits in the energy interval it is grouped into. Events in the guard band at
+# either end, and events that cross an interval boundary, are summed apart from the ones that
+# sit wholly inside the usable window.
+_BAND_HEAD = 0
+_BAND_MIDDLE = 1
+_BAND_TAIL = 2
+_BAND_STRADDLING = 3
+
+
+def _band_expr(interval_ns: int, threshold_ns: int) -> pl.Expr:
+    """Band of each event, from group_id, end_group, pos_start and pos_end."""
+    # Straddling first: pos_end belongs to the next interval for those, so the guard band
+    # checks below would read it as an early position.
+    return (
+        pl.when(pl.col("group_id") != pl.col("end_group"))
+        .then(_BAND_STRADDLING)
+        .when(pl.col("pos_start") < threshold_ns)
+        .then(_BAND_HEAD)
+        .when(pl.col("pos_end") > interval_ns - threshold_ns)
+        .then(_BAND_TAIL)
+        .otherwise(_BAND_MIDDLE)
+        .alias("band")
+    )
 
 
 class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
@@ -919,105 +943,61 @@ class SchedSwitchMonitor(DataSource):
         tc: TimingContext | None,
         extra_group_by_columns: list[str] | None = None,
     ) -> pl.DataFrame:
-        # assume df has always time_start, time_end, pid, pid_start, cpu_core
-        # metric columns passed as arguments
+        """
+        Sum events onto the energy interval grid of ``tc``.
+
+        Groups by (pid, pid_start, cpu_core, interval, band) plus any extra columns, where the
+        band keeps events near an interval boundary apart from those inside the usable window.
+
+        Parameters
+        ----------
+        data_df : pl.DataFrame
+            Events with time_start, time_end, pid, pid_start and cpu_core columns.
+        metric_columns : list[str]
+            Columns to sum per group.
+        tc : TimingContext | None
+            Grid to group onto. None returns data_df unchanged.
+        extra_group_by_columns : list[str] | None
+            Further columns to group by, e.g. ["shared_state"].
+        """
         if tc is None or data_df.is_empty():
             return data_df
 
-        start_ms = tc.start_time_ms
         interval_ms = int(tc.interval_seconds * 1000)
-
         interval_ns = interval_ms * 1_000_000
-        start_ns = start_ms * 1_000_000
+        start_ns = tc.start_time_ms * 1_000_000
         threshold_ns = grouping_threshold_ms(interval_ms) * 1_000_000
         boot_epoch_ns = int(self._boot_time_s * 1e9)
 
-        group_by_columns = ["pid", "pid_start", "cpu_core", "group_id"]
+        group_by_columns = ["pid", "pid_start", "cpu_core", "group_id", "band"]
         if extra_group_by_columns is not None:
             group_by_columns = group_by_columns + extra_group_by_columns
 
-        # Step 1: Calculate timestamps and groups
-        # CRITICAL: Cast to Int64 before subtraction to handle negative values correctly
-        # (events before RAPL start would otherwise wrap to huge positive u64 values)
-        data_df = (
+        grouped_df = (
             data_df.lazy()
+            # Cast to Int64 before subtracting: events before the grid start would otherwise
+            # wrap to huge positive u64 values.
             .with_columns(
                 (pl.lit(boot_epoch_ns) + pl.col("time_start").cast(pl.Int64)).alias("time_start_ns"),
                 (pl.lit(boot_epoch_ns) + pl.col("time_end").cast(pl.Int64)).alias("time_end_ns"),
             )
             .with_columns(
-                # Signed division gives correct negative values for pre-RAPL events
-                ((pl.col("time_start_ns") - pl.lit(start_ns)) // pl.lit(interval_ns)).alias("start_group"),
+                ((pl.col("time_start_ns") - pl.lit(start_ns)) // pl.lit(interval_ns)).alias("group_id"),
                 ((pl.col("time_end_ns") - pl.lit(start_ns)) // pl.lit(interval_ns)).alias("end_group"),
-                # Position within interval
                 ((pl.col("time_start_ns") - pl.lit(start_ns)) % pl.lit(interval_ns)).alias("pos_start"),
                 ((pl.col("time_end_ns") - pl.lit(start_ns)) % pl.lit(interval_ns)).alias("pos_end"),
             )
-            .with_columns(pl.col("start_group").alias("group_id"))
+            .with_columns(_band_expr(interval_ns, threshold_ns))
+            .group_by(group_by_columns)
+            .agg(
+                pl.col("time_start_ns").min(),
+                pl.col("time_end_ns").max(),
+                pl.col(metric_columns).sum(),
+            )
             .collect()
         )
 
-        # Step 2: Separate events before RAPL start (can't be grouped to RAPL intervals)
-        pre_rapl_df = data_df.filter(pl.col("start_group") < 0)
-        in_rapl_df = data_df.filter(pl.col("start_group") >= 0)
-
-        ungrouped_cols = group_by_columns + ["time_start_ns", "time_end_ns"] + metric_columns
-
-        if in_rapl_df.is_empty():
-            # No events during RAPL - return all as ungrouped with datetime conversion
-            result_df = data_df.select(ungrouped_cols)
-            return self._convert_ns_to_datetime(result_df)
-
-        # Step 3: Determine groupability for in-RAPL events
-        in_rapl_df = in_rapl_df.with_columns(
-            (
-                (pl.col("start_group") == pl.col("end_group"))
-                & (pl.col("pos_start") >= threshold_ns)
-                & (pl.col("pos_end") <= (interval_ns - threshold_ns))
-            ).alias("is_groupable"),
-        )
-
-        # Step 4: Separate groupable vs boundary events
-        groupable_df = in_rapl_df.filter(pl.col("is_groupable"))
-        boundary_df = in_rapl_df.filter(~pl.col("is_groupable"))
-
-        # Step 5: Aggregate groupable events
-        if not groupable_df.is_empty():
-            grouped_df = (
-                groupable_df.lazy()
-                .group_by(group_by_columns)
-                .agg(
-                    [
-                        pl.col("time_start_ns").min().alias("time_start_ns"),
-                        pl.col("time_end_ns").max().alias("time_end_ns"),
-                        pl.col(metric_columns).sum(),
-                    ]
-                )
-                .collect()
-            )
-        else:
-            grouped_df = pl.DataFrame()
-
-        # Step 6: Prepare ungrouped events (boundary + pre-RAPL)
-        ungrouped_dfs = []
-        if not boundary_df.is_empty():
-            ungrouped_dfs.append(boundary_df.select(ungrouped_cols))
-        if not pre_rapl_df.is_empty():
-            ungrouped_dfs.append(pre_rapl_df.select(ungrouped_cols))
-
-        # Step 7: Combine all results
-        all_dfs = []
-        if not grouped_df.is_empty():
-            all_dfs.append(grouped_df)
-        all_dfs.extend(ungrouped_dfs)
-
-        if not all_dfs:
-            return data_df.clear()
-
-        result_df = pl.concat(all_dfs) if len(all_dfs) > 1 else all_dfs[0]
-
-        # Step 8: Convert to datetime
-        return self._convert_ns_to_datetime(result_df)
+        return self._convert_ns_to_datetime(grouped_df)
 
     def _convert_ns_to_datetime(self, df: pl.DataFrame) -> pl.DataFrame:
         """Convert time_start_ns and time_end_ns columns to naive UTC datetimes."""
