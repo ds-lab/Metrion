@@ -338,11 +338,12 @@ class NVMLDataSource(DataSource):
         """
         measurements = []
         entities = []
+        # Once per read: update() drains every queued process event, which covers all GPUs.
+        self._logical_entity_registry.update()
         for gpu in self.gpu_entities:
             try:
                 handle = self._handles[gpu.uuid]
                 compute_processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-                self._logical_entity_registry.update()
                 for process_info in compute_processes:
                     try:
                         pid = process_info.pid
@@ -377,6 +378,8 @@ class NVMLDataSource(DataSource):
         """
         measurements = []
         entities = []
+        # Once per read: update() drains every queued process event, which covers all GPUs.
+        self._logical_entity_registry.update()
         now = datetime.now(UTC)
         for gpu in self.gpu_entities:
             try:
@@ -384,7 +387,6 @@ class NVMLDataSource(DataSource):
                 process_samples = pynvml.nvmlDeviceGetProcessUtilization(handle, self._last_seen[gpu.uuid])
                 self._last_seen[gpu.uuid] = int(now.timestamp())
 
-                self._logical_entity_registry.update()
                 for sample in process_samples:
                     try:
                         pid = sample.pid

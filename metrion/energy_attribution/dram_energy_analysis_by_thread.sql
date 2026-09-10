@@ -7,14 +7,16 @@ WITH energy_samples_dram AS (
         m.value,
         m.metric_id,
         m.physical_entity_id AS dram_id,
-        e.parent_id AS cpu_id,
+        d.cpu_id,
         m.logical_entity_id,
         m.start_ts,
-        m."end_ts"
+        m."end_ts",
+        -- The module reports the value its counter wraps at; the constant is what runs
+        -- recorded before that value was read from sysfs.
+        COALESCE(d.max_energy_range_j, 65712999613.0 / 1000000.0) AS energy_wrap_j
     FROM
         measurement AS m
         JOIN dram AS d ON m.physical_entity_id = d.id
-        JOIN entity AS e ON m.physical_entity_id = e.id
     WHERE
         m.metric_id = 'DRAM_SOCKET_TOTAL_ENERGY'
         AND m.start_ts >= '{start_time}'
@@ -33,7 +35,7 @@ energy_interval_dram AS (
             CASE
                 WHEN LEAD(value) OVER w IS NULL THEN 0
                 WHEN LEAD(value) OVER w >= value THEN LEAD(value) OVER w - value
-                ELSE ((65712999613.0 / 1000000.0) - value) + LEAD(value) OVER w
+                ELSE (energy_wrap_j - value) + LEAD(value) OVER w
             END AS energy_j
         FROM energy_samples_dram
         WINDOW w AS (PARTITION BY dram_id ORDER BY "start_ts")
@@ -42,9 +44,6 @@ energy_interval_dram AS (
 )
 SELECT dram_id, cpu_id, interval_start, interval_end, energy_j
 FROM energy_interval_dram;
-
---sqlite CREATE INDEX IF NOT EXISTS idx_ei_dram_end_start
---sqlite   ON energy_interval_dram_tmp (dram_id, cpu_id, interval_end, interval_start);
 
 -- 1) Final view: active via reads, idle via PID count
 CREATE TABLE IF NOT EXISTS dram_energy_per_thread_view AS
@@ -57,7 +56,7 @@ dram_interval_powers AS (
         vi.interval_start,
         vi.interval_end,
         vi.energy_j,
-        ({date_method}(vi.interval_end) - {date_method}(vi.interval_start)) * 24.0 * 3600.0 AS duration_s,
+        (julian(vi.interval_end) - julian(vi.interval_start)) * 24.0 * 3600.0 AS duration_s,
         d.idle_power
     FROM energy_interval_dram_tmp AS vi
     JOIN dram AS d ON vi.dram_id = d.id
@@ -71,8 +70,10 @@ dram_interval_energy_split AS (
         energy_j,
         idle_power,
         duration_s,
-        (idle_power * duration_s) AS idle_energy_j_total,
-        {max_func}(energy_j - (idle_power * duration_s), 0.0) AS active_energy_j_total
+        -- Capped at the measured energy, so an over-estimated idle power cannot leave a
+        -- negative remainder for the processes to share.
+        LEAST(COALESCE(idle_power, 0) * duration_s, energy_j) AS idle_energy_j_total,
+        energy_j - idle_energy_j_total AS active_energy_j_total
     FROM dram_interval_powers
 ),
 
@@ -84,9 +85,9 @@ dram_memory_usage_by_thread AS (
         dei.interval_start,
         dei.interval_end,
         m.logical_entity_id,
-        SUM(m.value * CASE WHEN m."end_ts" = m.start_ts THEN 1.0
-            ELSE (epoch(LEAST(m."end_ts", dei.interval_end)) - epoch(GREATEST(m.start_ts, dei.interval_start)))
-               / (epoch(m."end_ts") - epoch(m.start_ts)) END) AS total_memory_usage_by_thread
+        -- Not scaled by the overlap: resident memory is a level, not an amount. A sample that
+        -- overlaps the interval only partly still reports the whole memory the process holds.
+        SUM(m.value) AS total_memory_usage_by_thread
     FROM energy_interval_dram_tmp AS dei
     JOIN measurement AS m
       ON m.physical_entity_id = dei.dram_id

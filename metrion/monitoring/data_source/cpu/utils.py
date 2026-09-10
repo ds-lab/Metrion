@@ -3,15 +3,12 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timedelta
 from glob import glob
 from pathlib import Path
 
-import psutil
 from bcc import Perf
 from bcc.utils import get_online_cpus
 
-boot_time = datetime.fromtimestamp(psutil.boot_time())
 _ppid_start_cache: dict[int, float] = {}
 _CLK_TCK = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
 
@@ -25,27 +22,6 @@ def grouping_threshold_ms(interval_ms: int) -> int:
     and stays at 80 % of the interval down to 50 ms.
     """
     return max(5, min(100, interval_ms // 10))
-
-
-def get_pid_starttime(pid: int) -> datetime:
-    """
-    Get the start time of a process given its PID.
-
-    Parameters
-    ----------
-    pid : int
-        Process ID to get the start time for.
-
-    Returns
-    -------
-    datetime
-        The start time of the process.
-    """
-    try:
-        start_ns = get_pid_starttime_ns(pid)
-    except (FileNotFoundError, ValueError):
-        return boot_time
-    return boot_time + timedelta(microseconds=start_ns // 1000)
 
 
 def read_starttime_from_stat_file_in_ns(stat_path: Path) -> int:

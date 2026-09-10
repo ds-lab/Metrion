@@ -10,23 +10,18 @@ from metrion.entity.communication_endpoint import CommunicationEndpoint, Network
 from metrion.entity.core import Core
 from metrion.entity.cpu import CPU
 from metrion.entity.dram import DRAM
+from metrion.entity.entity import Entity
 from metrion.entity.gpu import GPU
 from metrion.entity.host import Host, HostType
 from metrion.entity.logical_entity import LogicalEntity
 from metrion.entity.metadata import Metadata
 from metrion.measurement import Measurement
-from metrion.metric import CPU_CORE_PID_TIME, CPU_SOCKET_PKG_ENERGY
+from metrion.metric import CPU_CORE_PID_TIME, CPU_SOCKET_PKG_ENERGY, GPU_DEVICE_TOTAL_ENERGY
 
 
-@pytest.fixture(params=["sqlite", "duckdb"])
-def storage(request, tmp_path):
-    backend = request.param
-    if backend == "duckdb":
-        db_url = f"duckdb:///{tmp_path / 'test_duck.db'}"
-    else:
-        db_url = f"sqlite:///{tmp_path / 'test.db'}"
-
-    storage = SQLDatabaseStorage(db_url)
+@pytest.fixture
+def storage(tmp_path):
+    storage = SQLDatabaseStorage(f"duckdb:///{tmp_path / 'test_duck.db'}")
     try:
         yield storage
     finally:
@@ -75,6 +70,19 @@ def test_host_persisted_with_measurement(storage):
     assert measurement_row.metric_id == measurement.metric_id
     assert measurement_row.physical_entity_id == host.id
     assert measurement_row.value == pytest.approx(measurement.value)
+
+
+def test_a_large_energy_counter_keeps_its_precision(storage):
+    """GPU energy counters reach 10^9 J, where a 32-bit float only resolves 64 J steps."""
+    host = Host("gpu-host", HostType.SERVER, "Linux")
+    counter = 659_852_301.25
+    measurement = Measurement(value=counter, metric_id=GPU_DEVICE_TOTAL_ENERGY.name, physical_entity_id=host.id)
+    storage.save_data_record(DataRecord([host], [measurement]))
+
+    with storage.Session() as session:
+        stored = session.execute(select(storage._measurement_table.c.value)).scalar_one()
+
+    assert stored == counter
 
 
 def test_cpu_and_core_persisted(storage):
@@ -156,6 +164,7 @@ def test_dram_persisted(storage):
                 storage._dram_table.c.id,
                 storage._dram_table.c.total_memory,
                 storage._dram_table.c.package_id,
+                storage._dram_table.c.cpu_id,
                 storage._dram_table.c.idle_power,
                 storage._dram_table.c.max_power,
             )
@@ -164,6 +173,7 @@ def test_dram_persisted(storage):
     assert dram_row.id == dram.id
     assert dram_row.total_memory == pytest.approx(dram.total_memory)
     assert dram_row.package_id == cpu.package_id
+    assert dram_row.cpu_id == cpu.id, "the attribution joins DRAM to its cores through cpu_id"
     assert dram_row.idle_power == pytest.approx(dram.idle_power)
     assert dram_row.max_power == pytest.approx(dram.max_power)
 
@@ -285,10 +295,6 @@ def test_logical_entity_upsert_enriches_metadata(storage):
 
 
 def test_measurement_df_without_id_persisted(storage):
-    backend = storage.engine.dialect.name
-    driver_module = "adbc_driver_sqlite" if backend == "sqlite" else "adbc_driver_duckdb"
-    pytest.importorskip(driver_module)
-
     host = Host("df-host", HostType.SERVER, "Linux")
     now = datetime.now(UTC)
     measurement_df = pl.DataFrame(
@@ -323,10 +329,6 @@ def test_measurement_df_without_id_persisted(storage):
 
 
 def test_measurement_df_with_id_persisted(storage):
-    backend = storage.engine.dialect.name
-    driver_module = "adbc_driver_sqlite" if backend == "sqlite" else "adbc_driver_duckdb"
-    pytest.importorskip(driver_module)
-
     host = Host("df-host", HostType.SERVER, "Linux")
     now = datetime.now(UTC)
     measurement = Measurement(
@@ -359,3 +361,206 @@ def test_measurement_df_with_id_persisted(storage):
     assert row.physical_entity_id == host.id
     assert row.value == pytest.approx(1.45)
     assert row.id == measurement.id
+
+
+def _measurement_df(start_ts, end_ts=None, measurement_id=None):
+    row = {
+        "value": [2.5],
+        "metric_id": [CPU_CORE_PID_TIME.name],
+        "physical_entity_id": ["core_0"],
+        "logical_entity_id": [None],
+        "start_ts": [start_ts],
+        "end_ts": [end_ts or start_ts],
+    }
+    if measurement_id is not None:
+        row["id"] = [measurement_id]
+    return pl.DataFrame(row)
+
+
+def test_measurement_timestamps_keep_their_utc_wall_clock(storage):
+    """A column that keeps its time zone is stored in the session time zone - an hour off here."""
+    now = datetime.now(UTC).replace(microsecond=123456)
+
+    storage.save_measurements([_measurement_df(now)])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == now.replace(tzinfo=None)
+
+
+def test_a_timestamp_in_another_time_zone_arrives_as_utc(storage):
+    """Only the conversion makes the stored wall clock independent of where the frame came from."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    berlin = _measurement_df(now).with_columns(
+        pl.col("start_ts").dt.convert_time_zone("Europe/Berlin"),
+        pl.col("end_ts").dt.convert_time_zone("Europe/Berlin"),
+    )
+
+    storage.save_measurements([berlin])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == now.replace(tzinfo=None)
+
+
+def test_a_timestamp_without_a_time_zone_is_taken_as_utc(storage):
+    """polars reads a naive column as UTC, so it needs no special case."""
+    naive = datetime(2026, 3, 1, 12, 30, 15, 500000)
+
+    storage.save_measurements([_measurement_df(naive)])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == naive
+
+
+def test_the_same_measurement_id_may_be_written_twice(storage):
+    """Without a primary key a repeated batch costs rows, not an exception."""
+    now = datetime.now(UTC)
+
+    storage.save_measurements([_measurement_df(now, measurement_id=999_001)])
+    storage.save_measurements([_measurement_df(now, measurement_id=999_001)])
+
+    with storage.Session() as session:
+        rows = session.execute(select(storage._measurement_table.c.id)).all()
+
+    assert [row.id for row in rows] == [999_001, 999_001]
+
+
+def test_a_measurement_object_keeps_its_utc_wall_clock(storage):
+    """The object path hands DuckDB an aware datetime, so it depends on the session time zone."""
+    now = datetime.now(UTC).replace(microsecond=42)
+    measurement = Measurement(
+        value=1.0,
+        metric_id=CPU_CORE_PID_TIME.name,
+        physical_entity_id="core_0",
+        start_ts=now,
+        end_ts=now,
+    )
+
+    storage.save_measurements([measurement])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._measurement_table.c.start_ts)).one()
+
+    assert row.start_ts == now.replace(tzinfo=None)
+
+
+def _cpu(host, idle_power=7.5, max_power=45.0, cores=None):
+    cpu = CPU(
+        manufacturer="Acme",
+        model="X1",
+        physical_cores=2,
+        logical_cores=4,
+        package_id=0,
+        cache=8,
+        hyperthreading=True,
+        topology={0: 0},
+        cores=[],
+        idle_power_package=idle_power,
+        max_power_package=max_power,
+        parent_id=host.id,
+    )
+    cpu.cores = cores if cores is not None else []
+    return cpu
+
+
+def test_a_later_version_only_fills_what_is_empty(storage):
+    """The rule the whole upsert is built on, now generated instead of written out per column."""
+    host = Host("upsert-host", HostType.SERVER, "Linux")
+
+    storage.save_entities([host, _cpu(host, idle_power=None, max_power=45.0)])
+    storage.save_entities([_cpu(host, idle_power=7.5, max_power=None)])
+
+    with storage.Session() as session:
+        row = session.execute(
+            select(
+                storage._cpu_table.c.idle_power_package,
+                storage._cpu_table.c.max_power_package,
+            )
+        ).one()
+
+    assert row.idle_power_package == pytest.approx(7.5), "the empty column has to be filled"
+    assert row.max_power_package == pytest.approx(45.0), "the full column has to survive"
+
+
+def test_an_empty_string_does_not_overwrite_a_full_column(storage):
+    """core_ids is a text column, so an empty list must not erase the cores that were found."""
+    host = Host("cores-host", HostType.SERVER, "Linux")
+    with_core = _cpu(host)
+    with_core.cores = [Core(core_id=0, package_id=0, thread_siblings=[0], mhz=3200, parent_id=with_core.id)]
+
+    storage.save_entities([host, with_core])
+    storage.save_entities([_cpu(host, cores=[])])
+
+    with storage.Session() as session:
+        row = session.execute(select(storage._cpu_table.c.core_ids)).one()
+
+    assert row.core_ids == [0]
+
+
+def test_a_later_parent_id_reaches_the_entity_table(storage):
+    """The entity table did nothing on a conflict, so the first version kept a missing parent."""
+    storage.save_entities([Entity(id="e-1", parent_id=None)])
+    storage.save_entities([Entity(id="e-1", parent_id="host-9")])
+
+    with storage.Session() as session:
+        row = session.execute(
+            select(storage._entity_table.c.parent_id).where(storage._entity_table.c.id == "e-1")
+        ).one()
+
+    assert row.parent_id == "host-9"
+
+
+def test_a_later_version_fills_the_parent_thread(storage):
+    """native_parent_tid was missing from the hand-written column list and never updated."""
+    now = datetime.now(UTC)
+    fields = dict(
+        native_thread_id=101,
+        native_pid=101,
+        native_parent_pid=1,
+        executable_name="proc",
+        cmdline="/usr/bin/proc",
+        start_time=now,
+        pid_start_time=now,
+        parent_pid_start_time=now,
+        parent_tid_start_time=now,
+    )
+
+    storage.save_entities([LogicalEntity(native_parent_thread_id=0, **fields)])
+    entity = LogicalEntity(native_parent_thread_id=7, **fields)
+    storage.save_entities([entity])
+
+    with storage.Session() as session:
+        row = session.execute(
+            select(storage._logical_entity_table.c.native_parent_tid).where(
+                storage._logical_entity_table.c.id == entity.id
+            )
+        ).one()
+
+    assert row.native_parent_tid == 7
+
+
+def test_the_last_row_of_a_batch_wins(storage):
+    """DuckDB keeps the first hit on a row and silently drops the rest, so the batch is deduplicated.
+
+    save_entities collects most rows in a dict keyed by id, but network_addresses and metadata
+    reach the upsert as lists, where the same id can appear twice.
+    """
+    storage._upsert(
+        "entity",
+        [
+            {"id": "e-2", "parent_id": "host-1", "entity_type": "Entity"},
+            {"id": "e-2", "parent_id": "host-2", "entity_type": "Entity"},
+        ],
+    )
+
+    with storage.Session() as session:
+        rows = session.execute(
+            select(storage._entity_table.c.parent_id).where(storage._entity_table.c.id == "e-2")
+        ).all()
+
+    assert [row.parent_id for row in rows] == ["host-2"]

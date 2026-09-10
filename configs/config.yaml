@@ -3,15 +3,19 @@
 # Unknown keys are rejected, so a typo stops the agent at startup instead of silently leaving
 # the default in place. All durations are in seconds.
 
-# Log at DEBUG level and append a timestamp to storage.path, so repeated runs land in separate
-# files instead of appending to each other.
+# Log at DEBUG level.
 debug: true
 
 # Where the collected data is written.
 storage:
-  # duckdb or sqlite. duckdb is what the SQL analyses under metrion/energy_attribution/ expect.
+  # duckdb, sqlite or parquet.
+  #   duckdb  - what the SQL analyses under metrion/energy_attribution/ expect. path is a file.
+  #   parquet - append-only files, cheapest during the run. path is a directory, and
+  #             `metrion analyze --db-path <that directory>` builds the database it needs.
   type: duckdb
-  # Database file. A relative path is resolved against the repository root.
+  # A relative path is resolved against the repository root. Every run gets a timestamp
+  # appended, so ./monitor.db becomes ./monitor_2026_09_08_10_15_00.db and no run can
+  # overwrite another. The path in use is logged at startup.
   path: ./monitor.db
 
 # How often things happen. Every value here is one waiting step between an event in the kernel

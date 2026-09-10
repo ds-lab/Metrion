@@ -8,14 +8,13 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Double,
     Enum,
-    Float,
     ForeignKey,
     Integer,
     String,
     Table,
     create_engine,
-    func,
     select,
 )
 from sqlalchemy.orm import registry, sessionmaker
@@ -38,11 +37,17 @@ from metrion.entity.metadata import Metadata
 from metrion.entity.network_interface import NetworkInterface
 from metrion.measurement import CommunicationMeasurement, Measurement
 from metrion.metric import Metric
-from metrion.util import _add_id_to_measurement_df
+from metrion.util import _add_id_to_measurement_df, naive_utc_timestamps
 
 
-def prefer_text(new_expr, old_expr):
-    return func.coalesce(func.nullif(new_expr, ""), old_expr)
+def comma_separated(value) -> str | None:
+    """Render ints the way a CommaSeparatedIntegers column holds them."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+
+    return ",".join(str(item) for item in value)
 
 
 class CommaSeparatedIntegers(TypeDecorator):
@@ -50,13 +55,7 @@ class CommaSeparatedIntegers(TypeDecorator):
     cache_ok = True
 
     def process_bind_param(self, value, dialect):
-        if value is None:
-            return None
-        # Handle single integer case
-        if isinstance(value, int):
-            return str(value)
-        # Convert list of ints to comma-separated string.
-        return ",".join(str(item) for item in value)
+        return comma_separated(value)
 
     def process_result_value(self, value, dialect):
         if value is None or value == "":
@@ -69,24 +68,23 @@ class SQLDatabaseStorage(DataStorageI):
     def __init__(self, db_url: str):
         self._count = 0
         self._db_url = db_url
+        self._upsert_statements: dict[tuple[str, tuple[str, ...]], str] = {}
+        self._varchar_columns: set[tuple[str, str]] = set()
         # Create a new SQLAlchemy engine.
         self.engine = create_engine(db_url)
+        with self.engine.begin() as connection:
+            # A timestamp that still carries a time zone is stored in the session time zone, so
+            # without this the machine's locale decides what lands in the table.
+            connection.exec_driver_sql("SET GLOBAL TimeZone='UTC'")
+            # DuckDB keeps the insertion order of a table by default, which costs time and space
+            # on an append-only write path that nothing reads in order.
+            connection.exec_driver_sql("SET GLOBAL preserve_insertion_order=false")
         # Create a configured "Session" class.
         self.Session = sessionmaker(bind=self.engine)
         # Create all tables for the provided models.
         self.registry = registry()
         self._create_tables()
         self.save_all_metrics()
-
-        if "duckdb" in db_url:
-            from duckdb_engine import insert
-
-            self._insert = insert
-
-        elif "sqlite" in db_url:
-            from sqlalchemy.dialects.sqlite import insert
-
-            self._insert = insert
 
     @contextmanager
     def session_scope(self):
@@ -119,8 +117,10 @@ class SQLDatabaseStorage(DataStorageI):
         self._measurement_table = Table(
             "measurement",
             self.registry.metadata,
-            Column("id", BigInteger, primary_key=True, autoincrement=False),
-            Column("value", Float),
+            # No primary key: the ids are snowflakes, nothing joins on them, and the index
+            # costs a fifth of the file.
+            Column("id", BigInteger),
+            Column("value", Double),
             Column("metric_id", String),
             Column("physical_entity_id", String),
             Column("logical_entity_id", String),
@@ -200,8 +200,9 @@ class SQLDatabaseStorage(DataStorageI):
             Column("cache", BigInteger),
             Column("hyperthreading", Boolean),
             Column("core_ids", CommaSeparatedIntegers),
-            Column("idle_power_package", Float),
-            Column("max_power_package", Float),
+            Column("idle_power_package", Double),
+            Column("max_power_package", Double),
+            Column("max_energy_range_j", Double),
         )
 
         # Core
@@ -222,9 +223,11 @@ class SQLDatabaseStorage(DataStorageI):
             self.registry.metadata,
             Column("id", String, ForeignKey("entity.id"), primary_key=True, nullable=False),
             Column("package_id", BigInteger, nullable=False),
-            Column("idle_power", Float),
-            Column("max_power", Float),
-            Column("total_memory", Float),
+            Column("cpu_id", String, ForeignKey("entity.id")),
+            Column("idle_power", Double),
+            Column("max_power", Double),
+            Column("max_energy_range_j", Double),
+            Column("total_memory", Double),
         )
 
         # GPU
@@ -238,8 +241,8 @@ class SQLDatabaseStorage(DataStorageI):
             Column("serial_number", String),
             Column("uuid", String),
             Column("pci_id", String),
-            Column("idle_power", Float),
-            Column("max_power", Float),
+            Column("idle_power", Double),
+            Column("max_power", Double),
             Column("compute_capability_major", Integer),
             Column("compute_capability_minor", Integer),
         )
@@ -298,8 +301,9 @@ class SQLDatabaseStorage(DataStorageI):
             "package_id": cpu.package_id,
             "cache": cpu.cache,
             "hyperthreading": cpu.hyperthreading,
-            "core_ids": cpu.get_core_numbers(),
+            "core_ids": comma_separated(cpu.get_core_numbers()),
             "idle_power_package": cpu.idle_power_package,
+            "max_energy_range_j": cpu.max_energy_range_j,
             "max_power_package": cpu.max_power_package,
         }
 
@@ -308,7 +312,7 @@ class SQLDatabaseStorage(DataStorageI):
             "id": core.id,
             "core_id": core.core_id,
             "package_id": core.package_id,
-            "thread_siblings": core.thread_siblings,
+            "thread_siblings": comma_separated(core.thread_siblings),
             "mhz": core.mhz,
         }
 
@@ -318,7 +322,9 @@ class SQLDatabaseStorage(DataStorageI):
             "total_memory": dram.total_memory,
             "idle_power": dram.idle_power,
             "package_id": dram.cpu.package_id,
+            "cpu_id": dram.cpu.id,
             "max_power": dram.max_power,
+            "max_energy_range_j": dram.max_energy_range_j,
         }
 
     def _gpu_row(self, gpu: GPU) -> dict:
@@ -339,7 +345,7 @@ class SQLDatabaseStorage(DataStorageI):
         return {
             "id": host.id,
             "name": host.name,
-            "host_type": host.host_type,
+            "host_type": host.host_type.name,
             "OS": host.os,
         }
 
@@ -474,230 +480,74 @@ class SQLDatabaseStorage(DataStorageI):
             )
         return rows
 
-    def _entity_upsert_stmt(self):
-        stmt = self._insert(self._entity_table)
-        return stmt.on_conflict_do_nothing(index_elements=[self._entity_table.c.id])
+    def _upsert_sql(self, table: str, columns: tuple[str, ...]) -> str:
+        """
+        Build the upsert for one batch shape: a later value only overrides a column it fills.
 
-    def _cpu_upsert_stmt(self):
-        stmt = self._insert(self._cpu_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._cpu_table.c.id],
-            set_={
-                "manufacturer": prefer_text(stmt.excluded.manufacturer, self._cpu_table.c.manufacturer),
-                "model": prefer_text(stmt.excluded.model, self._cpu_table.c.model),
-                "package_id": func.coalesce(stmt.excluded.package_id, self._cpu_table.c.package_id),
-                "cache": func.coalesce(stmt.excluded.cache, self._cpu_table.c.cache),
-                "physical_cores": func.coalesce(stmt.excluded.physical_cores, self._cpu_table.c.physical_cores),
-                "logical_cores": func.coalesce(stmt.excluded.logical_cores, self._cpu_table.c.logical_cores),
-                "hyperthreading": func.coalesce(stmt.excluded.hyperthreading, self._cpu_table.c.hyperthreading),
-                "idle_power_package": func.coalesce(
-                    stmt.excluded.idle_power_package, self._cpu_table.c.idle_power_package
-                ),
-                "max_power_package": func.coalesce(
-                    stmt.excluded.max_power_package, self._cpu_table.c.max_power_package
-                ),
-                "core_ids": func.coalesce(stmt.excluded.core_ids, self._cpu_table.c.core_ids),
-            },
+        Parameters
+        ----------
+        table : str
+            Target table. It must have `id` as its primary key.
+        columns : tuple of str
+            The columns the batch carries, in the order the staging view has them.
+        """
+        if (table, columns) in self._upsert_statements:
+            return self._upsert_statements[(table, columns)]
+
+        if not self._varchar_columns:
+            with self.engine.connect() as connection:
+                self._varchar_columns = {
+                    (row[0], row[1])
+                    for row in connection.exec_driver_sql(
+                        "SELECT table_name, column_name FROM duckdb_columns() WHERE data_type = 'VARCHAR'"
+                    ).all()
+                }
+
+        names = ", ".join(f'"{column}"' for column in columns)
+        updates = []
+        for column in columns:
+            if column == "id":
+                continue
+            value = f'excluded."{column}"'
+            if (table, column) in self._varchar_columns:
+                # An empty string carries as little as NULL, and neither may erase what is there.
+                value = f"nullif({value}, '')"
+            updates.append(f'"{column}" = coalesce({value}, {table}."{column}")')
+
+        statement = (
+            f"INSERT INTO {table} ({names}) SELECT {names} FROM staging "
+            f"ON CONFLICT (id) DO UPDATE SET {', '.join(updates)}"
         )
+        self._upsert_statements[(table, columns)] = statement
 
-    def _core_upsert_stmt(self):
-        stmt = self._insert(self._core_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._core_table.c.id],
-            set_={
-                "core_id": func.coalesce(stmt.excluded.core_id, self._core_table.c.core_id),
-                "package_id": func.coalesce(stmt.excluded.package_id, self._core_table.c.package_id),
-                "thread_siblings": func.coalesce(
-                    func.nullif(stmt.excluded.thread_siblings, ""), self._core_table.c.thread_siblings
-                ),
-                "mhz": func.coalesce(stmt.excluded.mhz, self._core_table.c.mhz),
-            },
-        )
+        return statement
 
-    def _network_interface_upsert_stmt(self):
-        stmt = self._insert(self._network_interface_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._network_interface_table.c.id],
-            set_={
-                "name": prefer_text(stmt.excluded.name, self._network_interface_table.c.name),
-                "kind": prefer_text(stmt.excluded.kind, self._network_interface_table.c.kind),
-                "mac_address": prefer_text(stmt.excluded.mac_address, self._network_interface_table.c.mac_address),
-            },
-        )
+    def _upsert(self, table: str, rows) -> None:
+        """
+        Write a batch of rows into a table in one statement.
 
-    def _network_address_upsert_stmt(self):
-        stmt = self._insert(self._network_addresses_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._network_addresses_table.c.id],
-            set_={
-                "interface_id": func.coalesce(stmt.excluded.interface_id, self._network_addresses_table.c.interface_id),
-                "address": prefer_text(stmt.excluded.address, self._network_addresses_table.c.address),
-                "family": prefer_text(stmt.excluded.family, self._network_addresses_table.c.family),
-                "prefix_length": func.coalesce(
-                    stmt.excluded.prefix_length, self._network_addresses_table.c.prefix_length
-                ),
-            },
-        )
-
-    def _dram_upsert_stmt(self):
-        stmt = self._insert(self._dram_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._dram_table.c.id],
-            set_={
-                "total_memory": func.coalesce(stmt.excluded.total_memory, self._dram_table.c.total_memory),
-                "idle_power": func.coalesce(stmt.excluded.idle_power, self._dram_table.c.idle_power),
-                "max_power": func.coalesce(stmt.excluded.max_power, self._dram_table.c.max_power),
-                "package_id": func.coalesce(stmt.excluded.package_id, self._dram_table.c.package_id),
-            },
-        )
-
-    def _gpu_upsert_stmt(self):
-        stmt = self._insert(self._gpu_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._gpu_table.c.id],
-            set_={
-                "manufacturer": func.coalesce(
-                    func.nullif(stmt.excluded.manufacturer, ""), self._gpu_table.c.manufacturer
-                ),
-                "model": func.coalesce(func.nullif(stmt.excluded.model, ""), self._gpu_table.c.model),
-                "serial_number": func.coalesce(
-                    func.nullif(stmt.excluded.serial_number, ""), self._gpu_table.c.serial_number
-                ),
-                "uuid": func.coalesce(func.nullif(stmt.excluded.uuid, ""), self._gpu_table.c.uuid),
-                "pci_id": func.coalesce(func.nullif(stmt.excluded.pci_id, ""), self._gpu_table.c.pci_id),
-                "idle_power": func.coalesce(stmt.excluded.idle_power, self._gpu_table.c.idle_power),
-                "max_power": func.coalesce(stmt.excluded.max_power, self._gpu_table.c.max_power),
-                "compute_capability_major": func.coalesce(
-                    stmt.excluded.compute_capability_major, self._gpu_table.c.compute_capability_major
-                ),
-                "compute_capability_minor": func.coalesce(
-                    stmt.excluded.compute_capability_minor, self._gpu_table.c.compute_capability_minor
-                ),
-            },
-        )
-
-    def _host_upsert_stmt(self):
-        stmt = self._insert(self._host_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._host_table.c.id],
-            set_={
-                "name": func.coalesce(func.nullif(stmt.excluded.name, ""), self._host_table.c.name),
-                "host_type": func.coalesce(func.nullif(stmt.excluded.host_type, ""), self._host_table.c.host_type),
-                "OS": func.coalesce(func.nullif(stmt.excluded.OS, ""), self._host_table.c.OS),
-            },
-        )
-
-    def _communication_endpoint_upsert_stmt(self):
-        stmt = self._insert(self._communication_endpoint_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._communication_endpoint_table.c.id],
-            set_={
-                "ip_address": func.coalesce(
-                    func.nullif(stmt.excluded.ip_address, ""), self._communication_endpoint_table.c.ip_address
-                ),
-                "port": func.coalesce(stmt.excluded.port, self._communication_endpoint_table.c.port),
-                "transport": func.coalesce(
-                    func.nullif(stmt.excluded.transport, ""), self._communication_endpoint_table.c.transport
-                ),
-            },
-        )
-
-    def _metadata_upsert_stmt(self):
-        stmt = self._insert(self._metadata_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._metadata_table.c.id],
-            set_={
-                "reference_id": func.coalesce(stmt.excluded.reference_id, self._metadata_table.c.reference_id),
-                "metadata_type": prefer_text(stmt.excluded.metadata_type, self._metadata_table.c.metadata_type),
-                "metadata_value": prefer_text(stmt.excluded.metadata_value, self._metadata_table.c.metadata_value),
-            },
-        )
-
-    def _logical_entity_upsert_stmt(self):
-        stmt = self._insert(self._logical_entity_table)
-        return stmt.on_conflict_do_update(
-            index_elements=[self._logical_entity_table.c.id],
-            set_={
-                "native_thread_id": func.coalesce(
-                    stmt.excluded.native_thread_id, self._logical_entity_table.c.native_thread_id
-                ),
-                "native_pid": func.coalesce(stmt.excluded.native_pid, self._logical_entity_table.c.native_pid),
-                "pid_id": func.coalesce(func.nullif(stmt.excluded.pid_id, ""), self._logical_entity_table.c.pid_id),
-                "native_parent_pid": func.coalesce(
-                    stmt.excluded.native_parent_pid, self._logical_entity_table.c.native_parent_pid
-                ),
-                "parent_pid_id": func.coalesce(
-                    func.nullif(stmt.excluded.parent_pid_id, ""), self._logical_entity_table.c.parent_pid_id
-                ),
-                "parent_tid_id": func.coalesce(
-                    func.nullif(stmt.excluded.parent_tid_id, ""), self._logical_entity_table.c.parent_tid_id
-                ),
-                "executable_name": func.coalesce(
-                    func.nullif(stmt.excluded.executable_name, ""), self._logical_entity_table.c.executable_name
-                ),
-                "cmdline": func.coalesce(func.nullif(stmt.excluded.cmdline, ""), self._logical_entity_table.c.cmdline),
-                "start_time": func.coalesce(stmt.excluded.start_time, self._logical_entity_table.c.start_time),
-                "pid_start_time": func.coalesce(
-                    stmt.excluded.pid_start_time, self._logical_entity_table.c.pid_start_time
-                ),
-                "parent_pid_start_time": func.coalesce(
-                    stmt.excluded.parent_pid_start_time, self._logical_entity_table.c.parent_pid_start_time
-                ),
-                "resource_group_id": func.coalesce(
-                    stmt.excluded.resource_group_id, self._logical_entity_table.c.resource_group_id
-                ),
-                "resource_group_name": func.coalesce(
-                    func.nullif(stmt.excluded.resource_group_name, ""), self._logical_entity_table.c.resource_group_name
-                ),
-                "user_id": func.coalesce(stmt.excluded.user_id, self._logical_entity_table.c.user_id),
-                "group_id": func.coalesce(stmt.excluded.group_id, self._logical_entity_table.c.group_id),
-            },
-        )
-
-    def _execute_stmt(self, stmt, rows):
-        if len(rows) == 0:
-            return
-        with self.session_scope() as session:
-            session.execute(stmt, rows)
-
-    def _execute_entities_with_parents(self, rows):
+        Parameters
+        ----------
+        table : str
+            Target table.
+        rows : Iterable[dict]
+            Rows to write, all with the same keys. DuckDB keeps the first hit on a row and
+            silently drops the rest, so of two rows with one id only the last is kept.
+        """
         rows = list(rows)
         if not rows:
             return
 
-        stmt = self._entity_upsert_stmt()
-        self._execute_stmt(stmt, rows)
+        staging = pl.DataFrame(rows, infer_schema_length=None).unique(subset=["id"], keep="last")
+        statement = self._upsert_sql(table, tuple(staging.columns))
 
-    def _save_entity(self, entity: Entity):
-        upsert = self._entity_upsert_stmt()
-        self._execute_stmt(upsert, self._entity_row(entity))
-
-    def _save_core(self, core: Core):
-        self._save_entity(core)
-
-        upsert = self._core_upsert_stmt()
-        self._execute_stmt(upsert, self._core_row(core))
-
-    def _save_measurement(self, measurement: Measurement):
-        stmt = self._measurement_table.insert().values(
-            id=measurement.id,
-            value=measurement.value,
-            metric_id=measurement.metric_id,
-            physical_entity_id=measurement.physical_entity_id,
-            logical_entity_id=measurement.logical_entity_id,
-            start_ts=measurement.start_ts,
-            end_ts=measurement.end_ts,
-        )
-        self._execute_stmt(stmt)
-
-    def _save_communication_measurement(self, comm_measurement: CommunicationMeasurement):
-        self._save_measurement(comm_measurement)
-        stmt = self._communication_measurement_table.insert().values(
-            measurement_id=comm_measurement.id,
-            src_endpoint=comm_measurement.src_endpoint,
-            dst_endpoint=comm_measurement.dst_endpoint,
-        )
-        self._execute_stmt(stmt)
+        with self.engine.begin() as sa_conn:
+            connection = sa_conn.connection
+            connection.register("staging", staging)
+            try:
+                connection.execute(statement)
+            finally:
+                connection.unregister("staging")
 
     def _save_metric(self, metric: Metric):
         stmt = self._metric_table.insert().values(name=metric.name, unit=metric.unit, description=metric.description)
@@ -797,20 +647,19 @@ class SQLDatabaseStorage(DataStorageI):
                 endpoint_row = self._communication_endpoint_row(e)
                 communication_endpoint_rows[e.id] = endpoint_row
 
-        self._execute_entities_with_parents(entity_rows.values())
-        self._execute_stmt(self._cpu_upsert_stmt(), list(cpu_rows.values()))
-        self._execute_stmt(self._core_upsert_stmt(), list(core_rows.values()))
-        self._execute_stmt(self._dram_upsert_stmt(), list(dram_rows.values()))
-        self._execute_stmt(self._gpu_upsert_stmt(), list(gpu_rows.values()))
-        self._execute_stmt(self._host_upsert_stmt(), list(host_rows.values()))
-        self._execute_stmt(self._network_interface_upsert_stmt(), list(network_interface_rows.values()))
-        self._execute_stmt(self._network_address_upsert_stmt(), network_addresses)
-        self._execute_stmt(self._logical_entity_upsert_stmt(), list(logical_entity_rows.values()))
-        self._execute_stmt(self._communication_endpoint_upsert_stmt(), list(communication_endpoint_rows.values()))
+        self._upsert("entity", entity_rows.values())
+        self._upsert("cpu", cpu_rows.values())
+        self._upsert("core", core_rows.values())
+        self._upsert("dram", dram_rows.values())
+        self._upsert("gpu", gpu_rows.values())
+        self._upsert("host", host_rows.values())
+        self._upsert("network_interface", network_interface_rows.values())
+        self._upsert("network_addresses", network_addresses)
+        self._upsert("logical_entity", logical_entity_rows.values())
+        self._upsert("communication_endpoint", communication_endpoint_rows.values())
 
     def save_metadata(self, metadata: Metadata):
-        md_rows = self._metadata_rows(metadata)
-        self._execute_stmt(self._metadata_upsert_stmt(), md_rows)
+        self._upsert("metadata", self._metadata_rows(metadata))
 
     def save_all_metrics(self):
         all_metrics = Metric.get_all_metrics()
@@ -866,10 +715,7 @@ class SQLDatabaseStorage(DataStorageI):
             ddb_conn = sa_conn.connection
             # 1) Insert measurement rows (measurement_dfs)
             self._count += measurement_df.filter(pl.col("metric_id") == "CPU_CORE_PID_WORK").height
-            measurement_df = measurement_df.with_columns(
-                pl.col("start_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("start_ts"),
-                pl.col("end_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("end_ts"),
-            )
+            measurement_df = naive_utc_timestamps(measurement_df)
             ddb_conn.register("tmp_df", measurement_df)
             try:
                 ddb_conn.execute("""
@@ -887,10 +733,7 @@ class SQLDatabaseStorage(DataStorageI):
     def _save_comm_measurement_df(self, comm_df: pl.DataFrame):
         with self.engine.begin() as sa_conn:
             ddb_conn = sa_conn.connection
-            comm_df = comm_df.with_columns(
-                pl.col("start_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("start_ts"),
-                pl.col("end_ts").dt.convert_time_zone("UTC").dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("end_ts"),
-            )
+            comm_df = naive_utc_timestamps(comm_df)
             comm_meas_arrow = comm_df.select(
                 [
                     "id",

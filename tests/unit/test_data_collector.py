@@ -13,7 +13,7 @@ from metrion.util import read_temp_ipc
 def data_collector(tmp_path):
     """A collector whose saver process is never started, with a writer that flushes quickly."""
     with patch.object(DataCollector, "_start_collection_process"):
-        collector = DataCollector("sqlite", str(tmp_path / "test.db"), flush_interval=0.2)
+        collector = DataCollector("duckdb", str(tmp_path / "test.db"), flush_interval=0.2)
 
     yield collector
 

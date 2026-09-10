@@ -105,7 +105,7 @@ def test_flush_interval_reaches_the_agents_writer(tmp_path, monkeypatch):
     """timing.storage_flush is the age at which the writer in front of storage stops waiting."""
     monkeypatch.setattr(DataCollector, "_start_collection_process", lambda self: None)
 
-    collector = DataCollector("sqlite", str(tmp_path / "t.db"), flush_interval=0.25)
+    collector = DataCollector("duckdb", str(tmp_path / "t.db"), flush_interval=0.25)
 
     assert collector.ipc_writer._max_age_s == 0.25
 

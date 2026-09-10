@@ -420,6 +420,7 @@ class HardwareDetection:
                     cores=[],
                     idle_power_package=idle_power_package,
                     max_power_package=max_power_package,
+                    max_energy_range_j=cpu_data.get("max_energy_range_j"),
                 )
 
                 # Create core entities for this CPU
@@ -530,8 +531,8 @@ class HardwareDetection:
         """
         Create RAM entities from device information.
 
-        This method creates one DRAM entity per CPU socket (NUMA node), aggregating memory
-        information for all RAM modules associated with that socket.
+        The scanner reports one entry per CPU socket, numbered the way the kernel numbers sockets,
+        so every entry matches one of the CPU entities.
 
         Parameters
         ----------
@@ -550,48 +551,33 @@ class HardwareDetection:
         if "dram" not in self._devices:
             return dram_entities
 
-        # Group RAM by package_id
-        ram_by_socket: dict[int, list[Any]] = {}
-        for ram_data in self._devices["dram"]:
-            try:
-                package_id = ram_data.get("package_id")
-                if package_id is not None:
-                    if package_id not in ram_by_socket:
-                        ram_by_socket[package_id] = []
-                    ram_by_socket[package_id].append(ram_data)
-                else:
-                    logger.warning(f"RAM data missing package_id: {ram_data}")
-            except Exception as e:
-                logger.error(f"Error processing RAM data: {e}")
+        sockets = self._devices["dram"]
+        if not isinstance(sockets, list):
+            logger.warning(f"DRAM detection returned no usable data ({sockets}), skipping DRAM entity creation.")
+            return dram_entities
 
-        # Create one DRAM entity per socket
-        for package_id, ram_modules in ram_by_socket.items():
-            try:
-                # Find the corresponding CPU for the socket
-                cpu_list = list(filter(lambda cpu: cpu.package_id == package_id, cpu_entities))
-                cpu_entity = cpu_list[0] if cpu_list else None
+        cpu_by_package = {cpu.package_id: cpu for cpu in cpu_entities}
 
+        for socket_data in sockets:
+            package_id = socket_data.get("package_id")
+            try:
+                cpu_entity = cpu_by_package.get(package_id)
                 if not cpu_entity:
                     logger.warning(f"No CPU found for package_id {package_id}, skipping DRAM entity creation.")
                     continue
 
-                # Sum total memory for the socket
-                total_memory = sum(module.get("total_memory", 0) for module in ram_modules)
+                total_memory = socket_data["total_memory"]
 
                 # Get power config from agent config
                 power_config = self._config.get_subcomponent_power_config("dram", package_id)
 
                 # Use config value if not "auto", otherwise use detected value
                 dram_idle_power = (
-                    ram_by_socket[package_id][0].get("idle_power", 0.0)
-                    if power_config.idle_power == "auto"
-                    else power_config.idle_power
+                    socket_data.get("idle_power", 0.0) if power_config.idle_power == "auto" else power_config.idle_power
                 )
 
                 dram_max_power = (
-                    ram_by_socket[package_id][0].get("max_power", 0.0)
-                    if power_config.max_power == "auto"
-                    else power_config.max_power
+                    socket_data.get("max_power", 0.0) if power_config.max_power == "auto" else power_config.max_power
                 )
 
                 if total_memory > 0:
@@ -601,6 +587,7 @@ class HardwareDetection:
                         parent_id=host_entity.id,
                         idle_power=dram_idle_power,
                         max_power=dram_max_power,
+                        max_energy_range_j=socket_data.get("max_energy_range_j"),
                     )
                     dram_entities.append(dram_entity)
 

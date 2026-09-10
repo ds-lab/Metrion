@@ -5,10 +5,8 @@ from __future__ import annotations
 
 import datetime as dt
 from datetime import UTC
-import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 import polars as pl
 from loguru import logger
@@ -29,118 +27,14 @@ from metrion.metric import (
     GPU_DEVICE_PID_IDLE_ENERGY,
     GPU_DEVICE_PID_DYNAMIC_ENERGY,
 )
+from metrion.util import naive_utc_timestamps
 
 
-class MeasurementBuffer:
-    """Hybrid memory/disk buffer for measurements with automatic spill.
-
-    Stores measurements in memory up to a configurable limit, then spills
-    oldest data to Parquet files on disk. Required for handling late-arriving
-    measurements (up to 60+ seconds delay) without unbounded memory growth.
-
-    Parameters
-    ----------
-    memory_limit_rows : int
-        Maximum rows to keep in memory before spilling to disk.
-    spill_dir : Path, optional
-        Directory for spill files. Defaults to system temp directory.
-
-    Examples
-    --------
-    >>> buffer = MeasurementBuffer(memory_limit_rows=100_000)
-    >>> buffer.add(new_measurements_df)
-    >>> all_data = buffer.get_all()
-    >>> buffer.remove_before(cutoff_time)
-    """
-
-    def __init__(self, memory_limit_rows: int = 500_000, spill_dir: Path | None = None) -> None:
-        self._memory_df = pl.DataFrame()
-        self._spill_dir = spill_dir or Path(tempfile.gettempdir()) / "metrion_spill"
-        self._spill_files: list[Path] = []
-        self._memory_limit = memory_limit_rows
-
-    def add(self, df: pl.DataFrame) -> None:
-        """Add measurements to buffer, spilling to disk if needed.
-
-        Parameters
-        ----------
-        df : pl.DataFrame
-            Measurements to add with end_ts column for ordering.
-        """
-        if df.is_empty():
-            return
-        self._memory_df = pl.concat([self._memory_df, df])
-        if self._memory_df.height > self._memory_limit:
-            self._spill_to_disk()
-
-    def _spill_to_disk(self) -> None:
-        """Write oldest half of buffer to Parquet file."""
-        self._spill_dir.mkdir(parents=True, exist_ok=True)
-        half = self._memory_df.height // 2
-        # Sort by end_ts to spill oldest first
-        sorted_df = self._memory_df.sort("end_ts")
-        to_spill = sorted_df.head(half)
-        self._memory_df = sorted_df.tail(self._memory_df.height - half)
-
-        spill_path = self._spill_dir / f"spill_{dt.datetime.now(UTC).timestamp()}.parquet"
-        to_spill.write_parquet(spill_path)
-        self._spill_files.append(spill_path)
-        logger.debug(f"Spilled {half} measurement rows to {spill_path}")
-
-    def get_all(self) -> pl.DataFrame:
-        """Read all data from disk and memory.
-
-        Returns
-        -------
-        pl.DataFrame
-            Combined measurements from all spill files and memory.
-        """
-        dfs = []
-        for f in self._spill_files:
-            if f.exists():
-                dfs.append(pl.read_parquet(f))
-        dfs.append(self._memory_df)
-        return pl.concat(dfs) if dfs else pl.DataFrame()
-
-    def remove_before(self, cutoff: dt.datetime) -> None:
-        """Remove measurements older than cutoff from memory and disk.
-
-        Parameters
-        ----------
-        cutoff : dt.datetime
-            Remove all measurements with end_ts <= cutoff.
-        """
-        self._memory_df = self._memory_df.filter(pl.col("end_ts") > cutoff)
-        # Clean up spill files that are entirely before cutoff
-        for f in self._spill_files[:]:
-            if not f.exists():
-                self._spill_files.remove(f)
-                continue
-            df = pl.read_parquet(f)
-            remaining = df.filter(pl.col("end_ts") > cutoff)
-            if remaining.is_empty():
-                f.unlink()
-                self._spill_files.remove(f)
-                logger.debug(f"Removed spill file {f}")
-            elif remaining.height < df.height:
-                # Partial cleanup - rewrite file
-                remaining.write_parquet(f)
-
-    def height(self) -> int:
-        """Total row count across memory and disk."""
-        disk_rows = sum(pl.read_parquet(f).height for f in self._spill_files if f.exists())
-        return disk_rows + self._memory_df.height
-
-    def is_empty(self) -> bool:
-        """Check if buffer has no data."""
-        return self._memory_df.is_empty() and not self._spill_files
-
-    def cleanup(self) -> None:
-        """Remove all spill files."""
-        for f in self._spill_files:
-            if f.exists():
-                f.unlink()
-        self._spill_files.clear()
+def _wrap_column(entity_df: pl.DataFrame | pl.LazyFrame) -> pl.Expr:
+    """The value an entity's RAPL counter wraps at, null for runs that did not record it."""
+    if "max_energy_range_j" in entity_df.collect_schema().names():
+        return pl.col("max_energy_range_j")
+    return pl.lit(None, dtype=pl.Float64)
 
 
 class EnergyAttributionModelBase(ABC):
@@ -319,7 +213,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
     _TIME_METRIC : str
         Metric ID for per-process execution time.
     _ENERGY_WRAP_CPU : float
-        Energy counter wrap-around value in Joules.
+        Energy counter wrap-around value in Joules, used where the CPU entity carries none.
     """
 
     _PKG_METRIC = "CPU_SOCKET_PKG_ENERGY"
@@ -365,7 +259,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
 
     def _split_over_intervals(
         self, measurements: pl.DataFrame, energy_intervals: pl.DataFrame, value_col: str
-    ) -> pl.DataFrame:
+    ) -> pl.DataFrame | pl.LazyFrame:
         """Distribute measurements over the energy intervals they overlap.
 
         A measurement touching two intervals appears in both, each time carrying the
@@ -401,6 +295,9 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
 
         start_time, end_time = self._determine_start_end_times(measurement_df, start_time=start_time, end_time=end_time)
 
+        # Closed bounds on purpose: these samples are not overlapped, they anchor the
+        # intervals. The sample at end_time is the lead value of the last interval, and
+        # dropping it would lose that interval's energy.
         energy_samples = measurement_df.filter(
             (pl.col("metric_id") == self._PKG_METRIC)
             & (pl.col("start_ts") >= start_time)
@@ -417,6 +314,14 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
         if energy_samples.is_empty():
             return self._empty_result()
 
+        # The socket reports the value its counter wraps at; the constant is what runs
+        # recorded before that value was read from sysfs.
+        energy_samples = energy_samples.join(
+            cpu_df.select(pl.col("id").alias("package_id"), _wrap_column(cpu_df).alias("energy_wrap_j")),
+            on="package_id",
+            how="left",
+        )
+
         energy_intervals = (
             energy_samples.sort(["package_id", "start_ts"])
             .with_columns(
@@ -429,7 +334,9 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                 .then(0.0)
                 .when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
-                .otherwise(pl.lit(self._ENERGY_WRAP_CPU) - pl.col("value") + pl.col("lead_value"))
+                .otherwise(
+                    pl.col("energy_wrap_j").fill_null(self._ENERGY_WRAP_CPU) - pl.col("value") + pl.col("lead_value")
+                )
                 .alias("energy_j")
             )
             .filter(pl.col("interval_end").is_not_null())
@@ -442,11 +349,16 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
 
         core_mapping = core_df.select(["id", "parent_id"]).rename({"id": "core_id", "parent_id": "package_id"})
 
+        # Overlap against the half-open window [start_time, end_time), matching the
+        # convention of _join_overlapping. Both bounds exclusive: a measurement ending
+        # exactly at start_time or starting exactly at end_time overlaps no interval
+        # inside the window, and with closed bounds it would land in this window and in
+        # the neighbouring one.
         measurement_core = (
             measurement_df.filter(
                 pl.col("metric_id").is_in([self._WORK_METRIC, self._TIME_METRIC])
-                & (pl.col("end_ts") >= start_time)
-                & (pl.col("start_ts") <= end_time)
+                & (pl.col("end_ts") > start_time)
+                & (pl.col("start_ts") < end_time)
                 & pl.col("value").is_not_null()
                 & (pl.col("value").abs() < 1e307)
             )
@@ -540,7 +452,15 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                     ).alias("interval_seconds"),
                 ]
             )
-            .with_columns((pl.col("idle_power_package") * pl.col("interval_seconds")).alias("idle_energy_j"))
+            # Capped at the measured energy: an over-estimated idle power would otherwise leave a
+            # negative remainder for the threads to share. Capping here rather than clamping the
+            # remainder keeps the attributed energy equal to the measured energy.
+            .with_columns(
+                pl.min_horizontal(
+                    pl.col("idle_power_package") * pl.col("interval_seconds"),
+                    pl.col("energy_j"),
+                ).alias("idle_energy_j")
+            )
         )
 
         attribution = (
@@ -634,11 +554,18 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
     ----------
     _DRAM_METRIC : str
         Metric ID for DRAM energy counter.
+    _MEMORY_METRIC : str
+        Metric ID for per-process memory presence.
+    _READ_LOCAL_METRIC, _READ_REMOTE_METRIC : str
+        Metric IDs for per-process L3 misses to local and remote DRAM.
     _ENERGY_WRAP_DRAM : float
-        Energy counter wrap-around value in Joules.
+        Energy counter wrap-around value in Joules, used where the DRAM entity carries none.
     """
 
     _DRAM_METRIC = "DRAM_SOCKET_TOTAL_ENERGY"
+    _MEMORY_METRIC = "DRAM_SOCKET_PID_MEMORY"
+    _READ_LOCAL_METRIC = "CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM"
+    _READ_REMOTE_METRIC = "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"
     _ENERGY_WRAP_DRAM = 65_712_999_613.0 / 1_000_000.0
 
     def __init__(self) -> None:
@@ -708,10 +635,15 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.col("value"),
                 pl.col("metric_id"),
                 pl.col("physical_entity_id").alias("dram_id"),
-                pl.col("parent_id").alias("cpu_id"),
+                # The module's own socket. parent_id would be the host, identical for every
+                # module, so no read could ever be local to one of them.
+                pl.col("cpu_id"),
                 pl.col("logical_entity_id"),
                 pl.col("start_ts"),
                 pl.col("end_ts"),
+                # The module reports the value its counter wraps at; the constant is what
+                # runs recorded before that value was read from sysfs.
+                _wrap_column(dram_lf).alias("energy_wrap_j"),
             )
         )
 
@@ -727,7 +659,9 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 .then(0.0)
                 .when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
-                .otherwise(pl.lit(self._ENERGY_WRAP_DRAM) - pl.col("value") + pl.col("lead_value"))
+                .otherwise(
+                    pl.col("energy_wrap_j").fill_null(self._ENERGY_WRAP_DRAM) - pl.col("value") + pl.col("lead_value")
+                )
                 .alias("energy_j")
             )
             .filter(pl.col("interval_end").is_not_null())
@@ -749,7 +683,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                     )
                     * 1e-9
                 ).alias("interval_duration_s"),
-                "idle_power",
+                pl.col("idle_power").fill_null(0.0),
             ]
         )
 
@@ -762,16 +696,17 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 "energy_j",
                 "idle_power",
                 "interval_duration_s",
-                (pl.col("idle_power") * pl.col("interval_duration_s")).alias("idle_energy_j"),
-                pl.max_horizontal(
-                    pl.lit(0.0),
-                    pl.col("energy_j") - (pl.col("idle_power") * pl.col("interval_duration_s")),
-                ).alias("active_energy_j"),
+                # Capped at the measured energy: an over-estimated idle power would otherwise leave
+                # a negative remainder for the processes to share.
+                pl.min_horizontal(
+                    pl.col("idle_power") * pl.col("interval_duration_s"),
+                    pl.col("energy_j"),
+                ).alias("idle_energy_j"),
             ]
-        )
+        ).with_columns((pl.col("energy_j") - pl.col("idle_energy_j")).alias("active_energy_j"))
 
         dram_memory_samples = measurement_lf.filter(
-            (pl.col("metric_id") == "DRAM_SOCKET_PID_MEMORY") & pl.col("value").is_not_null()
+            (pl.col("metric_id") == self._MEMORY_METRIC) & pl.col("value").is_not_null()
         ).select(
             "logical_entity_id",
             "physical_entity_id",
@@ -780,12 +715,13 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             "value",
         )
 
+        # No value_col: resident memory is a level, not an amount. A sample that overlaps the
+        # interval only partly still reports the whole memory the process holds.
         dram_memory_usage_by_thread = (
             self._join_overlapping(
                 dram_memory_samples,
                 energy_intervals,
                 [pl.col("physical_entity_id") == pl.col("dram_id")],
-                value_col="value",
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
             .agg(pl.col("value").sum().alias("total_memory_usage_by_thread"))
@@ -823,7 +759,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             [
                 "logical_entity_id",
                 "metric_id",
-                "parent_id",
+                "parent_id",  # this is the cpu_id
                 "start_ts",
                 "end_ts",
                 "value",
@@ -833,7 +769,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
         measurement_core_remote = measurement_core.rename({"parent_id": "source_cpu_id"})
 
         local_read_samples = measurement_core.filter(
-            (pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM") & pl.col("value").is_not_null()
+            (pl.col("metric_id") == self._READ_LOCAL_METRIC) & pl.col("value").is_not_null()
         ).select(
             "logical_entity_id",
             "parent_id",
@@ -854,9 +790,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id", "reads"])
         )
 
-        remote_read_samples = measurement_core_remote.filter(
-            pl.col("metric_id") == "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"
-        ).select(
+        remote_read_samples = measurement_core_remote.filter(pl.col("metric_id") == self._READ_REMOTE_METRIC).select(
             "logical_entity_id",
             "source_cpu_id",
             pl.col("start_ts").alias("meas_start"),
@@ -1136,10 +1070,15 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
                     / 1_000_000_000.0
                 ).alias("interval_seconds"),
             )
-            .with_columns((pl.col("idle_power_w") * pl.col("interval_seconds")).alias("idle_energy_j"))
+            # Capped at the measured energy: an over-estimated idle power would otherwise leave a
+            # negative remainder for the processes to share.
             .with_columns(
-                pl.max_horizontal(pl.col("energy_j") - pl.col("idle_energy_j"), pl.lit(0.0)).alias("dynamic_energy_j")
+                pl.min_horizontal(
+                    pl.col("idle_power_w") * pl.col("interval_seconds"),
+                    pl.col("energy_j"),
+                ).alias("idle_energy_j")
             )
+            .with_columns((pl.col("energy_j") - pl.col("idle_energy_j")).alias("dynamic_energy_j"))
             .select(
                 [
                     "gpu_id",
@@ -1427,10 +1366,9 @@ class DyncamicEnergyAttributionModel:
     ----------
     cutoff : float
         Seconds to wait before processing measurements.
-    memory_limit_rows : int
-        Max rows in memory before spilling to disk.
-    spill_dir : Path, optional
-        Directory for spill files.
+    stall_after : float, optional
+        Seconds a stream may lag behind the newest measurement of any stream before it
+        stops being required for the window bound. Defaults to ``max(30.0, 3 * cutoff)``.
 
     Examples
     --------
@@ -1444,29 +1382,63 @@ class DyncamicEnergyAttributionModel:
     _CPU_METRIC = CPUEnergyAttributionModel._PKG_METRIC
     _DRAM_METRIC = DRAMEnergyAttributionModel._DRAM_METRIC
     _GPU_METRIC = GPUEnergyAttributionModel._ENERGY_METRIC
-    _ENERGY_METRICS = [_CPU_METRIC, _DRAM_METRIC, _GPU_METRIC]
+    _COMPONENT_ENERGY: dict[str, str] = {"cpu": _CPU_METRIC, "dram": _DRAM_METRIC, "gpu": _GPU_METRIC}
+
+    # Held as Categorical while in the buffer, handed to the models as strings again.
+    _BUFFER_CATEGORICALS = ["metric_id", "physical_entity_id", "logical_entity_id"]
+
+    # Every stream a component reads, not just its energy counter. The energy stream is the
+    # numerator of the attribution, the per-thread streams are the denominator. Without the
+    # denominator the energy is split among whichever threads happen to have arrived already:
+    # the total stays right, the assignment does not.
+    _COMPONENT_INPUTS: dict[str, list[str]] = {
+        "cpu": [
+            CPUEnergyAttributionModel._PKG_METRIC,
+            CPUEnergyAttributionModel._WORK_METRIC,
+            CPUEnergyAttributionModel._TIME_METRIC,
+        ],
+        "dram": [
+            DRAMEnergyAttributionModel._DRAM_METRIC,
+            DRAMEnergyAttributionModel._MEMORY_METRIC,
+            DRAMEnergyAttributionModel._READ_LOCAL_METRIC,
+            DRAMEnergyAttributionModel._READ_REMOTE_METRIC,
+        ],
+        "gpu": [
+            GPUEnergyAttributionModel._ENERGY_METRIC,
+            GPUEnergyAttributionModel._UTILIZATION_METRIC,
+        ],
+    }
 
     def __init__(
         self,
         cutoff: float = 30.0,
-        memory_limit_rows: int = 500_000,
-        spill_dir: Path | None = None,
+        stall_after: float | None = None,
+        max_out_of_orderness: float = 1.0,
     ) -> None:
         self.cutoff = cutoff
-        self._buffer = MeasurementBuffer(memory_limit_rows=memory_limit_rows, spill_dir=spill_dir)
+        # A row arrives when it ends but counts from when it starts: a sched_switch slice still
+        # running at the watermark shows up later with a start before it. Holding the bound back
+        # by the longest slice keeps such rows in (bounded out-of-orderness). The longest slice
+        # on a fully loaded host was 0.8 s.
+        self._max_out_of_orderness = dt.timedelta(seconds=max_out_of_orderness)
+        # Everything not yet attributed. _component_bound keeps its span below stall_after.
+        self._measurements_df = pl.DataFrame()
         self._core_df = pl.DataFrame()
         self._cpu_df = pl.DataFrame()
         self._dram_df = pl.DataFrame()
         self._gpu_df = pl.DataFrame()
 
-        self._last_cutoff_check = dt.datetime.now(UTC)
         # Cross-batch continuity: cache last energy sample per (metric, entity)
         self._last_energy_samples: dict[tuple[str, str], tuple[dt.datetime, float]] = {}
 
-    @property
-    def _measurements_df(self) -> pl.DataFrame:
-        """Get all measurements from buffer (compatibility property)."""
-        return self._buffer.get_all()
+        self._watermarks: dict[str, dt.datetime] = {}  # metric_id -> newest end_ts seen
+        self._reported_stalls: set[str] = set()
+        # Lower bound so that cutoff=0.0 does not declare every stream stalled at once.
+        self._stall_after = stall_after if stall_after is not None else max(30.0, 3 * cutoff)
+        self._late_rows = 0
+        # How far each component has already been attributed. The buffer is trimmed at the
+        # slowest component, so a faster one keeps seeing rows it has already accounted for.
+        self._processed_until: dict[str, dt.datetime] = {}
 
     def update_measurements(self, measurement: pl.DataFrame | Sequence[Measurement]) -> None:
         """Add new measurements to the buffer.
@@ -1482,17 +1454,121 @@ class DyncamicEnergyAttributionModel:
                 if isinstance(m, Measurement):
                     m = m.to_df()
                 if isinstance(m, pl.DataFrame):
-                    m = m.with_columns(
-                        pl.col("start_ts").str.to_datetime("%Y-%m-%d %H:%M:%S%.f"),
-                        pl.col("end_ts").str.to_datetime("%Y-%m-%d %H:%M:%S%.f"),
-                    )
                     measurement_df = pl.concat([measurement_df, m], how="vertical")
         elif isinstance(measurement, pl.DataFrame):
             measurement_df = measurement
         else:
             raise TypeError("measurement must be a Polars DataFrame or a sequence of Measurement objects.")
-        if not measurement_df.is_empty():
-            self._buffer.add(measurement_df)
+        if measurement_df.is_empty():
+            return
+
+        measurement_df = naive_utc_timestamps(measurement_df)
+        # Categorical only inside the buffer: the three id columns repeat a few dozen values and
+        # cost 84 of the 113 bytes a row takes as strings, 40 as Categorical. The buffer holds
+        # seconds to minutes of rows, everything below still works on the plain string batch.
+        self._measurements_df = pl.concat(
+            [self._measurements_df, measurement_df.with_columns(pl.col(self._BUFFER_CATEGORICALS).cast(pl.Categorical))]
+        )
+        self._advance_watermarks(measurement_df)
+
+        # Rows whose window is already closed. Only countable here: the continuity samples go
+        # through the buffer directly and never pass this way.
+        late = self._count_late(measurement_df)
+        if late:
+            self._late_rows += late
+            logger.warning(
+                f"{late} measurement rows arrived after their component had already attributed "
+                f"their window (cutoff={self.cutoff:.1f}s). That energy is missing from the live "
+                "result: raise timing.cycle or attribution cutoff, or lower timing.ebpf_flush "
+                "and timing.storage_flush so the rows arrive sooner."
+            )
+
+    def _count_late(self, measurement_df: pl.DataFrame) -> int:
+        """Rows whose window their own component has already attributed.
+
+        Each component runs at its own pace, so a row can only be late against the edge of
+        the component that reads it. Against a single global edge every stream of a slower
+        component would look late while it is simply still waiting its turn. A row counts as
+        late once it starts before the edge: what is lost is its overlap with an interval
+        that has already been attributed, however far past the edge the row reaches.
+
+        The edge is the component's oldest anchor. Where one socket or GPU has been
+        attributed further than another, rows starting in between are not counted; their
+        samples are read in one go, so with max_out_of_orderness that gap stays within
+        milliseconds.
+        """
+        # determine for each metric_id the latest end_ts that has already been processed for its component
+        edges = {
+            metric: self._processed_until[component]
+            for component, metrics in self._COMPONENT_INPUTS.items()
+            if component in self._processed_until
+            for metric in metrics
+        }
+        if not edges:
+            return 0
+        edge_df = pl.DataFrame(
+            {"metric_id": list(edges), "edge": list(edges.values())},
+            schema={"metric_id": pl.String, "edge": pl.Datetime("us")},
+        )
+        return (
+            measurement_df.join(edge_df, on="metric_id", how="inner").filter(pl.col("start_ts") < pl.col("edge")).height
+        )
+
+    def _advance_watermarks(self, measurement_df: pl.DataFrame) -> None:
+        """Raise the per-stream high-water mark to the newest end_ts in this batch.
+
+        A stream that has never appeared stays out of the dictionary and is never
+        required, so a host without a GPU or without PMU counters does not block CPU
+        attribution. A stream that has appeared once is required from then on.
+        """
+        newest = measurement_df.group_by("metric_id").agg(pl.col("end_ts").max())
+        for row in newest.iter_rows(named=True):
+            known = self._watermarks.get(row["metric_id"])
+            if known is None or row["end_ts"] > known:
+                self._watermarks[row["metric_id"]] = row["end_ts"]
+
+    def _component_bound(
+        self,
+        metrics: Sequence[str],
+        cutoff_time: dt.datetime,
+        force: bool = False,
+    ) -> dt.datetime | None:
+        """Time up to which every stream of one component is complete.
+
+        The minimum of the known streams' high-water marks, held back by max_out_of_orderness
+        and capped by the cutoff time. A stream lagging more than stall_after seconds behind
+        the newest measurement of any stream counts as dried up and is no longer required,
+        otherwise a finished workload would hold up attribution forever. The reference has to
+        be the newest measurement overall: a component whose streams all stop together stays
+        current relative to itself and would pin the buffer for the rest of the run. Because
+        every live mark is within stall_after of the newest row, the buffer can never span
+        more than that plus max_out_of_orderness. With force the maximum applies instead: the
+        shutdown drain is meant to empty it.
+        """
+        marks = {metric: self._watermarks[metric] for metric in metrics if metric in self._watermarks}
+        if not marks:
+            return None
+
+        newest = max(self._watermarks.values())
+        stalled_before = newest - dt.timedelta(seconds=self._stall_after)
+
+        live = []
+        for metric, mark in marks.items():
+            if mark < stalled_before:
+                if metric not in self._reported_stalls:
+                    logger.warning(
+                        f"Stream {metric} lags more than {self._stall_after:.0f}s behind the newest "
+                        "measurement; it is no longer required for the window bound"
+                    )
+                    self._reported_stalls.add(metric)
+                continue
+            live.append(mark)
+
+        if not live:
+            return None
+        if force:
+            return max(live)
+        return min(min(live) - self._max_out_of_orderness, cutoff_time)
 
     def update_entites(self, entities: Sequence[Entity]) -> None:
         """Add new entities to the internal buffer."""
@@ -1529,7 +1605,7 @@ class DyncamicEnergyAttributionModel:
         """Get measurements ready for attribution with per-component bounds.
 
         Each energy component (CPU, DRAM, GPU) gets its own measurement bound
-        based on data availability, allowing independent processing.
+        covering all of its input streams, allowing independent processing.
 
         Parameters
         ----------
@@ -1539,90 +1615,106 @@ class DyncamicEnergyAttributionModel:
         Returns
         -------
         tuple[pl.DataFrame, dict[str, datetime | None]]
-            (measurements, bounds_dict) where bounds_dict maps metric to bound.
+            (measurements, bounds_dict) where bounds_dict maps "cpu", "dram" and "gpu"
+            to the bound of that component.
         """
-        now = dt.datetime.now(UTC)
-        measurements_df = self._buffer.get_all()
-        empty_bounds = {self._CPU_METRIC: None, self._DRAM_METRIC: None, self._GPU_METRIC: None}
+        now = dt.datetime.now(UTC).replace(tzinfo=None)
+        measurements_df = self._measurements_df
+        empty_bounds: dict[str, dt.datetime | None] = dict.fromkeys(self._COMPONENT_INPUTS)
 
         if measurements_df.is_empty():
             return pl.DataFrame(), empty_bounds
 
         cutoff_time = now if force else now - dt.timedelta(seconds=self.cutoff)
 
-        # Check for missed data
-        missed_data_count = measurements_df.filter(pl.col("end_ts") < self._last_cutoff_check).height
-        if missed_data_count > 0:
-            logger.warning("Live Energy Attribution will no longer be accurate due to missing data")
-            logger.debug(
-                f"Last cutoff check: {self._last_cutoff_check}, new cutoff time: {cutoff_time}"
-                + f" number of missed data={missed_data_count} and"
-                + f" oldest missed timestamp {measurements_df.get_column('end_ts').min()}",
-            )
-
-        # Compute separate measurement bound for EACH energy metric
-        bounds_dict: dict[str, dt.datetime | None] = {}
-        for metric in self._ENERGY_METRICS:
-            bound = (
-                measurements_df.filter(pl.col("metric_id") == metric)
-                .filter(pl.col("end_ts") <= cutoff_time)
-                .select(pl.col("end_ts").max())
-                .item()
-            )
-            bounds_dict[metric] = bound
+        # Compute a measurement bound for EACH component, over all of its input streams
+        bounds_dict: dict[str, dt.datetime | None] = {
+            name: self._component_bound(metrics, cutoff_time, force) for name, metrics in self._COMPONENT_INPUTS.items()
+        }
 
         # Filter out None bounds
         valid_bounds = [b for b in bounds_dict.values() if b is not None]
 
         if not valid_bounds:
-            self._last_cutoff_check = cutoff_time
+            # Nothing was processed, so the mark must not move either.
             return pl.DataFrame(), empty_bounds
 
         # Find the minimum bound across all components (for buffer cleanup)
         min_bound = min(valid_bounds)
-        self._last_cutoff_check = cutoff_time
 
-        # Get all measurements up to the maximum bound (each model will filter further)
+        # Everything that starts within the bound (each model will filter further). A row
+        # reaching past the bound still belongs to the intervals it overlaps, and the models
+        # weight it by that overlap; selecting on end_ts would drop exactly those rows.
         max_bound = max(valid_bounds)
-        relevant_measurements = measurements_df.filter(pl.col("end_ts") <= max_bound)
+        # Back to strings for the models: the entity frames carry plain string ids, and polars
+        # does not join a categorical key against a string one.
+        relevant_measurements = measurements_df.filter(pl.col("start_ts") <= max_bound).with_columns(
+            pl.col(self._BUFFER_CATEGORICALS).cast(pl.String)
+        )
 
         # CROSS-BATCH CONTINUITY: Cache last energy sample per entity per metric
-        for metric, bound in bounds_dict.items():
+        for component, bound in bounds_dict.items():
+            metric = self._COMPONENT_ENERGY[component]
             if bound is None:
                 continue
             last_samples = (
-                relevant_measurements.filter((pl.col("metric_id") == metric) & (pl.col("end_ts") <= bound))
-                .sort("end_ts")
+                relevant_measurements.filter((pl.col("metric_id") == metric) & (pl.col("start_ts") <= bound))
+                .sort("start_ts")
                 .group_by("physical_entity_id")
                 .last()
             )
             for row in last_samples.iter_rows(named=True):
                 key = (metric, row["physical_entity_id"])
-                self._last_energy_samples[key] = (row["end_ts"], row["value"])
+                self._last_energy_samples[key] = (row["start_ts"], row["value"])
 
-        # Remove processed measurements from buffer (use min to be safe)
-        self._buffer.remove_before(min_bound)
+        # Remove processed measurements from the buffer.
+        anchors = [
+            ts for (metric, _), (ts, _) in self._last_energy_samples.items() if metric not in self._reported_stalls
+        ]
+        deletion_point = min(min_bound, *anchors) if anchors else min_bound
+        self._measurements_df = self._measurements_df.filter(pl.col("end_ts") > deletion_point)
 
-        # INJECT cached samples for next batch's first interval
-        if self._last_energy_samples:
-            cached_rows = [
-                {
-                    "metric_id": metric,
-                    "physical_entity_id": entity_id,
-                    "logical_entity_id": None,
-                    "value": value,
-                    "start_ts": ts,
-                    "end_ts": ts,
-                }
-                for (metric, entity_id), (ts, value) in self._last_energy_samples.items()
-            ]
-            cached_df = pl.DataFrame(cached_rows).with_columns(
-                pl.col("start_ts").cast(pl.Datetime),
-                pl.col("end_ts").cast(pl.Datetime),
+        # Put back the anchors the deletion just took. The filter keeps end_ts > deletion_point,
+        # so a newer anchor is still in the buffer; re-adding it would leave two rows at the same
+        # timestamp and one interval of zero length.
+        cached_rows = [
+            {
+                "metric_id": metric,
+                "physical_entity_id": entity_id,
+                "logical_entity_id": None,
+                "value": value,
+                "start_ts": ts,
+                "end_ts": ts,
+            }
+            for (metric, entity_id), (ts, value) in self._last_energy_samples.items()
+            if ts <= deletion_point
+        ]
+        if cached_rows:
+            cached_df = pl.DataFrame(cached_rows)
+            # Align to the buffer's schema. Real measurement frames carry columns the
+            # synthetic rows do not have (`id`), and a vertical concat needs both sides
+            # to match exactly.
+            cached_df = cached_df.select(
+                [
+                    pl.col(name).cast(dtype) if name in cached_df.columns else pl.lit(None, dtype).alias(name)
+                    for name, dtype in self._measurements_df.schema.items()
+                ]
             )
-            self._buffer.add(cached_df)
+            self._measurements_df = pl.concat([self._measurements_df, cached_df])
 
         return relevant_measurements, bounds_dict
+
+    def _energy_frontier(self, component: str) -> dt.datetime | None:
+        """Time up to which this component's energy has been turned into intervals.
+
+        An entity's intervals end at its last cached energy sample, so that anchor is where
+        the next window has to start. The oldest anchor decides: under force the component
+        bound runs ahead of the energy stream, and starting the next window there would drop
+        the interval in between. Returns None while no energy sample has been seen yet.
+        """
+        metric = self._COMPONENT_ENERGY[component]
+        anchors = [ts for (m, _), (ts, _) in self._last_energy_samples.items() if m == metric]
+        return min(anchors) if anchors else None
 
     def attribute_energy(
         self, force: bool = False
@@ -1649,7 +1741,7 @@ class DyncamicEnergyAttributionModel:
         """
         empty_result = EnergyAttributionModelBase._empty_result()
 
-        if self._buffer.is_empty():
+        if self._measurements_df.is_empty():
             logger.debug("No measurements available for energy attribution.")
             return empty_result, empty_result, empty_result
 
@@ -1662,43 +1754,58 @@ class DyncamicEnergyAttributionModel:
         dram_model = DRAMEnergyAttributionModel()
         gpu_model = GPUEnergyAttributionModel()
 
+        # Each component runs over the window it has not covered yet: from where it last got
+        # to, up to its own bound. Without the lower bound it would re-attribute everything
+        # between the deletion point and its bound, because the buffer is trimmed at the
+        # slowest component and those rows are still there.
         # CPU attribution (with CPU-specific bound)
-        cpu_bound = bounds_dict.get(self._CPU_METRIC)
+        cpu_bound = bounds_dict.get("cpu")
         if cpu_bound is not None:
-            cpu_measurements = relevant_measurements.filter(pl.col("end_ts") <= cpu_bound)
+            cpu_measurements = relevant_measurements.filter(pl.col("start_ts") <= cpu_bound)
             pkg_result = cpu_model.attribute_energy(
                 measurement_df=cpu_measurements,
                 cpu_df=self._cpu_df,
                 core_df=self._core_df,
+                start_time=self._processed_until.get("cpu"),
+                end_time=cpu_bound,
             )
+            frontier = self._energy_frontier("cpu")
+            if frontier is not None:
+                self._processed_until["cpu"] = frontier
         else:
             pkg_result = empty_result
 
         # DRAM attribution (with DRAM-specific bound)
-        dram_bound = bounds_dict.get(self._DRAM_METRIC)
+        dram_bound = bounds_dict.get("dram")
         if dram_bound is not None:
-            dram_measurements = relevant_measurements.filter(pl.col("end_ts") <= dram_bound)
+            dram_measurements = relevant_measurements.filter(pl.col("start_ts") <= dram_bound)
             dram_result = dram_model.attribute_energy(
                 measurement_df=dram_measurements,
                 core_df=self._core_df,
                 dram_df=self._dram_df,
+                start_time=self._processed_until.get("dram"),
+                end_time=dram_bound,
             )
+            frontier = self._energy_frontier("dram")
+            if frontier is not None:
+                self._processed_until["dram"] = frontier
         else:
             dram_result = empty_result
 
         # GPU attribution (with GPU-specific bound)
-        gpu_bound = bounds_dict.get(self._GPU_METRIC)
+        gpu_bound = bounds_dict.get("gpu")
         if gpu_bound is not None and not self._gpu_df.is_empty():
-            gpu_measurements = relevant_measurements.filter(pl.col("end_ts") <= gpu_bound)
+            gpu_measurements = relevant_measurements.filter(pl.col("start_ts") <= gpu_bound)
             gpu_result = gpu_model.attribute_gpu_energy(
                 measurement_df=gpu_measurements,
                 gpu_df=self._gpu_df,
+                start_time=self._processed_until.get("gpu"),
+                end_time=gpu_bound,
             )
+            frontier = self._energy_frontier("gpu")
+            if frontier is not None:
+                self._processed_until["gpu"] = frontier
         else:
             gpu_result = empty_result
 
         return pkg_result, dram_result, gpu_result
-
-    def cleanup(self) -> None:
-        """Clean up disk spill files."""
-        self._buffer.cleanup()

@@ -2,29 +2,25 @@ from metrion.data_storage.i_data_storage import DataStorageI
 
 
 class DataStorageFactory:
-    def __init__(self):
-        super().__init__()
-
-    def create_data_storage(self, storage_type: str, *args, **kwargs) -> DataStorageI:
+    def create_data_storage(self, storage_type: str, target: str) -> DataStorageI:
         """
-        Factory method to create a data storage instance based on the specified type.
-        :param storage_type: Type of data storage (e.g., 'postgresql', 'sqlite').
-        :return: An instance of the specified data storage type.
+        Create the storage backend for a storage type.
+
+        Parameters
+        ----------
+        storage_type : str
+            One of 'duckdb', 'parquet'.
+        target : str
+            Connection string for DuckDB, output directory for parquet.
         """
-        if storage_type == "postgresql":
+        if storage_type == "duckdb":
             from metrion.data_storage.db_data_storage import SQLDatabaseStorage
 
-            db_url = str(kwargs.get("db_url"))
-            return SQLDatabaseStorage(db_url)
-        elif storage_type == "sqlite":
-            from metrion.data_storage.db_data_storage import SQLDatabaseStorage
+            return SQLDatabaseStorage(target)
 
-            db_url = str(kwargs.get("db_url"))
-            return SQLDatabaseStorage(db_url)
-        elif storage_type == "duckdb":
-            from metrion.data_storage.db_data_storage import SQLDatabaseStorage
+        if storage_type == "parquet":
+            from metrion.data_storage.parquet_data_storage import ParquetDataStorage
 
-            db_url = str(kwargs.get("db_url"))
-            return SQLDatabaseStorage(db_url)
-        else:
-            raise ValueError(f"Unknown storage type: {storage_type}")
+            return ParquetDataStorage(target)
+
+        raise ValueError(f"Unknown storage type: {storage_type}")

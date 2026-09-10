@@ -140,7 +140,7 @@ def test_gpu_point_sample_is_aligned():
 
 
 def _dram_frames(idle_power):
-    dram_df = pl.DataFrame({"id": ["dram-0"], "parent_id": ["cpu-0"], "idle_power": [idle_power]})
+    dram_df = pl.DataFrame({"id": ["dram-0"], "cpu_id": ["cpu-0"], "parent_id": ["host-0"], "idle_power": [idle_power]})
     core_df = pl.DataFrame({"id": ["core-0"], "parent_id": ["cpu-0"]})
     return dram_df, core_df
 

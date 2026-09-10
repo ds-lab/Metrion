@@ -67,7 +67,7 @@ class Core(PhysicalEntity):
         schema = {
             "id": pl.String,
             "core_id": pl.Int64,
-            "package_id": pl.String,
+            "package_id": pl.Int64,
             "thread_siblings": pl.String,
             "mhz": pl.Float64,
             "parent_id": pl.String,

@@ -95,13 +95,13 @@ class Measurement:
         return self._id
 
     def to_df(self) -> pl.DataFrame:
-        """Converts the measurement to a Polars DataFrame."""
+        """Converts the measurement to a Polars DataFrame with naive UTC timestamps."""
         schema = {
             "metric_id": pl.String,
             "physical_entity_id": pl.String,
             "logical_entity_id": pl.String,
-            "start_ts": pl.Datetime,
-            "end_ts": pl.Datetime,
+            "start_ts": pl.Datetime("us"),
+            "end_ts": pl.Datetime("us"),
             "value": pl.Float64,
             "id": pl.Int64,
         }
@@ -110,8 +110,8 @@ class Measurement:
             "metric_id": [self._metric_id],
             "physical_entity_id": [self._physical_entity_id],
             "logical_entity_id": [self._logical_entity_id],
-            "start_ts": [self._start_ts.replace(tzinfo=UTC)],
-            "end_ts": [self._end_ts.replace(tzinfo=UTC)],
+            "start_ts": [self._start_ts],
+            "end_ts": [self._end_ts],
             "value": [self._value],
             "id": [self._id],
         }

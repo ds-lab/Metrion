@@ -120,36 +120,51 @@ class TestGPUEnergyAttributionModel:
         assert intervals["energy_j"][0] == 100.0  # 1100 - 1000
         assert intervals["interval_seconds"][0] == 10.0
 
-    def test_idle_energy_calculated(
+    def test_idle_energy_capped_at_measured_energy(
         self,
         gpu_df: pl.DataFrame,
         energy_measurements: pl.DataFrame,
     ):
-        """Idle energy = idle_power × interval_duration."""
+        """Idle energy = idle_power × interval_duration, never more than the GPU used."""
         model = GPUEnergyAttributionModel()
         intervals = model._calculate_energy_intervals(
             measurement_df=energy_measurements,
             gpu_df=gpu_df,
         )
 
-        # 50W idle × 10s = 500J idle energy
-        assert intervals["idle_energy_j"][0] == 500.0
+        # 50W idle × 10s would be 500J, but only 100J were measured
+        assert intervals["idle_energy_j"][0] == 100.0
 
     def test_dynamic_energy_calculated(
         self,
         gpu_df: pl.DataFrame,
         energy_measurements: pl.DataFrame,
     ):
-        """Dynamic energy = total - idle (clamped to 0)."""
+        """Dynamic energy = total - idle, and idle never exceeds total."""
         model = GPUEnergyAttributionModel()
         intervals = model._calculate_energy_intervals(
             measurement_df=energy_measurements,
             gpu_df=gpu_df,
         )
 
-        # 100J total - 500J idle = 0J (clamped, idle > total)
-        # In this case idle > total, so dynamic should be 0
+        # 500J idle claimed for 100J measured, so the cap leaves nothing dynamic
         assert intervals["dynamic_energy_j"][0] == 0.0
+
+    def test_idle_power_above_measured_energy_keeps_the_sum(
+        self,
+        gpu_df: pl.DataFrame,
+        energy_measurements: pl.DataFrame,
+        utilization_measurements: pl.DataFrame,
+    ):
+        """The attributed energy stays the measured energy even when idle_power is too high."""
+        model = GPUEnergyAttributionModel()
+        total_df, _, dynamic_df = model.attribute_gpu_energy(
+            measurement_df=pl.concat([energy_measurements, utilization_measurements]),
+            gpu_df=gpu_df,
+        )
+
+        assert (dynamic_df["value"] >= 0.0).all()
+        assert total_df["value"].sum() == pytest.approx(100.0)
 
     def test_attribution_by_utilization_ratio(self, gpu_df: pl.DataFrame, base_time: dt.datetime):
         """Energy attributed proportional to SM utilization."""
@@ -392,84 +407,6 @@ class TestDynamicModelGPUIntegration:
         assert all(len(r) == 3 for r in result)
 
 
-class TestMeasurementBuffer:
-    """Tests for MeasurementBuffer disk spill functionality."""
-
-    @pytest.fixture
-    def sample_df(self) -> pl.DataFrame:
-        """Sample measurement DataFrame."""
-        base_time = dt.datetime(2026, 1, 8, 10, 0, 0)
-        return pl.DataFrame(
-            {
-                "metric_id": ["TEST_METRIC"] * 10,
-                "physical_entity_id": ["entity-1"] * 10,
-                "logical_entity_id": [None] * 10,
-                "value": list(range(10)),
-                "start_ts": [base_time + dt.timedelta(seconds=i) for i in range(10)],
-                "end_ts": [base_time + dt.timedelta(seconds=i) for i in range(10)],
-            }
-        )
-
-    def test_add_stores_in_memory(self, sample_df: pl.DataFrame):
-        """Measurements below limit stay in memory."""
-        from metrion.energy_attribution.energy_attribution import MeasurementBuffer
-
-        buffer = MeasurementBuffer(memory_limit_rows=100)
-        buffer.add(sample_df)
-
-        assert buffer.height() == 10
-        assert len(buffer._spill_files) == 0
-
-    def test_spill_to_disk_when_limit_exceeded(self, sample_df: pl.DataFrame):
-        """Buffer spills to disk when memory limit exceeded."""
-        import tempfile
-        from pathlib import Path
-
-        from metrion.energy_attribution.energy_attribution import MeasurementBuffer
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            buffer = MeasurementBuffer(memory_limit_rows=5, spill_dir=Path(tmpdir))
-            buffer.add(sample_df)  # 10 rows > 5 limit
-
-            # Should have spilled half to disk
-            assert len(buffer._spill_files) >= 1
-            assert buffer.height() == 10  # Total still correct
-
-            buffer.cleanup()
-
-    def test_get_all_combines_memory_and_disk(self, sample_df: pl.DataFrame):
-        """get_all returns combined data from memory and disk."""
-        import tempfile
-        from pathlib import Path
-
-        from metrion.energy_attribution.energy_attribution import MeasurementBuffer
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            buffer = MeasurementBuffer(memory_limit_rows=5, spill_dir=Path(tmpdir))
-            buffer.add(sample_df)
-
-            all_data = buffer.get_all()
-            assert all_data.height == 10
-            assert set(all_data["value"].to_list()) == set(range(10))
-
-            buffer.cleanup()
-
-    def test_remove_before_cleans_correctly(self, sample_df: pl.DataFrame):
-        """remove_before removes old data from memory and disk."""
-        from metrion.energy_attribution.energy_attribution import MeasurementBuffer
-
-        buffer = MeasurementBuffer(memory_limit_rows=100)
-        buffer.add(sample_df)
-
-        base_time = dt.datetime(2026, 1, 8, 10, 0, 0)
-        cutoff = base_time + dt.timedelta(seconds=5)
-        buffer.remove_before(cutoff)
-
-        # Should only have rows with end_ts > cutoff (seconds 6-9)
-        remaining = buffer.get_all()
-        assert remaining.height == 4
-
-
 class TestCrossBatchContinuity:
     """Tests for cross-batch energy continuity."""
 
@@ -535,7 +472,7 @@ class TestCrossBatchContinuity:
         model._get_relevant_measurements(force=True)
 
         # After first batch, buffer should have cached sample
-        buffer_data = model._buffer.get_all()
+        buffer_data = model._measurements_df
         assert not buffer_data.is_empty()
         # Cached sample value should be 2000 (last sample)
         gpu_samples = buffer_data.filter(pl.col("metric_id") == "GPU_DEVICE_TOTAL_ENERGY")

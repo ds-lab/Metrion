@@ -2,7 +2,6 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
 import polars as pl
 
@@ -348,16 +347,13 @@ def parse_metrion_logs(
     workload: str,
     start_time: datetime,
     end_time: datetime,
-    dialect: Literal["sqlite", "duckdb"] = "duckdb",
 ) -> pl.DataFrame:
     from metrion.energy_attribution import util
 
     cache_folder = data_dir.parent.parent / "database_output"
     databases = list(data_dir.glob("*.db"))
 
-    energy_data = util.load_energy_data_per_database(
-        databases, cache_folder, workload, start_time, end_time, dialect=dialect
-    )
+    energy_data = util.load_energy_data_per_database(databases, cache_folder, workload, start_time, end_time)
 
     return util.combine_energy_data(energy_data, results_schema_df)
 

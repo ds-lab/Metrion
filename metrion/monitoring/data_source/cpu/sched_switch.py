@@ -1000,16 +1000,10 @@ class SchedSwitchMonitor(DataSource):
         return self._convert_ns_to_datetime(grouped_df)
 
     def _convert_ns_to_datetime(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Convert time_start_ns and time_end_ns columns to datetime."""
+        """Convert time_start_ns and time_end_ns columns to naive UTC datetimes."""
         return df.with_columns(
-            pl.from_epoch(pl.col("time_start_ns"), time_unit="ns")
-            .dt.replace_time_zone("UTC")
-            .dt.cast_time_unit("us")
-            .alias("time_start"),
-            pl.from_epoch(pl.col("time_end_ns"), time_unit="ns")
-            .dt.replace_time_zone("UTC")
-            .dt.cast_time_unit("us")
-            .alias("time_end"),
+            pl.from_epoch(pl.col("time_start_ns"), time_unit="ns").dt.cast_time_unit("us").alias("time_start"),
+            pl.from_epoch(pl.col("time_end_ns"), time_unit="ns").dt.cast_time_unit("us").alias("time_end"),
         )
 
     def _calculate_memory_metrics(self, raw_data_df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:

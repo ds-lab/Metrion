@@ -2,12 +2,6 @@
 -- Creates energy intervals from GPU energy counter and attributes to processes
 -- using SM (compute) utilization ratios.
 
---sqlite CREATE INDEX IF NOT EXISTS idx_meas_gpu_energy_start
---sqlite   ON measurement (metric_id, physical_entity_id, start_ts);
-
---sqlite CREATE INDEX IF NOT EXISTS idx_meas_gpu_util_start_end
---sqlite   ON measurement (metric_id, start_ts, end_ts);
-
 -- 0) Per-GPU energy intervals with counter wrap handling
 CREATE TABLE IF NOT EXISTS energy_interval_gpu_tmp AS
 WITH energy_samples_gpu AS (
@@ -47,9 +41,6 @@ energy_interval_gpu AS (
 SELECT gpu_id, interval_start, interval_end, energy_j
 FROM energy_interval_gpu;
 
---sqlite CREATE INDEX IF NOT EXISTS idx_ei_gpu_end_start
---sqlite   ON energy_interval_gpu_tmp (gpu_id, interval_end, interval_start);
-
 -- 1) Final view: attribute energy by SM utilization ratio
 CREATE TABLE IF NOT EXISTS gpu_energy_per_thread_view AS
 WITH
@@ -60,7 +51,7 @@ gpu_interval_powers AS (
         ei.interval_start,
         ei.interval_end,
         ei.energy_j,
-        ({date_method}(ei.interval_end) - {date_method}(ei.interval_start)) * 24.0 * 3600.0 AS duration_s,
+        (julian(ei.interval_end) - julian(ei.interval_start)) * 24.0 * 3600.0 AS duration_s,
         g.idle_power
     FROM energy_interval_gpu_tmp AS ei
     JOIN gpu AS g ON ei.gpu_id = g.id
@@ -73,8 +64,10 @@ gpu_interval_energy_split AS (
         energy_j,
         idle_power,
         duration_s,
-        (idle_power * duration_s) AS idle_energy_j_total,
-        {max_func}(energy_j - (idle_power * duration_s), 0.0) AS dynamic_energy_j_total
+        -- Capped at the measured energy, so an over-estimated idle power cannot leave a
+        -- negative remainder for the processes to share.
+        LEAST(COALESCE(idle_power, 0) * duration_s, energy_j) AS idle_energy_j_total,
+        energy_j - idle_energy_j_total AS dynamic_energy_j_total
     FROM gpu_interval_powers
 ),
 

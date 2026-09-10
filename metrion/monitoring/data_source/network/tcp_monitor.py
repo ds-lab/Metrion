@@ -86,8 +86,6 @@ TCP_EVENT_SCHEMA = {
 class TCPMonitorBpfProcess(EbpfRingBufferProcess):
     """eBPF ring buffer process for TCP/UDP traffic monitoring with inline metadata."""
 
-    _boot_time: datetime = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
-
     @override
     def _create_bpf(self) -> BPF:
         """Load and compile the eBPF v2 program with inline metadata support."""
@@ -184,7 +182,7 @@ class TCPDataSource(DataSource):
     }
 
     _instance = None
-    _boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
+    _boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=UTC).replace(tzinfo=None)
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:

@@ -218,13 +218,20 @@ def read_temp_ipc(path: str) -> pl.DataFrame:
     path = Path(path)
     df = pl.read_ipc(path)
     Path(path).unlink(missing_ok=True)
-    if "start_ts" in df.columns and "end_ts" in df.columns:
-        if df["start_ts"].dtype == pl.String and df["end_ts"].dtype == pl.String:
-            df = df.with_columns(
-                pl.col("start_ts").str.to_datetime("%Y-%m-%d %H:%M:%S%.f"),
-                pl.col("end_ts").str.to_datetime("%Y-%m-%d %H:%M:%S%.f"),
-            )
     return df
+
+
+def naive_utc_timestamps(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Put start_ts and end_ts into naive UTC, the representation both sinks store.
+
+    A column that carries a time zone is converted, a naive one is read as UTC and passes
+    through unchanged.
+    """
+    return df.with_columns(
+        pl.col("start_ts").dt.convert_time_zone("UTC").dt.replace_time_zone(None),
+        pl.col("end_ts").dt.convert_time_zone("UTC").dt.replace_time_zone(None),
+    )
 
 
 def _generate_id(n: int) -> pl.Series:

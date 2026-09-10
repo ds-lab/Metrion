@@ -1,10 +1,13 @@
+import pathlib
 import re
-import subprocess
 
 from loguru import logger
 
-from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_rapl_caps
-from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data
+from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
+    collect_rapl_caps,
+    read_energy_range_j,
+)
+from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, get_nodes_per_package
 
 
 def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int, dict[str, float]]]:
@@ -95,6 +98,18 @@ def _auto_max_power_data() -> dict[int, float]:
     return power_data
 
 
+def _rapl_energy_ranges() -> dict[int, float]:
+    """Value the DRAM energy counter wraps at, per socket, in joules."""
+    ranges: dict[int, float] = {}
+    for pkg_caps in collect_rapl_caps():
+        for dram_cap in pkg_caps.dram:
+            energy_range = read_energy_range_j(dram_cap.path)
+            if energy_range is not None:
+                ranges[int(pkg_caps.package)] = energy_range
+                break
+    return ranges
+
+
 def _combine_power_data(idle_power: dict[int, float], max_power: dict[int, float]) -> dict[int, dict[str, float]]:
     """Merge idle/max maps into a per-socket dict."""
     combined: dict[int, dict[str, float]] = {}
@@ -128,97 +143,78 @@ def _safe_float(value: float | str | None, default: float = 0.0) -> float:
         return default
 
 
+_MEM_TOTAL_PATTERN = re.compile(r"MemTotal:\s+(\d+)\s+kB")
+
+
+def _mem_total_mb(meminfo_path: pathlib.Path) -> float:
+    """Read MemTotal in MB from /proc/meminfo or a NUMA node's meminfo, both of which use the same line format."""
+    try:
+        match = _MEM_TOTAL_PATTERN.search(meminfo_path.read_text())
+    except OSError:
+        return 0.0
+    return int(match.group(1)) / 1024 if match else 0.0
+
+
+def get_memory_per_package(
+    sysfs_root: pathlib.Path = pathlib.Path("/sys"),
+    proc_meminfo: pathlib.Path = pathlib.Path("/proc/meminfo"),
+) -> dict[int, float]:
+    """
+    Usable memory in MB per CPU socket, summed over the NUMA nodes attached to that socket.
+
+    Kernels built without NUMA expose no nodes at all; the whole machine is then one socket.
+    """
+    node_dir = sysfs_root / "devices/system/node"
+    memory_per_package = {
+        package_id: sum(_mem_total_mb(node_dir / f"node{node_id}" / "meminfo") for node_id in nodes)
+        for package_id, nodes in get_nodes_per_package(sysfs_root).items()
+    }
+
+    if not memory_per_package:
+        logger.debug("Kernel exposes no NUMA nodes, treating the machine as a single socket")
+        return {0: _mem_total_mb(proc_meminfo)}
+
+    return memory_per_package
+
+
 def get_info(config: dict) -> list[dict]:
     """
-    Retrieves memory information, including details for multiple RAM modules using dmidecode.
+    Retrieves memory information per CPU socket from sysfs.
 
     Returns
     -------
     list of dict
-        A list of dictionaries, where each dictionary contains details of an individual RAM module:
-        - manufacturer (str): The manufacturer of the RAM module.
-        - mhz (int or str): Speed of the RAM in MT/s (effectively MHz in DDR memory).
-        - total_memory (int or str): Size of the RAM module in MB.
-        - hardware_id (str): Serial number of the RAM module.
-        - package_id (str): The socket or locator information of the RAM module.
+        One entry per socket, each containing:
+        - package_id (int): Socket the memory is attached to, as the kernel numbers it.
+        - total_memory (float): Usable memory in MB.
         - power_mode (str): "auto" or "manual".
         - idle_power (float): Idle DRAM power in watts for the package.
         - max_power (float): Max DRAM power cap in watts for the package.
+        - max_energy_range_j (float | None): Value the energy counter wraps at, in joules.
     """
     power_mode, power_data = _resolve_power_data(config.get("power", "auto"))
-    ram_modules = []
+    # Deliberately not part of power_data: the wrap value is hardware, not a setting, so it
+    # must not travel through the auto/manual branch that may replace the power values.
+    energy_ranges = _rapl_energy_ranges()
+    sockets = []
 
-    try:
-        output = subprocess.check_output(["sudo", "dmidecode", "--type", "17"], text=True)
-        # https://www.redhat.com/en/blog/linux-tools-dmidecode
-        modules = output.split("Memory Device")[1:]
+    for package_id, total_memory in sorted(get_memory_per_package().items()):
+        if power_mode == "manual" and package_id not in power_data:
+            logger.warning(
+                f"DRAM package {package_id} discovered on hardware but not in manual power config. "
+                "Defaulting idle_power=0.0 and max_power=0.0."
+            )
 
-        for module in modules:
-            manufacturer = "Unknown"
-            speed = "Unknown"  # Unit: MT/s (Megatransfers per second)
-            size = "Unknown"  # Unit: MB (Megabytes) or GB (Gigabytes)
-            serial_number = "Unknown"
-            package_id = "Unknown"
-            package_power = {"idle": 0.0, "max": 0.0}
+        package_power = power_data.get(package_id, {"idle": 0.0, "max": 0.0})
+        sockets.append(
+            {
+                "package_id": package_id,
+                "total_memory": total_memory,
+                "power_mode": power_mode,
+                "idle_power": package_power.get("idle", 0.0),
+                "max_power": package_power.get("max", 0.0),
+                "max_energy_range_j": energy_ranges.get(package_id),
+            }
+        )
 
-            match_manufacturer = re.search(r"Manufacturer:\s*(.+)", module)
-            match_speed = re.search(r"Speed:\s*(\d+)\s*MT/s", module)
-            match_size = re.search(r"Size:\s*(\d+)\s*(GB|MB)", module)
-            match_serial = re.search(r"Serial Number:\s*(\S+)", module)
-            match_socket = re.search(r"(?:Bank Locator):\s*(P\d)", module)
-            match_locator = re.search(r"Locator:\s*(\S+)", module)
-
-            if match_manufacturer:
-                manufacturer = match_manufacturer.group(1)
-            if match_speed:
-                speed = int(match_speed.group(1))  # Value in MT/s
-            if match_size:
-                # Convert size to MB (Megabytes) if in GB
-                size = int(match_size.group(1)) * (1024 if match_size.group(2) == "GB" else 1)
-            if match_serial:
-                serial_number = match_serial.group(1)
-            if match_socket:
-                # Extract only the digit(s) from a locator like 'P0' or 'P10'
-                digits = re.search(r"\d+", match_socket.group(1))
-                package_id = digits.group(0) if digits else "Unknown"
-            if match_locator and package_id == "Unknown":
-                full_locator = match_locator.group(1)  # e.g., "A1" or "CPU1_DIMM_A1"
-                # Heuristic A: Look for explicit "P0" or "CPU1" in the string
-                if "P0" in full_locator or "CPU0" in full_locator:
-                    package_id = "0"
-                elif "P1" in full_locator or "CPU1" in full_locator:
-                    package_id = "1"
-                # Heuristic B: Mapping based on prefix letter (A=0, B=1)
-                # This matches your specific hardware output where A1-A8 and B1-B8 are used.
-                else:
-                    prefix = full_locator[0].upper()
-                    if prefix.isalpha():
-                        package_id = str(ord(prefix) - ord("A"))
-
-            if isinstance(package_id, str) and package_id.isdigit():
-                pkg_idx = int(package_id)
-                package_power = power_data.get(pkg_idx, {"idle": 0.0, "max": 0.0})
-                if power_mode == "manual" and pkg_idx not in power_data:
-                    logger.warning(
-                        f"DRAM package {pkg_idx} discovered on hardware but not in manual power config. "
-                        "Defaulting idle_power=0.0 and max_power=0.0."
-                    )
-
-            if manufacturer != "Unknown":
-                ram_modules.append(
-                    {
-                        "manufacturer": manufacturer,
-                        "mhz": speed if isinstance(speed, int) else "Unknown",  # MT/s (effectively MHz in DDR memory)
-                        "total_memory": size if isinstance(size, int) else "Unknown",  # Size in MB
-                        "hardware_id": serial_number,  # Serial number of the RAM module
-                        "package_id": package_id,
-                        "power_mode": power_mode,
-                        "idle_power": package_power.get("idle", 0.0),
-                        "max_power": package_power.get("max", 0.0),
-                    }
-                )
-
-    except subprocess.CalledProcessError:
-        pass
-
-    return ram_modules
+    return sockets

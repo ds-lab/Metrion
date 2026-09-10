@@ -2,6 +2,7 @@
 Unit tests for the new configuration schema.
 """
 
+import re
 import tempfile
 from pathlib import Path
 
@@ -29,21 +30,26 @@ class TestStorageConfig:
         assert config.path == "./monitor.db"
 
     def test_custom_values(self):
-        config = StorageConfig(type="sqlite", path="/custom/path/db.sqlite")
-        assert config.type == "sqlite"
-        assert config.path == "/custom/path/db.sqlite"
+        config = StorageConfig(type="parquet", path="/custom/path/run")
+        assert config.type == "parquet"
+        assert config.path == "/custom/path/run"
 
     def test_relative_path_is_resolved_against_the_base(self):
         config = StorageConfig(type="duckdb", path="./test.db")
         assert config.get_target(Path("/base")) == "duckdb:////base/test.db"
 
     def test_absolute_path_is_kept(self):
-        config = StorageConfig(type="sqlite", path="/absolute/path/db.sqlite")
-        assert config.get_target() == "sqlite:////absolute/path/db.sqlite"
+        config = StorageConfig(type="duckdb", path="/absolute/path/db.duckdb")
+        assert config.get_target() == "duckdb:////absolute/path/db.duckdb"
 
     def test_rejects_unknown_type(self):
         with pytest.raises(ValidationError):
             StorageConfig(type="mongodb")
+
+    def test_rejects_the_dropped_backends(self):
+        for dropped in ("sqlite", "postgresql"):
+            with pytest.raises(ValidationError):
+                StorageConfig(type=dropped)
 
 
 class TestSubcomponentEnergyConfig:
@@ -299,7 +305,7 @@ class TestAgentConfig:
 debug: true
 
 storage:
-  type: sqlite
+  type: duckdb
   path: ./test.db
 
 timing:
@@ -323,7 +329,7 @@ energy_model:
 
             config = AgentConfig.from_yaml_file(f.name)
 
-            assert config.storage.type == "sqlite"
+            assert config.storage.type == "duckdb"
             assert config.debug is True
             assert config.timing.cycle == 10.0
             assert config.energy_model.granularity == "compressed"
@@ -447,10 +453,9 @@ energy_model:
             assert config.storage.type == "duckdb"
             assert config.debug is False
 
-    def test_read_config_with_debug_mode(self):
-        """Test that debug mode adds timestamp to database path."""
+    def test_the_storage_path_gets_a_timestamp(self):
         yaml_content = """
-debug: true
+debug: false
 
 storage:
   type: duckdb
@@ -468,9 +473,28 @@ energy_model:
 
             config = ConfigReader.read_config(f.name)
 
-            # In debug mode, the path should have a timestamp added
-            assert "test_" in config.storage.path
-            assert ".db" in config.storage.path
+            assert config.storage.path != "test.db"
+            assert re.fullmatch(r"test_\d{4}(_\d{2}){5}\.db", config.storage.path)
+
+    def test_a_parquet_directory_keeps_its_suffixless_name(self):
+        yaml_content = """
+storage:
+  type: parquet
+  path: ./runs/prod
+
+timing:
+  cycle: 5
+
+energy_model:
+  granularity: detailed
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            config = ConfigReader.read_config(f.name)
+
+            assert re.fullmatch(r"runs/prod_\d{4}(_\d{2}){5}", config.storage.path)
 
 
 class TestMetricsConfig:

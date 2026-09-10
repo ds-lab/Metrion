@@ -206,7 +206,6 @@ def evaluation_pipeline(measurement_path: Path, output_path: Path, workload_type
         "stress-ng",
         datetime(2025, 1, 1, 0, 0, 0, microsecond=0, tzinfo=UTC),
         datetime(2027, 1, 1, 0, 0, 0, microsecond=0, tzinfo=UTC),
-        dialect="duckdb",
     )
     scaphandre_df = parser.parse_scaphandre_logs(results_paths["Scaphandre"], "stress-ng", step_s=0.1)
 

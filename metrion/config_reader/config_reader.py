@@ -49,12 +49,10 @@ class ConfigReader:
         # Configure logging level based on debug setting
         cls._configure_logging(config.debug)
 
-        # Apply debug mode transformations if needed
-        if config.debug:
-            config = cls._apply_debug_transformations(config)
+        config = cls._timestamp_storage_path(config)
 
         logger.info(f"Configuration loaded from {config_path}")
-        logger.debug(f"Storage: {config.storage.type} at {config.storage.path}")
+        logger.info(f"Storage: {config.storage.type} at {config.storage.path}")
         logger.debug(f"Collection cycle: {config.timing.cycle}s")
         logger.debug(f"Energy model granularity: {config.energy_model.granularity}")
 
@@ -80,9 +78,12 @@ class ConfigReader:
         )
 
     @classmethod
-    def _apply_debug_transformations(cls, config: AgentConfig) -> AgentConfig:
+    def _timestamp_storage_path(cls, config: AgentConfig) -> AgentConfig:
         """
-        Append a timestamp to the storage path so debug runs do not overwrite each other.
+        Append a timestamp to the storage path, so every run writes to its own place.
+
+        Works for both storage types: `./monitor.db` becomes `./monitor_<timestamp>.db`,
+        the directory `runs/prod` becomes `runs/prod_<timestamp>`.
 
         Parameters
         ----------

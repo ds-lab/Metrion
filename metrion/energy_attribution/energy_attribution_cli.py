@@ -72,14 +72,14 @@ PLOT_STYLE = {
 # ============================================================================
 
 
-def connect_to_db(db_path: Path, type: str) -> Engine | None:
+def connect_to_db(db_path: Path) -> Engine | None:
     """
-    Connect to a SQLite database using SQLAlchemy.
+    Connect to a DuckDB database using SQLAlchemy.
 
     Parameters
     ----------
     db_path : Path
-        Path to the SQLite database file.
+        Path to the DuckDB database file.
 
     Returns
     -------
@@ -96,7 +96,7 @@ def connect_to_db(db_path: Path, type: str) -> Engine | None:
             logger.error(f"Database file does not exist: {db_path}")
             return None
 
-        database_url = f"{type}:///{db_path}"
+        database_url = f"duckdb:///{db_path}"
         engine = create_engine(database_url, echo=False)
 
         with engine.connect() as conn:
@@ -134,14 +134,9 @@ def close_db_connection(engine: Engine) -> None:
         logger.error(f"Error disposing database engine: {e}")
 
 
-def load_sql_queries(dialect: str) -> tuple[str, str, str, str, str, str]:
+def load_sql_queries() -> tuple[str, str, str, str, str, str]:
     """
     Load SQL queries from files.
-
-    Parameters
-    ----------
-    dialect : str
-        Database dialect ('sqlite' or 'duckdb').
 
     Returns
     -------
@@ -161,23 +156,7 @@ def load_sql_queries(dialect: str) -> tuple[str, str, str, str, str, str]:
     gpu_energy_per_group_path = Path(__file__).parent / "gpu_energy_per_group.sql"
 
     def _read_sql(path: Path) -> str:
-        content = path.read_text(encoding="utf-8")
-
-        if dialect != "sqlite":
-            return content
-
-        lines = content.splitlines()
-
-        def _strip_sqlite_marker(line: str) -> str:
-            stripped = line.lstrip()
-            if stripped.startswith("--sqlite"):
-                leading_ws_len = len(line) - len(stripped)
-                leading_ws = line[:leading_ws_len]
-                rest = stripped[len("--sqlite") :].lstrip()
-                return leading_ws + rest
-            return line
-
-        return "\n".join(_strip_sqlite_marker(line) for line in lines) + "\n"
+        return path.read_text(encoding="utf-8")
 
     query_cpu_energy_analysis_by_thread = _read_sql(cpu_energy_analysis_by_thread_path)
     query_cpu_energy_per_group = _read_sql(query_cpu_energy_per_group_path)
@@ -212,12 +191,6 @@ def _execute_group_query(
             conn.execute(text(create_view_sql_statement))
         result = conn.execute(text(group_query_sql))
         df = pl.DataFrame(result, schema=schema)
-
-    if engine.dialect.name == "sqlite":
-        df = df.with_columns(
-            pl.col("interval_start").str.to_datetime("%Y-%m-%dT%H:%M:%S%.6f"),
-            pl.col("interval_end").str.to_datetime("%Y-%m-%dT%H:%M:%S%.6f"),
-        )
 
     return df
 
@@ -255,32 +228,16 @@ def execute_queries(
         query_dram_energy_per_group,
         query_gpu_energy_analysis_by_thread,
         query_gpu_energy_per_group,
-    ) = load_sql_queries(engine.dialect.name)
+    ) = load_sql_queries()
 
     # Convert datetime objects to strings for SQLite
     start_str = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
     end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-    dialect = engine.dialect.name
-
-    if dialect == "sqlite":
-        date_method = "julianday"  # SQLite date method julian
-        max_func = "MAX"
-    elif dialect == "duckdb":
-        date_method = "julian"
-        max_func = "greatest"
-    else:
-        raise ValueError(f"Unsupported database dialect: {dialect}")
 
     # Format the query with time parameters
-    formatted_query_cpu = query_cpu_energy_analysis_by_thread.format(
-        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
-    )
-    formatted_query_dram = query_dram_energy_analysis_by_thread.format(
-        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
-    )
-    formatted_query_gpu = query_gpu_energy_analysis_by_thread.format(
-        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
-    )
+    formatted_query_cpu = query_cpu_energy_analysis_by_thread.format(start_time=start_str, end_time=end_str)
+    formatted_query_dram = query_dram_energy_analysis_by_thread.format(start_time=start_str, end_time=end_str)
+    formatted_query_gpu = query_gpu_energy_analysis_by_thread.format(start_time=start_str, end_time=end_str)
 
     formatted_query_cpu_group = query_cpu_energy_per_group.format(filter_condition=filter)
     formatted_query_dram_group = query_dram_energy_per_group.format(filter_condition=filter)
@@ -288,8 +245,8 @@ def execute_queries(
 
     # Common schema for energy results
     energy_schema = {
-        "interval_start": pl.Datetime if dialect == "duckdb" else pl.String,
-        "interval_end": pl.Datetime if dialect == "duckdb" else pl.String,
+        "interval_start": pl.Datetime,
+        "interval_end": pl.Datetime,
         "cmdline": pl.String,
         "executable_name": pl.String,
         "resource_group_name": pl.String,
@@ -373,30 +330,14 @@ def get_energy_for_pids(
         _,
         query_gpu_energy_analysis_by_thread,
         _,
-    ) = load_sql_queries(engine.dialect.name)
+    ) = load_sql_queries()
 
     start_str = start_time.strftime("%Y-%m-%d %H:%M:%S.%f")
     end_str = end_time.strftime("%Y-%m-%d %H:%M:%S.%f")
-    dialect = engine.dialect.name
 
-    if dialect == "sqlite":
-        date_method = "julianday"
-        max_func = "MAX"
-    elif dialect == "duckdb":
-        date_method = "julian"
-        max_func = "greatest"
-    else:
-        raise ValueError(f"Unsupported database dialect: {dialect}")
-
-    formatted_query_cpu = query_cpu_energy_analysis_by_thread.format(
-        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
-    )
-    formatted_query_dram = query_dram_energy_analysis_by_thread.format(
-        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
-    )
-    formatted_query_gpu = query_gpu_energy_analysis_by_thread.format(
-        start_time=start_str, end_time=end_str, date_method=date_method, max_func=max_func
-    )
+    formatted_query_cpu = query_cpu_energy_analysis_by_thread.format(start_time=start_str, end_time=end_str)
+    formatted_query_dram = query_dram_energy_analysis_by_thread.format(start_time=start_str, end_time=end_str)
+    formatted_query_gpu = query_gpu_energy_analysis_by_thread.format(start_time=start_str, end_time=end_str)
 
     sql_dir = Path(__file__).parent
     query_cpu_per_pid = (
@@ -410,8 +351,8 @@ def get_energy_for_pids(
     )
 
     per_pid_schema = {
-        "interval_start": pl.Datetime if dialect == "duckdb" else pl.String,
-        "interval_end": pl.Datetime if dialect == "duckdb" else pl.String,
+        "interval_start": pl.Datetime,
+        "interval_end": pl.Datetime,
         "native_pid": pl.Int64,
         "cmdline": pl.String,
         "total_energy_j": pl.Float64,
@@ -2112,7 +2053,6 @@ def prepare_data(
     unit: Literal["J", "Wh"],
     filter: str = "",
     force: bool = False,
-    type: Literal["sqlite", "duckdb"] = "duckdb",
 ) -> tuple[list[tuple[str, pl.DataFrame]], list[tuple[str, pl.DataFrame]]] | None:
     """
     Prepare energy data from database for visualization.
@@ -2120,7 +2060,7 @@ def prepare_data(
     Parameters
     ----------
     db_path : Path
-        Path to the database file.
+        Database file, or the directory of a Parquet run to build one from.
     filter_cmdline : str
         Command line pattern to filter processes.
     start_time : datetime.datetime
@@ -2133,16 +2073,21 @@ def prepare_data(
         SQL filter condition.
     force : bool, optional
         Force recreation of views.
-    type : {'sqlite', 'duckdb'}, optional
-        Database type.
 
     Returns
     -------
     tuple or None
         (filtered_dfs, all_dfs) where each is a list of (origin, DataFrame) tuples.
     """
+    if db_path.is_dir():
+        # A Parquet run. The analyses are SQL, so build the database now - this is the point
+        # where it is needed, and it is skipped when the file is already up to date.
+        from metrion.data_storage.parquet_to_duckdb import ensure_duckdb
+
+        db_path = ensure_duckdb(db_path)
+
     # Connect to database
-    engine = connect_to_db(db_path, type=type)
+    engine = connect_to_db(db_path)
     if not engine:
         logger.error("Failed to connect to database. Exiting.")
         return
@@ -2215,7 +2160,7 @@ def prepare_data(
 
 @click.command()
 @click.option(
-    "--db-path", type=click.Path(exists=True, path_type=Path), required=True, help="Path to the SQLite database file"
+    "--db-path", type=click.Path(exists=True, path_type=Path), required=True, help="Path to the DuckDB database file"
 )
 @click.option(
     "--filter-cmdline",
@@ -2254,12 +2199,6 @@ def prepare_data(
     help="Force recreation of views (default: False)",
 )
 @click.option(
-    "--type",
-    type=click.Choice(["sqlite", "duckdb"], case_sensitive=False),
-    default="duckdb",
-    help="Type of database to connect to (default: duckdb)",
-)
-@click.option(
     "--backend",
     type=click.Choice(["matplotlib", "plotly"], case_sensitive=False),
     default="plotly",
@@ -2291,7 +2230,6 @@ def main(
     end_time: datetime.datetime,
     unit: Literal["J", "Wh"],
     force: bool = False,
-    type: Literal["sqlite", "duckdb"] = "duckdb",
     backend: Literal["matplotlib", "plotly"] = "plotly",
     export_summary: bool = False,
     no_plots: bool = False,
@@ -2351,7 +2289,6 @@ def main(
         unit=unit,
         filter=pid_filter_sql,
         force=force,
-        type=type,
     )
     if prepared_data is None:
         logger.error("No filtered data available. Exiting.")
@@ -2362,7 +2299,7 @@ def main(
     if export_raw_data:
         output_dir = Path(__file__).parent / "output"
         output_dir.mkdir(exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         for device, df in filtered_dfs:
             csv_path = output_dir / f"raw_{device}_{timestamp}.csv"
             df.write_csv(csv_path)

@@ -4,7 +4,10 @@ import pathlib
 import polars as pl
 from loguru import logger
 
-from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_rapl_caps
+from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
+    collect_rapl_caps,
+    read_energy_range_j,
+)
 from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, parse_cpu_list
 
 
@@ -155,6 +158,9 @@ def get_info(config: dict) -> list[dict]:
 
     power_config = config.get("power", "auto")
     power_mode, power_data = _resolve_power_data(power_config, cpus_by_socket)
+    # Deliberately not part of power_data: the wrap value is hardware, not a setting, so it
+    # must not travel through the auto/manual branch that may replace the power values.
+    energy_ranges = _rapl_energy_ranges()
 
     result = []
     for _socket_id, socket_data in cpus_by_socket.items():
@@ -166,6 +172,7 @@ def get_info(config: dict) -> list[dict]:
             create_core_entities,
             power_mode,
             power_data,
+            energy_ranges.get(socket_data["physical_id"]),
         )
         result.append(cpu_info)
 
@@ -270,6 +277,16 @@ def _auto_max_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:
     return power_data
 
 
+def _rapl_energy_ranges() -> dict[int, float]:
+    """Value the package energy counter wraps at, per socket, in joules."""
+    ranges: dict[int, float] = {}
+    for pkg_caps in collect_rapl_caps():
+        energy_range = read_energy_range_j(pkg_caps.path)
+        if energy_range is not None:
+            ranges[int(pkg_caps.package)] = energy_range
+    return ranges
+
+
 def _combine_power_data(idle_power: dict[int, float], max_power: dict[int, float]) -> dict[int, dict[str, float]]:
     """Merge idle/max maps into a per-socket dict."""
     combined: dict[int, dict[str, float]] = {}
@@ -311,6 +328,7 @@ def _build_socket_info(
     create_core_entities: bool,
     power_mode: str,
     power_data: dict[int, dict[str, float]] | None = None,
+    max_energy_range_j: float | None = None,
 ) -> dict:
     """Build CPU socket information dictionary."""
     logical_cpus = socket_data["logical_cpus"]
@@ -336,7 +354,7 @@ def _build_socket_info(
         "model": socket_data["model_name"],
         "physical_cores": socket_data["physical_cores"],
         "logical_cores": logical_cpu_count,
-        "package_id": str(socket_data["physical_id"]),
+        "package_id": int(socket_data["physical_id"]),
         "cache": socket_data["cache_size_kb"],
         "hyperthreading": logical_cpu_count > socket_data["physical_cores"],
         "logical_cpus": logical_cpu_list,
@@ -344,6 +362,7 @@ def _build_socket_info(
         "power_mode": power_mode,
         "idle_power_package": idle_power,
         "max_power_package": max_power,
+        "max_energy_range_j": max_energy_range_j,
     }
 
     return result
