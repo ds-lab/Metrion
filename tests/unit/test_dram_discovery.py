@@ -134,17 +134,17 @@ def host():
 
 
 def test_one_dram_entity_per_socket(host):
-    detector = _detector([_socket("0"), _socket("1", 16000.0)])
+    detector = _detector([_socket(0), _socket(1, 16000.0)])
 
-    entities = detector._create_dram_entities(host, [_cpu("0"), _cpu("1")])
+    entities = detector._create_dram_entities(host, [_cpu(0), _cpu(1)])
 
-    assert [e.cpu.package_id for e in entities] == ["0", "1"]
+    assert [e.cpu.package_id for e in entities] == [0, 1]
     assert [e.total_memory for e in entities] == [32000.0, 16000.0]
     assert all(isinstance(e, DRAM) for e in entities)
 
 
 def test_detected_power_reaches_the_entity(host):
-    entities = _detector([_socket("0")])._create_dram_entities(host, [_cpu("0")])
+    entities = _detector([_socket(0)])._create_dram_entities(host, [_cpu(0)])
 
     assert entities[0].idle_power == 3.0
     assert entities[0].max_power == 12.0
@@ -152,14 +152,14 @@ def test_detected_power_reaches_the_entity(host):
 
 def test_socket_without_a_cpu_is_skipped(host):
     """Cannot happen now that both sides read the kernel, but the guard must stay honest."""
-    entities = _detector([_socket("2")])._create_dram_entities(host, [_cpu("0")])
+    entities = _detector([_socket(2)])._create_dram_entities(host, [_cpu(0)])
 
     assert entities == []
 
 
 def test_unavailable_scanner_output_does_not_iterate_a_string(host):
     """The tree builder returns 'Not available' when the module cannot run."""
-    entities = _detector("Not available")._create_dram_entities(host, [_cpu("0")])
+    entities = _detector("Not available")._create_dram_entities(host, [_cpu(0)])
 
     assert entities == []
 
@@ -170,9 +170,9 @@ def test_scanner_output_feeds_entity_creation_unchanged(host, monkeypatch):
     monkeypatch.setattr(dram_scanner, "_resolve_power_data", lambda power: ("auto", {0: {"idle": 3.0, "max": 12.0}}))
 
     sockets = dram_scanner.get_info({})
-    entities = _detector(sockets)._create_dram_entities(host, [_cpu("0"), _cpu("1")])
+    entities = _detector(sockets)._create_dram_entities(host, [_cpu(0), _cpu(1)])
 
-    assert [e.cpu.package_id for e in entities] == ["0", "1"]
+    assert [e.cpu.package_id for e in entities] == [0, 1]
     assert [e.total_memory for e in entities] == [32000.0, 16000.0]
     assert entities[0].idle_power == 3.0
     assert entities[1].idle_power == 0.0, "a socket RAPL reports no power for still gets an entity"

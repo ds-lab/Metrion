@@ -354,7 +354,7 @@ def _build_socket_info(
         "model": socket_data["model_name"],
         "physical_cores": socket_data["physical_cores"],
         "logical_cores": logical_cpu_count,
-        "package_id": str(socket_data["physical_id"]),
+        "package_id": int(socket_data["physical_id"]),
         "cache": socket_data["cache_size_kb"],
         "hyperthreading": logical_cpu_count > socket_data["physical_cores"],
         "logical_cpus": logical_cpu_list,

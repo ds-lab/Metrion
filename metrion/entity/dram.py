@@ -26,7 +26,7 @@ class DRAM(Entity):
     def _to_df(self):
         schema = {
             "id": pl.String,
-            "package_id": pl.String,
+            "package_id": pl.Int64,
             "cpu_id": pl.String,
             "idle_power": pl.Float64,
             "max_power": pl.Float64,

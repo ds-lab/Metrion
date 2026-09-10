@@ -179,13 +179,13 @@ def _cpu_with_cores(count=2):
     from metrion.entity.core import Core
     from metrion.entity.cpu import CPU
 
-    cores = [Core(core_id=i, package_id="0", thread_siblings=[i], mhz=3000, parent_id="host-1") for i in range(count)]
+    cores = [Core(core_id=i, package_id=0, thread_siblings=[i], mhz=3000, parent_id="host-1") for i in range(count)]
     return CPU(
         manufacturer="GenuineIntel",
         model="test",
         physical_cores=count,
         logical_cores=count,
-        package_id="0",
+        package_id=0,
         cache=8192,
         hyperthreading=False,
         topology={i: 0 for i in range(count)},
@@ -293,7 +293,7 @@ def test_physical_entities_keep_their_parent_id(tmp_path):
 
     written = pl.read_parquet(tmp_path / "entities" / "dram" / "*.parquet")
     assert written["parent_id"].to_list() == [cpu.id]
-    assert written["package_id"].to_list() == ["0"]
+    assert written["package_id"].to_list() == [0]
 
 
 def test_two_versions_in_one_call_are_both_kept(tmp_path):

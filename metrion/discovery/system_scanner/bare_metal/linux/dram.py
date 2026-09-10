@@ -185,7 +185,7 @@ def get_info(config: dict) -> list[dict]:
     -------
     list of dict
         One entry per socket, each containing:
-        - package_id (str): Socket the memory is attached to, as the kernel numbers it.
+        - package_id (int): Socket the memory is attached to, as the kernel numbers it.
         - total_memory (float): Usable memory in MB.
         - power_mode (str): "auto" or "manual".
         - idle_power (float): Idle DRAM power in watts for the package.
@@ -208,7 +208,7 @@ def get_info(config: dict) -> list[dict]:
         package_power = power_data.get(package_id, {"idle": 0.0, "max": 0.0})
         sockets.append(
             {
-                "package_id": str(package_id),
+                "package_id": package_id,
                 "total_memory": total_memory,
                 "power_mode": power_mode,
                 "idle_power": package_power.get("idle", 0.0),

@@ -46,7 +46,7 @@ class CPU(PhysicalEntity):
             "model": pl.String,
             "physical_cores": pl.Int64,
             "logical_cores": pl.Int64,
-            "package_id": pl.String,
+            "package_id": pl.Int64,
             "cache": pl.Int64,
             "hyperthreading": pl.Boolean,
             "core_ids": pl.String,
