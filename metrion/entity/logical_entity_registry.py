@@ -94,6 +94,10 @@ class LogicalEntityRegistry:
         self._entities: dict[tuple[int, int], LogicalEntity] = {}  # (tid, start_time_ns) -> Entity
         self._entities_by_pid: dict[int, list[LogicalEntity]] = {}  # tid -> [Entity]
         self._bucket_index: dict[tuple[int, int], list[tuple[int, int]]] = {}  # (pid, bucket) -> [tid, start_time_ns]
+        # Keys added or changed since the last get_new_entities(); the /proc scan below fills it too.
+        self._pending: set[tuple[int, int]] = set()
+        # The data source threads and the orchestrator all call into this one registry.
+        self._state_lock = threading.RLock()
 
         self._queue: mp.Queue = mp.Queue()
         self._stop_event: mp.Event = mp.Event()  # ty:ignore[invalid-type-form]
@@ -147,67 +151,67 @@ class LogicalEntityRegistry:
         # debug
         self._no_match_count = 0
 
-        # new entity reporting
-        self._reported_entites_keys: set[tuple[int, int]] = set()
-        # Track entities that were updated (metadata enriched) - should also be reported as "new"
-        self._updated_entity_keys: set[tuple[int, int]] = set()
-
     @classmethod
     def get_instance(cls) -> LogicalEntityRegistry:
         return cls()
 
     def stop(self) -> list[LogicalEntity]:
-        self._bpf_process.stop()
+        with self._state_lock:
+            self._bpf_process.stop()
 
-        if self._producer_finished:
-            # update() already consumed the sentinel; only in-flight items are left.
-            df_paths = drain_remaining(self._queue, name="registry")
-        else:
-            df_paths, seen = drain_until_sentinel(self._queue, self._config.sentinel, deadline_s=20.0, name="registry")
-            if not seen:
-                logger.warning("LogicalEntityRegistry: sentinel not received, continuing anyway")
+            if self._producer_finished:
+                # update() already consumed the sentinel; only in-flight items are left.
+                df_paths = drain_remaining(self._queue, name="registry")
+            else:
+                df_paths, seen = drain_until_sentinel(
+                    self._queue, self._config.sentinel, deadline_s=20.0, name="registry"
+                )
+                if not seen:
+                    logger.warning("LogicalEntityRegistry: sentinel not received, continuing anyway")
 
-        self._cgroup_id_map = build_cgroup_id_map()
-        for item in df_paths:
-            df = read_temp_ipc(item)
-            self._process_events(df)
+            self._cgroup_id_map = build_cgroup_id_map()
+            for item in df_paths:
+                df = read_temp_ipc(item)
+                self._process_events(df)
 
-        self._bpf_process.join(timeout=10)
-        if self._bpf_process.is_alive():
-            logger.warning("Registry BPF process did not exit, killing it")
-            self._bpf_process.kill()
-            self._bpf_process.join(timeout=5)
+            self._bpf_process.join(timeout=10)
+            if self._bpf_process.is_alive():
+                logger.warning("Registry BPF process did not exit, killing it")
+                self._bpf_process.kill()
+                self._bpf_process.join(timeout=5)
 
-        return self.get_new_entities()
+            return self.get_new_entities()
 
     def update(self):
         """Consume events from queue and update registry."""
-        df_paths = []
-        timeout = 0.01  # 10ms timeout for non-blocking behavior
-        max_iterations = 1000  # Prevent infinite loop
+        with self._state_lock:
+            df_paths = []
+            timeout = 0.01  # 10ms timeout for non-blocking behavior
+            max_iterations = 1000  # Prevent infinite loop
 
-        for _ in range(max_iterations):
-            try:
-                item = self._queue.get(timeout=timeout)
-            except q.Empty:
-                # Queue is empty, done draining
-                break
-            if item == self._config.sentinel:
-                self._producer_finished = True
-                break
-            df_paths.append(item)
+            for _ in range(max_iterations):
+                try:
+                    item = self._queue.get(timeout=timeout)
+                except q.Empty:
+                    # Queue is empty, done draining
+                    break
+                if item == self._config.sentinel:
+                    self._producer_finished = True
+                    break
+                df_paths.append(item)
 
-        if len(df_paths) == 0:
-            return
+            if len(df_paths) == 0:
+                return
 
-        self._cgroup_id_map = build_cgroup_id_map()
-        dfs = []
-        for item in df_paths:
-            df = read_temp_ipc(item)
-            dfs.append(df)
+            self._cgroup_id_map = build_cgroup_id_map()
+            dfs = []
+            for item in df_paths:
+                df = read_temp_ipc(item)
+                dfs.append(df)
 
-        total_df = pl.concat(dfs, how="vertical").unique()
-        self._process_events(total_df)
+            # In arrival order: an EXEC or RENAME changes the entity its NEW created.
+            total_df = pl.concat(dfs, how="vertical")
+            self._process_events(total_df)
 
     def _process_events(self, df: pl.DataFrame):
         # EVENT_TYPES: 1=NEW, 2=EXEC, 3=RENAME, 4=EXIT
@@ -552,6 +556,7 @@ class LogicalEntityRegistry:
 
         # Ensure entity is stored under correct key
         self._entities[key] = entity
+        self._pending.add(key)
 
     def _update_rename(self, row: dict[str, Any]) -> None:
         """
@@ -581,6 +586,7 @@ class LogicalEntityRegistry:
 
         if key is not None:
             self._entities[key] = entity
+            self._pending.add(key)
 
     def _handle_exit(self, row):
         pass
@@ -617,6 +623,7 @@ class LogicalEntityRegistry:
     def _store_entity(self, entity: LogicalEntity, tid: int, start_ns: int):
         key = (tid, start_ns)
         self._entities[key] = entity
+        self._pending.add(key)
         if tid not in self._entities_by_pid:
             self._entities_by_pid[tid] = []
         self._entities_by_pid[tid].append(entity)
@@ -655,68 +662,70 @@ class LogicalEntityRegistry:
         2) Fuzzy: search bucket ±2 ticks and pick nearest valid key
         3) Fallback: latest entity for pid (best effort)
         """
-        # ---- normalize start_time -> ns since boot ----
-        if isinstance(start_time, datetime):
-            dt = start_time
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
+        with self._state_lock:
+            # ---- normalize start_time -> ns since boot ----
+            if isinstance(start_time, datetime):
+                dt = start_time
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
+                else:
+                    dt = dt.astimezone(UTC)
+
+                delta = dt - self._boot_time_dt
+                start_ns = int(delta.total_seconds() * 1_000_000_000)
             else:
-                dt = dt.astimezone(UTC)
+                start_ns = int(start_time)
 
-            delta = dt - self._boot_time_dt
-            start_ns = int(delta.total_seconds() * 1_000_000_000)
-        else:
-            start_ns = int(start_time)
+            if start_ns < 0:
+                logger.warning(f"Invalid start_time {start_time} for pid {pid}, using latest entity")
+                return self._get_latest_entity(pid)
 
-        if start_ns < 0:
-            logger.warning(f"Invalid start_time {start_time} for pid {pid}, using latest entity")
-            return self._get_latest_entity(pid)
-
-        # ---- exact lookup ----
-        key = (pid, start_ns)
-        ent = self._entities.get(key)
-        if ent is not None:
-            return ent
-
-        # ---- fuzzy lookup using tick buckets ----
-        tick_ns = 1_000_000_000 // self._clk_tck
-        bucket = start_ns // tick_ns
-        tolerance = 6  # buckets
-
-        best_key: tuple[int, int] | None = None
-        best_delta: int | None = None
-
-        for b in range(bucket - tolerance, bucket + tolerance + 1):
-            for cand_key in self._bucket_index.get((pid, b), []):
-                # cand_key is (pid, cand_start_ns)
-                cand_start_ns = cand_key[1]
-                delta = abs(cand_start_ns - start_ns)
-
-                # Optional: enforce that it's within the tolerance window in ns
-                if delta > tolerance * tick_ns:
-                    continue
-
-                if best_delta is None or delta < best_delta:
-                    best_delta = delta
-                    best_key = cand_key
-
-        if best_key is not None:
-            ent = self._entities.get(best_key)
+            # ---- exact lookup ----
+            key = (pid, start_ns)
+            ent = self._entities.get(key)
             if ent is not None:
                 return ent
 
-        # no match found
-        self._no_match_count += 1
-        return None
+            # ---- fuzzy lookup using tick buckets ----
+            tick_ns = 1_000_000_000 // self._clk_tck
+            bucket = start_ns // tick_ns
+            tolerance = 6  # buckets
+
+            best_key: tuple[int, int] | None = None
+            best_delta: int | None = None
+
+            for b in range(bucket - tolerance, bucket + tolerance + 1):
+                for cand_key in self._bucket_index.get((pid, b), []):
+                    # cand_key is (pid, cand_start_ns)
+                    cand_start_ns = cand_key[1]
+                    delta = abs(cand_start_ns - start_ns)
+
+                    # Optional: enforce that it's within the tolerance window in ns
+                    if delta > tolerance * tick_ns:
+                        continue
+
+                    if best_delta is None or delta < best_delta:
+                        best_delta = delta
+                        best_key = cand_key
+
+            if best_key is not None:
+                ent = self._entities.get(best_key)
+                if ent is not None:
+                    return ent
+
+            # no match found
+            self._no_match_count += 1
+            return None
 
     def get_all_entities_df(self) -> pl.DataFrame:
         """Return all entities as a DataFrame."""
 
-        data = []
-        for entity in self._entities.values():
-            data.append(entity._to_df())
+        with self._state_lock:
+            data = []
+            for entity in self._entities.values():
+                data.append(entity._to_df())
 
-        return pl.concat([df for df in data], how="vertical")
+            return pl.concat([df for df in data], how="vertical")
 
     def _add_entity_from_bpf_metadata(self, pid: int, pid_start: int, meta: dict[str, Any]) -> LogicalEntity:
         # Resolve parent start times from registry if available
@@ -756,60 +765,61 @@ class LogicalEntityRegistry:
 
         Returns the count of entities created from inline metadata.
         """
-        # Filter to events with inline metadata
-        metadata_events = df.filter(pl.col("event_type") == self.EVENT_TYPE_WITH_METADATA)
+        with self._state_lock:
+            # Filter to events with inline metadata
+            metadata_events = df.filter(pl.col("event_type") == self.EVENT_TYPE_WITH_METADATA)
 
-        if metadata_events.is_empty():
-            return 0
+            if metadata_events.is_empty():
+                return 0
 
-        # Get unique (pid, pid_start) combinations with metadata
-        unique_metadata = metadata_events.select(
-            [
-                "pid",
-                "pid_start",
-                "tgid",
-                "tgid_start",
-                "parent_tid",
-                "parent_tgid",
-                "parent_tid_start",
-                "parent_tgid_start",
-                "cgroup_id",
-                "uid",
-                "gid",
-                "comm",
-                "cmdline",
-            ]
-        ).unique(subset=["pid", "pid_start"])
+            # Get unique (pid, pid_start) combinations with metadata
+            unique_metadata = metadata_events.select(
+                [
+                    "pid",
+                    "pid_start",
+                    "tgid",
+                    "tgid_start",
+                    "parent_tid",
+                    "parent_tgid",
+                    "parent_tid_start",
+                    "parent_tgid_start",
+                    "cgroup_id",
+                    "uid",
+                    "gid",
+                    "comm",
+                    "cmdline",
+                ]
+            ).unique(subset=["pid", "pid_start"])
 
-        created_count = 0
-        for row in unique_metadata.iter_rows(named=True):
-            pid = row["pid"]
-            pid_start = row["pid_start"]
+            created_count = 0
+            for row in unique_metadata.iter_rows(named=True):
+                pid = row["pid"]
+                pid_start = row["pid_start"]
 
-            # Skip if entity already exists in registry
-            existing = self.get_logical_entity(pid=pid, start_time=pid_start)
-            if existing is not None:
-                continue
+                # Skip if entity already exists in registry
+                existing = self.get_logical_entity(pid=pid, start_time=pid_start)
+                if existing is not None:
+                    continue
 
-            # Build metadata dict and register entity
-            meta = {
-                "tgid": row["tgid"],
-                "start_time": pid_start,
-                "start_time_tgid": row["tgid_start"],
-                "parent_tid": row["parent_tid"],
-                "parent_tgid": row["parent_tgid"],
-                "start_time_parent": row["parent_tid_start"],
-                "start_time_parent_tgid": row["parent_tgid_start"],
-                "cgroup_id": row["cgroup_id"],
-                "uid": row["uid"],
-                "gid": row["gid"],
-                "comm": row["comm"] or "",
-                "cmdline": row["cmdline"] or row["comm"] or "",
-            }
-            self._add_entity_from_bpf_metadata(pid, pid_start, meta)
-            created_count += 1
+                # Build metadata dict and register entity
+                meta = {
+                    "tgid": row["tgid"],
+                    "start_time": pid_start,
+                    "start_time_tgid": row["tgid_start"],
+                    "parent_tid": row["parent_tid"],
+                    "parent_tgid": row["parent_tgid"],
+                    "start_time_parent": row["parent_tid_start"],
+                    "start_time_parent_tgid": row["parent_tgid_start"],
+                    "cgroup_id": row["cgroup_id"],
+                    "uid": row["uid"],
+                    "gid": row["gid"],
+                    "comm": row["comm"] or "",
+                    "cmdline": row["cmdline"] or row["comm"] or "",
+                }
+                self._add_entity_from_bpf_metadata(pid, pid_start, meta)
+                created_count += 1
 
-        return created_count
+            return created_count
 
     def update_entity_metadata_from_df(self, df: pl.DataFrame) -> int:
         """
@@ -834,99 +844,96 @@ class LogicalEntityRegistry:
 
         Returns the count of entities that were updated with new metadata.
         """
-        if df.is_empty():
-            return 0
+        with self._state_lock:
+            if df.is_empty():
+                return 0
 
-        # Check what columns are available for enrichment
-        available_cols = set(df.columns)
-        has_comm = "comm" in available_cols
-        has_cmdline = "cmdline" in available_cols
+            # Check what columns are available for enrichment
+            available_cols = set(df.columns)
+            has_comm = "comm" in available_cols
+            has_cmdline = "cmdline" in available_cols
 
-        if not has_comm and not has_cmdline:
-            return 0  # Nothing to enrich with
+            if not has_comm and not has_cmdline:
+                return 0  # Nothing to enrich with
 
-        # Get unique (pid, pid_start) combinations that have metadata to offer
-        select_cols = ["pid", "pid_start"]
-        if has_comm:
-            select_cols.append("comm")
-        if has_cmdline:
-            select_cols.append("cmdline")
+            # Get unique (pid, pid_start) combinations that have metadata to offer
+            select_cols = ["pid", "pid_start"]
+            if has_comm:
+                select_cols.append("comm")
+            if has_cmdline:
+                select_cols.append("cmdline")
 
-        # Filter to rows with non-empty comm or cmdline
-        filter_expr = pl.lit(False)
-        if has_comm:
-            filter_expr = filter_expr | (pl.col("comm").is_not_null() & (pl.col("comm") != ""))
-        if has_cmdline:
-            filter_expr = filter_expr | (pl.col("cmdline").is_not_null() & (pl.col("cmdline") != ""))
+            # Filter to rows with non-empty comm or cmdline
+            filter_expr = pl.lit(False)
+            if has_comm:
+                filter_expr = filter_expr | (pl.col("comm").is_not_null() & (pl.col("comm") != ""))
+            if has_cmdline:
+                filter_expr = filter_expr | (pl.col("cmdline").is_not_null() & (pl.col("cmdline") != ""))
 
-        enrichment_df = df.select(select_cols).filter(filter_expr).unique(subset=["pid", "pid_start"])
+            enrichment_df = df.select(select_cols).filter(filter_expr).unique(subset=["pid", "pid_start"])
 
-        if enrichment_df.is_empty():
-            return 0
+            if enrichment_df.is_empty():
+                return 0
 
-        updated_count = 0
+            updated_count = 0
 
-        for row in enrichment_df.iter_rows(named=True):
-            pid = row["pid"]
-            pid_start = row["pid_start"]
-            comm = row.get("comm", "") or ""
-            cmdline = row.get("cmdline", "") or ""
+            for row in enrichment_df.iter_rows(named=True):
+                pid = row["pid"]
+                pid_start = row["pid_start"]
+                comm = row.get("comm", "") or ""
+                cmdline = row.get("cmdline", "") or ""
 
-            # Skip if no enrichment data
-            if not comm and not cmdline:
-                continue
+                # Skip if no enrichment data
+                if not comm and not cmdline:
+                    continue
 
-            # Find the entity
-            entity = self.get_logical_entity(pid=pid, start_time=pid_start)
-            if entity is None:
-                continue
+                # Find the entity
+                entity = self.get_logical_entity(pid=pid, start_time=pid_start)
+                if entity is None:
+                    continue
 
-            # Check if entity needs enrichment
-            needs_update = False
-            current_name = entity.executable_name or ""
-            current_cmdline = entity.cmdline or ""
+                # Check if entity needs enrichment
+                needs_update = False
+                current_name = entity.executable_name or ""
+                current_cmdline = entity.cmdline or ""
 
-            # Update executable_name if current is empty/None and we have comm
-            if comm and (not current_name or current_name == "unknown"):
-                entity.executable_name = comm
-                needs_update = True
-
-            # Update cmdline if current is empty/None/same-as-comm and we have better cmdline
-            if cmdline and cmdline != comm:
-                # We have a real cmdline (not just comm)
-                if not current_cmdline or current_cmdline == current_name or current_cmdline == "unknown":
-                    entity.cmdline = cmdline
+                # Update executable_name if current is empty/None and we have comm
+                if comm and (not current_name or current_name == "unknown"):
+                    entity.executable_name = comm
                     needs_update = True
-            elif comm and (not current_cmdline or current_cmdline == "unknown"):
-                # At least use comm as cmdline fallback
-                entity.cmdline = comm
-                needs_update = True
 
-            if needs_update:
-                # Find the key for this entity to mark as updated
-                key = (pid, pid_start)
-                if key in self._entities:
-                    self._updated_entity_keys.add(key)
-                    updated_count += 1
-                else:
-                    # Try to find via bucket lookup
-                    tick_ns = 1_000_000_000 // self._clk_tck
-                    bucket = pid_start // tick_ns
-                    for cand_key in self._bucket_index.get((pid, bucket), []):
-                        if self._entities.get(cand_key) is entity:
-                            self._updated_entity_keys.add(cand_key)
-                            updated_count += 1
-                            break
+                # Update cmdline if current is empty/None/same-as-comm and we have better cmdline
+                if cmdline and cmdline != comm:
+                    # We have a real cmdline (not just comm)
+                    if not current_cmdline or current_cmdline == current_name or current_cmdline == "unknown":
+                        entity.cmdline = cmdline
+                        needs_update = True
+                elif comm and (not current_cmdline or current_cmdline == "unknown"):
+                    # At least use comm as cmdline fallback
+                    entity.cmdline = comm
+                    needs_update = True
 
-        return updated_count
+                if needs_update:
+                    # Find the key for this entity to mark as updated
+                    key = (pid, pid_start)
+                    if key in self._entities:
+                        self._pending.add(key)
+                        updated_count += 1
+                    else:
+                        # Try to find via bucket lookup
+                        tick_ns = 1_000_000_000 // self._clk_tck
+                        bucket = pid_start // tick_ns
+                        for cand_key in self._bucket_index.get((pid, bucket), []):
+                            if self._entities.get(cand_key) is entity:
+                                self._pending.add(cand_key)
+                                updated_count += 1
+                                break
+
+            return updated_count
 
     def get_new_entities(self) -> list[LogicalEntity]:
         """Return all entities that have been added or updated since the last call."""
-        # Include both newly added entities and entities with updated metadata
-        new_entity_keys = (
-            self._entities.keys() - self._reported_entites_keys
-        ) | self._updated_entity_keys  # set union via |
-        new_entities = [self._entities[key] for key in new_entity_keys if key in self._entities]
-        self._reported_entites_keys = set(self._entities.keys())
-        self._updated_entity_keys.clear()  # Reset updated set after reporting
-        return new_entities
+        with self._state_lock:
+            pending, self._pending = self._pending, set()
+            # An EXEC that moves an entity to a new tid drops its old key.
+            return [self._entities[key] for key in pending if key in self._entities]
