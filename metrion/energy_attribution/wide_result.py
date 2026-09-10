@@ -1,7 +1,8 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import polars as pl
 
+from metrion.entity.logical_entity import LogicalEntity
 from metrion.metric import (
     CPU_PKG_PID_DYNAMIC_ENERGY,
     CPU_PKG_PID_IDLE_ENERGY,
@@ -27,6 +28,19 @@ METRIC_TO_COLUMN: dict[str, str] = {
 }
 
 ENERGY_COLUMNS: list[str] = list(METRIC_TO_COLUMN.values())
+
+# Typed, so a cycle that knows no thread writes the same columns as one that knows all.
+_IDENTITY_SCHEMA: dict[str, pl.DataType] = {
+    "native_pid": pl.Int64,
+    "native_thread_id": pl.Int64,
+    "executable_name": pl.String,
+    "cmdline": pl.String,
+    "cgroup_name": pl.String,
+    "user_id": pl.Int64,
+    "group_id": pl.Int64,
+}
+
+IDENTITY_COLUMNS: list[str] = list(_IDENTITY_SCHEMA)
 
 _INDEX_COLUMNS = ["window_start", "window_end", "logical_entity_id"]
 
@@ -70,6 +84,46 @@ def to_wide(frames: Sequence[pl.DataFrame], window_seconds: float) -> pl.DataFra
         .with_columns(pl.col(ENERGY_COLUMNS).fill_null(0.0))
         .select([*_INDEX_COLUMNS, *ENERGY_COLUMNS])
         .sort(_INDEX_COLUMNS)
+    )
+
+
+def identity_of(entity: LogicalEntity) -> dict:
+    """The identity columns of one thread, as denormalize looks them up."""
+    return {
+        "logical_entity_id": entity.id,
+        "native_pid": entity.native_pid,
+        "native_thread_id": entity.native_thread_id,
+        # LogicalEntity keeps an unknown name as "", the result shows it as null like an unknown thread.
+        "executable_name": entity.executable_name or None,
+        "cmdline": entity.cmdline or None,
+        "cgroup_name": entity.resource_group_name,
+        "user_id": entity.user_id,
+        "group_id": entity.group_id,
+    }
+
+
+def denormalize(wide: pl.DataFrame, identities: Mapping[str, dict]) -> pl.DataFrame:
+    """Attach who each row belongs to.
+
+    Parameters
+    ----------
+    wide : pl.DataFrame
+        Result of to_wide.
+    identities : Mapping[str, dict]
+        identity_of per logical_entity_id, the latest version of each thread.
+
+    Notes
+    -----
+    A thread without an identity keeps its energy and gets nulls: energy can be
+    attributed before the thread's entity arrives.
+    """
+    # Only the threads of this result. A frame of every thread seen so far would cost
+    # 0.5 s per cycle at a million threads.
+    known = [identities[thread] for thread in wide["logical_entity_id"].unique() if thread in identities]
+    lookup = pl.DataFrame(known, schema={"logical_entity_id": pl.String, **_IDENTITY_SCHEMA})
+
+    return wide.join(lookup, on="logical_entity_id", how="left", maintain_order="left").select(
+        [*_INDEX_COLUMNS, *IDENTITY_COLUMNS, *ENERGY_COLUMNS]
     )
 
 
