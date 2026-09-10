@@ -68,7 +68,7 @@ class DataSourceRunner(threading.Thread):
         finally:
             if self._late_ticks:
                 logger.warning(
-                    f"DataSourceRunner {self._id}: work took longer than the "
+                    f"DataSourceRunner {type(self._datasource).__name__}: work took longer than the "
                     f"{self._interval}s interval, the schedule was realigned {self._late_ticks} times"
                 )
             self._queue.put(self.SENT_END)
