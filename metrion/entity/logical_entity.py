@@ -1,6 +1,7 @@
 import hashlib
 import math
 import os
+import sys
 from datetime import UTC, datetime
 from typing import override
 
@@ -92,13 +93,13 @@ class LogicalEntity(Entity):
         self._native_parent_thread_id = native_parent_thread_id
         self._native_parent_pid = native_parent_pid
 
-        # Names & image
-        self._executable_name = executable_name.strip() if executable_name else ""
-        self._cmdline = cmdline.strip() if cmdline else ""
+        # Names & image. The threads of a process share these strings; interned, they hold one copy.
+        self._executable_name = sys.intern(executable_name.strip()) if executable_name else ""
+        self._cmdline = sys.intern(cmdline.strip()) if cmdline else ""
 
         # Resource grouping / "container"
         self._resource_group_id = resource_group_id
-        self._resource_group_name = resource_group_name.strip() if resource_group_name else None
+        self._resource_group_name = sys.intern(resource_group_name.strip()) if resource_group_name else None
 
         # Timing
         self._start_time = start_time
@@ -241,7 +242,7 @@ class LogicalEntity(Entity):
 
     @executable_name.setter
     def executable_name(self, value: str):
-        self._executable_name = value
+        self._executable_name = sys.intern(value) if value else value
 
     @property
     def cmdline(self) -> str | None:
@@ -250,7 +251,7 @@ class LogicalEntity(Entity):
 
     @cmdline.setter
     def cmdline(self, value: str | None):
-        self._cmdline = value
+        self._cmdline = sys.intern(value) if value else value
 
     # Resource grouping
     @property

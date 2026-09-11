@@ -1,6 +1,8 @@
 import queue
 import threading
+from collections import deque
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import polars as pl
@@ -10,7 +12,7 @@ from metrion.util import write_temp_ipc
 
 ler = pytest.importorskip("metrion.entity.logical_entity_registry", reason="needs bcc")
 
-NEW, EXEC = 1, 2
+NEW, EXEC, EXIT = 1, 2, 4
 START_NS = 8_120_000_000_000
 
 
@@ -19,7 +21,7 @@ def registry(monkeypatch):
     """__init__ scans /proc and starts a BPF process, so the state it sets up is built here."""
     monkeypatch.setattr(ler, "build_cgroup_id_map", dict)
     registry = object.__new__(ler.LogicalEntityRegistry)
-    registry._entities, registry._entities_by_pid, registry._bucket_index = {}, {}, {}
+    registry._entities, registry._starts_by_tid, registry._exited = {}, {}, deque()
     registry._pending = set()
     registry._state_lock = threading.RLock()
     registry._queue = queue.Queue()
@@ -28,6 +30,7 @@ def registry(monkeypatch):
     registry._clk_tck = 100
     registry._boot_time_dt = datetime(2026, 9, 10, tzinfo=UTC)
     registry._cgroup_id_map = {}
+    registry._no_match_count = 0
     return registry
 
 
@@ -103,3 +106,36 @@ def test_the_cgroup_map_is_walked_only_for_an_id_it_does_not_know(registry, monk
     names = [registry._entities[(tid, START_NS + tid)].resource_group_name for tid in range(1000, 1004)]
     assert names == ["/system.slice/train.service"] * 2 + ["unknown"] * 2
     assert walks == 2, "one walk for each id the map did not know, none for the ones it did"
+
+
+def test_a_start_cut_to_clock_ticks_still_finds_the_thread(registry):
+    """NVML and ProcNuma read the start from /proc in 10-ms ticks; the registry keeps it from BPF in ns."""
+    start_ns = START_NS + 4_500_000
+    _deliver(registry, [dict(_event(NEW, 4712, "python3", "python3 train.py"), tid_start_time=start_ns)])
+    registry.update()
+
+    assert registry.get_logical_entity(4712, START_NS) is not None, "4.5 ms off: the same thread"
+    assert registry.get_logical_entity(4712, start_ns + 70_000_000) is None, "70 ms off: another thread"
+
+
+def test_an_exited_thread_is_forgotten_after_the_grace_period(registry, monkeypatch):
+    """Its late measurements still find it until then, and a new thread that reuses its tid stays."""
+    now = [0.0]
+    monkeypatch.setattr(ler, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    first_start, second_start = START_NS + 4711, START_NS + 9_000_000_000
+
+    _deliver(registry, [_event(NEW, 4711, "python3", "python3 train.py")])
+    # A thread from before metrion started exits with start 0: BPF never saw it being created.
+    _deliver(registry, [dict(_event(EXIT, 4711, "python3", "python3 train.py"), tid_start_time=0)])
+    registry.update()
+    _deliver(registry, [dict(_event(NEW, 4711, "cron", "/usr/sbin/cron"), tid_start_time=second_start)])
+    registry.update()
+
+    registry.get_new_entities()
+    assert registry.get_logical_entity(4711, first_start) is not None, "still inside the grace period"
+
+    now[0] = registry._EXIT_GRACE_S + 1
+    registry.get_new_entities()
+
+    assert registry.get_logical_entity(4711, first_start) is None
+    assert registry.get_logical_entity(4711, second_start).executable_name == "cron"

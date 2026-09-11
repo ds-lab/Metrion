@@ -4,6 +4,8 @@ import multiprocessing as mp
 import os
 import queue as q
 import threading
+import time
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, override
@@ -77,6 +79,10 @@ class LogicalEntityRegistry:
     EVENT_TYPE_DATA_ONLY = 0
     EVENT_TYPE_WITH_METADATA = 1
 
+    # An exited thread's last measurements are looked up until ebpf_flush plus the slowest source
+    # interval after the exit (6 s with the shipped config), longer when the queues back up.
+    _EXIT_GRACE_S = 60.0
+
     def __new__(cls, *args, **kwargs):
         # Thread-safe singleton construction
         if cls._instance is None:
@@ -92,8 +98,9 @@ class LogicalEntityRegistry:
         self._initialized = True
 
         self._entities: dict[tuple[int, int], LogicalEntity] = {}  # (tid, start_time_ns) -> Entity
-        self._entities_by_pid: dict[int, list[LogicalEntity]] = {}  # tid -> [Entity]
-        self._bucket_index: dict[tuple[int, int], list[tuple[int, int]]] = {}  # (pid, bucket) -> [tid, start_time_ns]
+        self._starts_by_tid: dict[int, list[int]] = {}  # tid -> start_time_ns of each entity with it, oldest first
+        # (processed at, key (tid, start_time_ns)) of exited threads, oldest first; dropped after _EXIT_GRACE_S
+        self._exited: deque[tuple[float, tuple[int, int]]] = deque()
         # Keys added or changed since the last get_new_entities(); the /proc scan below fills it too.
         self._pending: set[tuple[int, int]] = set()
         # The data source threads and the orchestrator all call into this one registry.
@@ -507,36 +514,10 @@ class LogicalEntityRegistry:
 
             if entity is not None:
                 # Migrate entity to new tid key
-                # 1. Remove old key
-                del self._entities[old_key]
-
-                # 2. Update entity's native_thread_id and regenerate thread_id
+                self._drop_entity(old_key)
                 entity._native_thread_id = tid
                 entity._thread_id = entity._generate_thread_id()
-
-                # 3. Store under new key
-                self._entities[key] = entity
-
-                # 4. Update secondary indices
-                if tid not in self._entities_by_pid:
-                    self._entities_by_pid[tid] = []
-                self._entities_by_pid[tid].append(entity)
-
-                # 5. Update bucket index
-                bucket = tid_start_ns // (1_000_000_000 // self._clk_tck)
-                if (tid, bucket) not in self._bucket_index:
-                    self._bucket_index[(tid, bucket)] = []
-                self._bucket_index[(tid, bucket)].append(key)
-
-                # 6. Clean up old indices
-                if old_tid in self._entities_by_pid:
-                    if entity in self._entities_by_pid[old_tid]:
-                        self._entities_by_pid[old_tid].remove(entity)
-
-                old_bucket = tid_start_ns // (1_000_000_000 // self._clk_tck)
-                if (old_tid, old_bucket) in self._bucket_index:
-                    if old_key in self._bucket_index[(old_tid, old_bucket)]:
-                        self._bucket_index[(old_tid, old_bucket)].remove(old_key)
+                self._store_entity(entity, tid, tid_start_ns)
 
         # If still not found, create new entity
         if entity is None:
@@ -587,7 +568,11 @@ class LogicalEntityRegistry:
             self._pending.add(key)
 
     def _handle_exit(self, row):
-        pass
+        # Only one thread can hold a tid at a time, so every entity with this tid is dead now. That also
+        # covers the threads from the /proc scan, whose EXIT carries start 0 because BPF never saw them start.
+        now = time.monotonic()
+        for start_ns in self._starts_by_tid.get(row["tid"], []):
+            self._exited.append((now, (row["tid"], start_ns)))
 
     def _get_cmdline(self, pid: int) -> str:
         try:
@@ -630,20 +615,46 @@ class LogicalEntityRegistry:
         key = (tid, start_ns)
         self._entities[key] = entity
         self._pending.add(key)
-        if tid not in self._entities_by_pid:
-            self._entities_by_pid[tid] = []
-        self._entities_by_pid[tid].append(entity)
+        starts = self._starts_by_tid.setdefault(tid, [])
+        # The /proc scan stores every main thread twice, as process and as thread.
+        if start_ns not in starts:
+            starts.append(start_ns)
 
-        # Add to bucket index
-        bucket = start_ns // (1_000_000_000 // self._clk_tck)
-        if (tid, bucket) not in self._bucket_index:
-            self._bucket_index[(tid, bucket)] = []
-        self._bucket_index[(tid, bucket)].append(key)
+    def _drop_entity(self, key: tuple[int, int]) -> None:
+        tid, start_ns = key
+        self._entities.pop(key, None)
+        starts = self._starts_by_tid.get(tid, [])
+        if start_ns in starts:
+            starts.remove(start_ns)
+        if not starts:
+            self._starts_by_tid.pop(tid, None)
+
+    def _forget_exited(self) -> None:
+        """Drop the threads that exited more than _EXIT_GRACE_S ago."""
+        horizon = time.monotonic() - self._EXIT_GRACE_S
+        while self._exited and self._exited[0][0] < horizon:
+            _, key = self._exited.popleft()
+            self._drop_entity(key)
 
     def _get_latest_entity(self, tid: int) -> LogicalEntity | None:
-        if tid not in self._entities_by_pid:
+        starts = self._starts_by_tid.get(tid)
+        if not starts:
             return None
-        return self._entities_by_pid[tid][-1]
+        return self._entities[(tid, starts[-1])]
+
+    def _find_key(self, pid: int, start_ns: int) -> tuple[int, int] | None:
+        """Key of this thread: the exact start, else the nearest start of the pid within six clock ticks."""
+        if (pid, start_ns) in self._entities:
+            return (pid, start_ns)
+        tolerance_ns = 6 * (1_000_000_000 // self._clk_tck)
+        # serach for 190
+        # 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360, 380, 400
+        # -90, -70, -50, -30, -10, 10,   30,  50,  70,  90, 110, 130, 150, 170, 190, 210
+        # 
+        nearest = min(self._starts_by_tid.get(pid, []), key=lambda start: abs(start - start_ns), default=None)
+        if nearest is None or abs(nearest - start_ns) > tolerance_ns:
+            return None
+        return (pid, nearest)
 
     def _ns_to_datetime(self, ns: int) -> datetime:
         # ns is since boot
@@ -665,8 +676,8 @@ class LogicalEntityRegistry:
 
         Lookup strategy:
         1) Exact: (pid, start_ns)
-        2) Fuzzy: search bucket ±2 ticks and pick nearest valid key
-        3) Fallback: latest entity for pid (best effort)
+        2) Fuzzy: the nearest start of that pid within six clock ticks
+        A start_time before boot falls back to the latest entity for pid.
         """
         with self._state_lock:
             # ---- normalize start_time -> ns since boot ----
@@ -686,42 +697,11 @@ class LogicalEntityRegistry:
                 logger.warning(f"Invalid start_time {start_time} for pid {pid}, using latest entity")
                 return self._get_latest_entity(pid)
 
-            # ---- exact lookup ----
-            key = (pid, start_ns)
-            ent = self._entities.get(key)
-            if ent is not None:
-                return ent
-
-            # ---- fuzzy lookup using tick buckets ----
-            tick_ns = 1_000_000_000 // self._clk_tck
-            bucket = start_ns // tick_ns
-            tolerance = 6  # buckets
-
-            best_key: tuple[int, int] | None = None
-            best_delta: int | None = None
-
-            for b in range(bucket - tolerance, bucket + tolerance + 1):
-                for cand_key in self._bucket_index.get((pid, b), []):
-                    # cand_key is (pid, cand_start_ns)
-                    cand_start_ns = cand_key[1]
-                    delta = abs(cand_start_ns - start_ns)
-
-                    # Optional: enforce that it's within the tolerance window in ns
-                    if delta > tolerance * tick_ns:
-                        continue
-
-                    if best_delta is None or delta < best_delta:
-                        best_delta = delta
-                        best_key = cand_key
-
-            if best_key is not None:
-                ent = self._entities.get(best_key)
-                if ent is not None:
-                    return ent
-
-            # no match found
-            self._no_match_count += 1
-            return None
+            key = self._find_key(pid, start_ns)
+            if key is None:
+                self._no_match_count += 1
+                return None
+            return self._entities[key]
 
     def get_all_entities_df(self) -> pl.DataFrame:
         """Return all entities as a DataFrame."""
@@ -894,9 +874,10 @@ class LogicalEntityRegistry:
                     continue
 
                 # Find the entity
-                entity = self.get_logical_entity(pid=pid, start_time=pid_start)
-                if entity is None:
+                key = self._find_key(pid, pid_start)
+                if key is None:
                     continue
+                entity = self._entities[key]
 
                 # Check if entity needs enrichment
                 needs_update = False
@@ -920,26 +901,20 @@ class LogicalEntityRegistry:
                     needs_update = True
 
                 if needs_update:
-                    # Find the key for this entity to mark as updated
-                    key = (pid, pid_start)
-                    if key in self._entities:
-                        self._pending.add(key)
-                        updated_count += 1
-                    else:
-                        # Try to find via bucket lookup
-                        tick_ns = 1_000_000_000 // self._clk_tck
-                        bucket = pid_start // tick_ns
-                        for cand_key in self._bucket_index.get((pid, bucket), []):
-                            if self._entities.get(cand_key) is entity:
-                                self._pending.add(cand_key)
-                                updated_count += 1
-                                break
+                    self._pending.add(key)
+                    updated_count += 1
 
             return updated_count
 
     def get_new_entities(self) -> list[LogicalEntity]:
-        """Return all entities that have been added or updated since the last call."""
+        """Return all entities that have been added or updated since the last call.
+
+        Afterwards drops the threads that exited more than _EXIT_GRACE_S ago, so every thread is
+        reported before it is forgotten.
+        """
         with self._state_lock:
             pending, self._pending = self._pending, set()
             # An EXEC that moves an entity to a new tid drops its old key.
-            return [self._entities[key] for key in pending if key in self._entities]
+            new_entities = [self._entities[key] for key in pending if key in self._entities]
+            self._forget_exited()
+            return new_entities
