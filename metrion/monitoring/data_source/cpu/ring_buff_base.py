@@ -18,6 +18,11 @@ from metrion.util import IpcAsyncWriter
 # produce a warning every few milliseconds.
 _DROP_WARNING_INTERVAL_S = 10.0
 
+# Pause between two drains of the ring buffer. Blocking until data arrives instead wakes the
+# process for the first event after every drain, and for sched_switch the process going back
+# to sleep is such an event, so it would never stay asleep.
+_POLL_INTERVAL_S = 0.005
+
 
 @dataclass(slots=True)
 class RingBufferConfig:
@@ -145,8 +150,8 @@ class EbpfRingBufferProcess(mp.Process, ABC):
 
     def _poll_loop(self) -> None:
         assert self._bpf is not None
-        while not self._stop_event.is_set():
-            self._bpf.ring_buffer_poll(5)
+        while not self._stop_event.wait(_POLL_INTERVAL_S):
+            self._bpf.ring_buffer_consume()
             if self._flush_requested:
                 self._flush_requested = False
                 self._flush_to_queue()
