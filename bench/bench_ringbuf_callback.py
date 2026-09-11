@@ -99,7 +99,7 @@ def main() -> None:
     bench.run("current: one Python callback per event", current)
     bench.run("cheap fix: hoist time.time() out of the loop", without_time_check)
     bench.run(f"batched: one call per {args.batch} events", batched)
-    bench.run(f"batched + 136B data-only event", batched_small_event)
+    bench.run("batched + 136B data-only event", batched_small_event)
     bench.report()
 
     per_event_us = bench.results[0].best / n * 1e6
@@ -124,7 +124,7 @@ def main() -> None:
                 f"at {rate:>8,}/s: {mib_s:6.1f} MiB/s, buffer full in {fill_ms:6.1f} ms"
             )
     print()
-    print("The poll loop calls ring_buffer_poll(5), i.e. it drains at most every 5 ms plus")
+    print("The poll loop drains the buffer every 5 ms (_POLL_INTERVAL_S), plus")
     print("however long the previous drain took. Compare that with 'buffer full in' above:")
     print("if the fill time is close to or below the poll period, events are dropped.")
 
