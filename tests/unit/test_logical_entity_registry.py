@@ -22,6 +22,7 @@ def registry(monkeypatch):
     monkeypatch.setattr(ler, "build_cgroup_id_map", dict)
     registry = object.__new__(ler.LogicalEntityRegistry)
     registry._entities, registry._starts_by_tid, registry._exited = {}, {}, deque()
+    registry._forgotten = []
     registry._pending = set()
     registry._state_lock = threading.RLock()
     registry._queue = queue.Queue()
@@ -132,10 +133,13 @@ def test_an_exited_thread_is_forgotten_after_the_grace_period(registry, monkeypa
     registry.update()
 
     registry.get_new_entities()
-    assert registry.get_logical_entity(4711, first_start) is not None, "still inside the grace period"
+    first = registry.get_logical_entity(4711, first_start)
+    assert first is not None, "still inside the grace period"
+    assert registry.get_forgotten_ids() == []
 
     now[0] = registry._EXIT_GRACE_S + 1
     registry.get_new_entities()
 
     assert registry.get_logical_entity(4711, first_start) is None
     assert registry.get_logical_entity(4711, second_start).executable_name == "cron"
+    assert registry.get_forgotten_ids() == [first.id], "the saver drops its identity in turn"

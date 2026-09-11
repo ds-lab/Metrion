@@ -590,3 +590,18 @@ energy_model:
             assert isinstance(metrics, list)
             assert "CPU_SOCKET_PKG_ENERGY" in metrics
             assert "CPU_CORE_PID_TIME" in metrics
+
+
+class TestLiveAttributionConfig:
+    def test_a_window_shorter_than_the_slowest_energy_source_is_rejected(self):
+        """Such windows can hold no energy sample and would report 0 J although the device ran."""
+        with pytest.raises(ValidationError, match="window"):
+            AgentConfig(live_attribution={"enabled": True, "window": 2.0}, timing={"sources": {"nvml": 5.0}})
+
+    def test_a_cutoff_shorter_than_the_waiting_steps_is_rejected(self):
+        """Measurements would arrive after their interval was attributed and be dropped as late."""
+        # Default timing: ebpf_flush 1 + 2 x storage_flush 2 + slowest source 5 + cycle 5 = 15 s
+        with pytest.raises(ValidationError, match="cutoff"):
+            AgentConfig(live_attribution={"enabled": True, "cutoff": 10.0})
+
+        assert AgentConfig(live_attribution={"cutoff": 10.0}).live_attribution.cutoff == 10.0, "only checked when on"

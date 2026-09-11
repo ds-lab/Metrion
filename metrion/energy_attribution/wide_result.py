@@ -127,6 +127,13 @@ def denormalize(wide: pl.DataFrame, identities: Mapping[str, dict]) -> pl.DataFr
     )
 
 
+def add_up(wides: Sequence[pl.DataFrame]) -> pl.DataFrame:
+    """Sum the rows of each window and thread, e.g. of a window whose components came in different cycles."""
+    return (
+        pl.concat(wides, how="vertical").group_by(_INDEX_COLUMNS).agg(pl.col(ENERGY_COLUMNS).sum()).sort(_INDEX_COLUMNS)
+    )
+
+
 def _spread_over_windows(long: pl.DataFrame, window_seconds: float) -> pl.DataFrame:
     """Split each row across the windows it overlaps, its value by the overlap share."""
     window_us = int(window_seconds * 1_000_000)

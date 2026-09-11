@@ -91,7 +91,7 @@ The framework is designed to be extensible: the data model and attribution logic
 	sudo "$PYTHON_BIN" metrion/orchestrator.py monitor
 	sudo "$PYTHON_BIN" metrion/orchestrator.py monitor --timeout 5
 	```
-3. METRION writes measurements to a timestamped SQLite database in the project root (e.g., `monitor_2025_12_04_08_18_42.db`) and streams logs to stdout. Use `Ctrl+C` to stop the process gracefully.
+3. METRION writes measurements to a timestamped DuckDB database in the project root (e.g., `monitor_2025_12_04_08_18_42.db`) and streams logs to stdout. Use `Ctrl+C` to stop the process gracefully.
 
 ### CLI Options
 | Option | Short | Description |
@@ -247,7 +247,6 @@ sudo "$PYTHON_BIN" metrion/energy_attribution/energy_attribution_cli.py \
 | `--export-summary` | Export per-process summary to CSV and JSON |
 | `--export-raw-data` | Export raw filtered interval data to CSV per device (`raw_cpu_*.csv`, `raw_dram_*.csv`, `raw_gpu_*.csv`) |
 | `--force` | Force recreation of materialised tables when queries change |
-| `--type` | Database type: `duckdb` (default) or `sqlite` |
 
 - The script expects timestamps in UTC as stored in the database.
 - Generated HTML reports and exported files are written to `metrion/energy_attribution/output/` by default.

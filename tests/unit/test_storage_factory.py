@@ -4,7 +4,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from metrion.config_reader.config_schema import StorageConfig
+from metrion.config_reader.config_schema import LiveAttributionConfig, StorageConfig
 from metrion.data_storage.data_storage_factory import DataStorageFactory
 from metrion.data_storage.parquet_data_storage import ParquetDataStorage
 
@@ -83,14 +83,9 @@ def test_the_saver_writes_parquet_when_the_config_says_so(tmp_path):
     config = StorageConfig(type="parquet", path=str(tmp_path / "run"))
 
     ctx = mp.get_context("spawn")
-    saver = dc.DataSaver.__new__(dc.DataSaver)
-    saver._entities_queue = ctx.Queue()
-    saver._measurements_queue = ctx.Queue()
-    saver._stop_event = ctx.Event()
-    saver._received_sent_e = False
-    saver._received_sent_m = False
-    saver._storage_type = config.type
-    saver._storage_path = config.get_target()
+    saver = dc.DataSaver(
+        ctx.Queue(), ctx.Queue(), ctx.Event(), config.type, config.get_target(), LiveAttributionConfig(), []
+    )
 
     saver._entities_queue.put([Host("test-host", HostType.SERVER, "Linux")])
     saver._entities_queue.put(dc.DataCollector.SENT_E)

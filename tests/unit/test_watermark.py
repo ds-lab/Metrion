@@ -394,3 +394,21 @@ def test_the_buffer_stores_the_id_columns_as_categorical():
     buffered = model._measurements_df
     assert all(buffered.schema[c] == pl.Categorical for c in model._BUFFER_CATEGORICALS)
     assert rows.estimated_size() / buffered.estimated_size() > 2.5
+
+
+def test_a_dried_up_energy_stream_does_not_hold_back_the_result_stream():
+    """Otherwise a GPU whose NVML stopped would keep every later window from being written."""
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0)
+    model._watermarks = {CPU_STREAMS[0]: _t(100), GPU_STREAMS[0]: _t(10)}
+    model._processed_until = {"cpu": _t(95), "gpu": _t(9)}
+
+    assert model.attributed_until() == _t(95)
+
+
+def test_energy_that_is_not_attributed_yet_holds_back_the_result_stream():
+    """Its rows for the earlier windows are still to come."""
+    model = DyncamicEnergyAttributionModel(cutoff=0.0, stall_after=30.0)
+    model._watermarks = {CPU_STREAMS[0]: _t(100), GPU_STREAMS[0]: _t(99)}
+    model._processed_until = {"cpu": _t(95)}
+
+    assert model.attributed_until() is None

@@ -101,6 +101,8 @@ class LogicalEntityRegistry:
         self._starts_by_tid: dict[int, list[int]] = {}  # tid -> start_time_ns of each entity with it, oldest first
         # (processed at, key (tid, start_time_ns)) of exited threads, oldest first; dropped after _EXIT_GRACE_S
         self._exited: deque[tuple[float, tuple[int, int]]] = deque()
+        # ids of the dropped entities, handed out by get_forgotten_ids
+        self._forgotten: list[str] = []
         # Keys added or changed since the last get_new_entities(); the /proc scan below fills it too.
         self._pending: set[tuple[int, int]] = set()
         # The data source threads and the orchestrator all call into this one registry.
@@ -620,21 +622,24 @@ class LogicalEntityRegistry:
         if start_ns not in starts:
             starts.append(start_ns)
 
-    def _drop_entity(self, key: tuple[int, int]) -> None:
+    def _drop_entity(self, key: tuple[int, int]) -> LogicalEntity | None:
         tid, start_ns = key
-        self._entities.pop(key, None)
+        entity = self._entities.pop(key, None)
         starts = self._starts_by_tid.get(tid, [])
         if start_ns in starts:
             starts.remove(start_ns)
         if not starts:
             self._starts_by_tid.pop(tid, None)
+        return entity
 
     def _forget_exited(self) -> None:
         """Drop the threads that exited more than _EXIT_GRACE_S ago."""
         horizon = time.monotonic() - self._EXIT_GRACE_S
         while self._exited and self._exited[0][0] < horizon:
             _, key = self._exited.popleft()
-            self._drop_entity(key)
+            entity = self._drop_entity(key)
+            if entity is not None:
+                self._forgotten.append(entity.id)
 
     def _get_latest_entity(self, tid: int) -> LogicalEntity | None:
         starts = self._starts_by_tid.get(tid)
@@ -918,3 +923,9 @@ class LogicalEntityRegistry:
             new_entities = [self._entities[key] for key in pending if key in self._entities]
             self._forget_exited()
             return new_entities
+
+    def get_forgotten_ids(self) -> list[str]:
+        """Return the ids of the entities dropped since the last call."""
+        with self._state_lock:
+            forgotten, self._forgotten = self._forgotten, []
+            return forgotten
