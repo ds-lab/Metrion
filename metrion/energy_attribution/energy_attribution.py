@@ -1716,6 +1716,29 @@ class DyncamicEnergyAttributionModel:
         anchors = [ts for (m, _), (ts, _) in self._last_energy_samples.items() if m == metric]
         return min(anchors) if anchors else None
 
+    def attributed_until(self) -> dt.datetime | None:
+        """Time up to which every component whose energy still arrives has been attributed.
+
+        A window of the result stream is complete once this has passed its end. A component whose
+        energy stream dried up (stall_after) does not hold it back, the same way it no longer holds
+        back its own bound; should it come back, its late intervals add a second row to windows
+        already written. Returns None while some component's energy arrives but nothing of it has
+        been attributed yet.
+        """
+        if not self._watermarks:
+            return None
+        stalled_before = max(self._watermarks.values()) - dt.timedelta(seconds=self._stall_after)
+
+        edges = []
+        for component, metric in self._COMPONENT_ENERGY.items():
+            mark = self._watermarks.get(metric)
+            if mark is None or mark < stalled_before:
+                continue
+            if component not in self._processed_until:
+                return None
+            edges.append(self._processed_until[component])
+        return min(edges, default=None)
+
     def attribute_energy(
         self, force: bool = False
     ) -> tuple[

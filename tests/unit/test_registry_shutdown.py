@@ -1,4 +1,5 @@
 import multiprocessing as mp
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ def make_registry():
 
         def __init__(self, producer_finished=False):
             self._queue = mp.Queue()
+            self._state_lock = threading.RLock()
             self._config = MagicMock()
             self._config.sentinel = SENTINEL
             self._producer_finished = producer_finished

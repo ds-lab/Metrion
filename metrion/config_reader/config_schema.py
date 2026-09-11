@@ -6,6 +6,7 @@ This module defines the configuration structure for:
 - Timing: the collection cycle and the interval of every data source
 - Energy model configuration (granularity, components)
 - Component configuration (CPU, GPU, DRAM, Network) with include/exclude modes
+- Live attribution while the agent runs
 
 Every section rejects unknown keys, so a misspelled option fails at startup instead of
 silently leaving the default in place.
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from loguru import logger
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 # ─────────────────────────────
 # Power configuration
@@ -351,6 +352,20 @@ class EnergyModelConfig(BaseModel):
 
 
 # ─────────────────────────────
+# Live attribution section
+# ─────────────────────────────
+class LiveAttributionConfig(BaseModel):
+    """Attribute energy while the agent runs and write one row per time window and thread."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=False, description="Attribute during the run, not only afterwards")
+    cutoff: float = Field(default=30.0, gt=0, description="How late a measurement may arrive and still count")
+    window: float = Field(default=10.0, gt=0, description="Length of one row of the result stream")
+    path: str = Field(default="./energy", description="Directory of the result stream")
+
+
+# ─────────────────────────────
 # Root configuration
 # ─────────────────────────────
 class AgentConfig(BaseModel):
@@ -362,6 +377,33 @@ class AgentConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     energy_model: EnergyModelConfig = Field(default_factory=EnergyModelConfig)
+    live_attribution: LiveAttributionConfig = Field(default_factory=LiveAttributionConfig)
+
+    @model_validator(mode="after")
+    def check_live_attribution_against_timing(self) -> "AgentConfig":
+        """Reject a window or cutoff that the timing section cannot serve."""
+        live, timing = self.live_attribution, self.timing
+        if not live.enabled:
+            return self
+
+        # Only energy streams produce result rows; a shorter window can hold no sample of them.
+        slowest_energy = max(timing.sources.rapl, timing.sources.nvml)
+        if live.window < slowest_energy:
+            raise ValueError(
+                f"live_attribution.window ({live.window} s) is shorter than the slowest energy source "
+                f"({slowest_energy} s); windows without an energy sample would report 0 J"
+            )
+
+        # The waiting steps from the kernel to the saver with empty queues; under load it only gets longer.
+        latency = (
+            timing.ebpf_flush + 2 * timing.storage_flush + max(timing.sources.model_dump().values()) + timing.cycle
+        )
+        if live.cutoff < latency:
+            raise ValueError(
+                f"live_attribution.cutoff ({live.cutoff} s) is shorter than the waiting steps in timing "
+                f"({latency} s); measurements would arrive after their interval was attributed"
+            )
+        return self
 
     @classmethod
     def from_yaml_file(cls, path: str | Path) -> "AgentConfig":

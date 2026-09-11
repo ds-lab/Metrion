@@ -80,7 +80,8 @@ class ConfigReader:
     @classmethod
     def _timestamp_storage_path(cls, config: AgentConfig) -> AgentConfig:
         """
-        Append a timestamp to the storage path, so every run writes to its own place.
+        Append a timestamp to the storage path and the live attribution path, so every run writes
+        to its own place.
 
         Works for both storage types: `./monitor.db` becomes `./monitor_<timestamp>.db`,
         the directory `runs/prod` becomes `runs/prod_<timestamp>`.
@@ -93,11 +94,12 @@ class ConfigReader:
         Returns
         -------
         AgentConfig
-            The same object, with storage.path rewritten.
+            The same object, with both paths rewritten.
         """
-        original_path = Path(config.storage.path)
         timestamp = datetime.now(UTC).strftime("_%Y_%m_%d_%H_%M_%S")
-        config.storage.path = str(original_path.with_stem(original_path.stem + timestamp))
+        for section in (config.storage, config.live_attribution):
+            original_path = Path(section.path)
+            section.path = str(original_path.with_stem(original_path.stem + timestamp))
 
         return config
 

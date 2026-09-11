@@ -9,6 +9,7 @@ from metrion.config_reader.config_schema import (
     AgentConfig,
     ComponentConfig,
     EnergyModelConfig,
+    LiveAttributionConfig,
     SourceIntervals,
     StorageConfig,
     SubcomponentPowerConfig,
@@ -25,4 +26,5 @@ __all__ = [
     "EnergyModelConfig",
     "ComponentConfig",
     "SubcomponentPowerConfig",
+    "LiveAttributionConfig",
 ]

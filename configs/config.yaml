@@ -63,6 +63,22 @@ timing:
     # Socket events, from which per-process network traffic is derived.
     tcp_monitor: 5.0
 
+# Attribute energy while the agent runs and write one row per time window and thread, with the
+# thread's name, cmdline and cgroup, into its own Parquet directory. Off, the attribution runs
+# afterwards with `metrion analyze`.
+live_attribution:
+  enabled: false
+  # How late a measurement may arrive and still count, and so how long a window waits before it
+  # is written. Must cover the waiting steps in timing (ebpf_flush + 2 x storage_flush + the
+  # slowest source + cycle), otherwise the agent refuses to start.
+  cutoff: 30
+  # Length of one row of the result stream. At least the slowest energy source (rapl, nvml);
+  # longer windows split fewer energy intervals and are more exact.
+  window: 10
+  # A relative path is resolved against the repository root and gets the run's timestamp, like
+  # storage.path.
+  path: ./energy
+
 # What is measured. One entry per hardware component; valid names are cpu, gpu, dram, network
 # and host.
 energy_model:

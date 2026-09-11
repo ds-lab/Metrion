@@ -3,7 +3,15 @@ import datetime as dt
 import polars as pl
 import pytest
 
-from metrion.energy_attribution.wide_result import ENERGY_COLUMNS, METRIC_TO_COLUMN, to_wide
+from metrion.energy_attribution.wide_result import (
+    ENERGY_COLUMNS,
+    IDENTITY_COLUMNS,
+    METRIC_TO_COLUMN,
+    denormalize,
+    identity_of,
+    to_wide,
+)
+from metrion.entity.logical_entity import LogicalEntity
 
 T0 = dt.datetime(2026, 1, 1)
 WINDOW = 5.0
@@ -19,6 +27,25 @@ def _long(metric, value, start_s, end_s, thread="t1", physical="pkg_0"):
             "start_ts": [T0 + dt.timedelta(seconds=start_s)],
             "end_ts": [T0 + dt.timedelta(seconds=end_s)],
         }
+    )
+
+
+def _thread():
+    t = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    return LogicalEntity(
+        native_thread_id=1234,
+        native_pid=1234,
+        native_parent_pid=1,
+        native_parent_thread_id=1,
+        executable_name="python3",
+        cmdline="/usr/bin/python3 train.py",
+        start_time=t,
+        pid_start_time=t,
+        parent_tid_start_time=t,
+        parent_pid_start_time=t,
+        resource_group_name="/system.slice/train.service",
+        user_id=1000,
+        group_id=1000,
     )
 
 
@@ -92,3 +119,38 @@ def test_threads_stay_apart():
     frames = [_long(metric, 1.0, 0, 1, thread="t1"), _long(metric, 2.0, 0, 1, thread="t2")]
 
     assert to_wide(frames, WINDOW).height == 2
+
+
+def test_a_thread_gets_its_identity():
+    thread = _thread()
+    wide = to_wide([_long("CPU_PKG_PID_TOTAL_ENERGY", 5.0, 0, 1, thread=thread.id)], WINDOW)
+
+    row = denormalize(wide, {thread.id: identity_of(thread)}).row(0, named=True)
+
+    assert (row["native_pid"], row["executable_name"]) == (1234, "python3")
+    assert row["cgroup_name"] == "/system.slice/train.service"
+    assert row["cpu_total_j"] == pytest.approx(5.0)
+
+
+def test_a_thread_without_identity_keeps_its_energy():
+    """Energy can be attributed before the thread's entity arrives; the row must not vanish."""
+    wide = to_wide([_long("CPU_PKG_PID_TOTAL_ENERGY", 5.0, 0, 1)], WINDOW)
+
+    out = denormalize(wide, {})
+
+    assert out.height == 1
+    assert out["native_pid"][0] is None
+    assert out["cpu_total_j"][0] == pytest.approx(5.0)
+
+
+def test_the_schema_does_not_depend_on_what_is_known():
+    """Each cycle writes its own Parquet file, and they are only readable as one if their types agree."""
+    thread = _thread()
+    wide = to_wide([_long("CPU_PKG_PID_TOTAL_ENERGY", 5.0, 0, 1, thread=thread.id)], WINDOW)
+
+    known = denormalize(wide, {thread.id: identity_of(thread)})
+    unknown = denormalize(wide, {})
+    empty = denormalize(to_wide([], WINDOW), {})
+
+    assert known.schema == unknown.schema == empty.schema
+    assert known.columns == ["window_start", "window_end", "logical_entity_id", *IDENTITY_COLUMNS, *ENERGY_COLUMNS]

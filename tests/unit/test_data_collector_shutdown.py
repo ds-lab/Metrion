@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from metrion.config_reader import LiveAttributionConfig
 from metrion.queue_util import close_and_join_feeder
 
 dc = pytest.importorskip("metrion.data_collector", reason="needs bcc")
@@ -23,6 +24,8 @@ def saver():
     instance._received_sent_e = False
     instance._received_sent_m = False
     instance._data_storage = MagicMock()
+    instance._live = LiveAttributionConfig()
+    instance._energy_writer = None
     return instance
 
 

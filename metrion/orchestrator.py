@@ -78,8 +78,9 @@ class Orchestrator:
         """
         self.read_config(self._config_path)
         self.start_logical_entity_registry()
-        self.create_data_collector()
+        # The data collector hands the hardware to the attribution model, so it is detected first.
         self.create_physical_entities()
+        self.create_data_collector()
         self.save_physical_entities()
         self.create_entity_monitors()
         self.start_monitoring(timeout_minutes=timeout_minutes)
@@ -168,12 +169,18 @@ class Orchestrator:
         Create the data collector using the configured storage strategy and data storage.
         """
         assert self._config is not None, "Config must be loaded before creating data collector."
+        assert self._entities, "Physical entities must be created before the data collector."
         storage = self._config.storage
+        live = self._config.live_attribution
+        base_path = Path(__file__).parent.parent
 
         self._data_collector = DataCollector(
             storage_type=storage.type,
-            storage_path=storage.get_target(Path(__file__).parent.parent),
+            storage_path=storage.get_target(base_path),
             flush_interval=self._config.timing.storage_flush,
+            # A relative path is resolved against the repository root, like storage.path.
+            live_config=live.model_copy(update={"path": str(base_path / live.path)}),
+            hardware=[entity for entities in self._entities.values() for entity in entities],
         )
 
     def create_physical_entities(self) -> None:
@@ -315,6 +322,7 @@ class Orchestrator:
             self._logical_entity_registry.update()
             new_entites = self._logical_entity_registry.get_new_entities()
             self.save_data_record(DataRecord(new_entites, []))
+            self.forget_entities(self._logical_entity_registry.get_forgotten_ids())
 
             time_end = time.time()
             logger.debug(f"Total Iteration took {time_end - time_start} seconds")
@@ -341,6 +349,11 @@ class Orchestrator:
         assert self._data_collector is not None, "Data collector must be initialized before saving."
 
         self._data_collector.add(data_record)
+
+    def forget_entities(self, ids: list[str]) -> None:
+        """Tell the data collector which threads the registry has let go of."""
+        assert self._data_collector is not None, "Data collector must be initialized before forgetting."
+        self._data_collector.forget(ids)
 
 
 @click.group(invoke_without_command=True)
