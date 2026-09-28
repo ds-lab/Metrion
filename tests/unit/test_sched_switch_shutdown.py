@@ -4,6 +4,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 
 from metrion.queue_util import drain_remaining, drain_until_sentinel
 
@@ -97,6 +98,7 @@ def make_monitor():
 
     class FakeMonitor:
         _get_raw_monitoring_data = ss.SchedSwitchMonitor._get_raw_monitoring_data
+        _report_dead_producer = ss.SchedSwitchMonitor._report_dead_producer
         stop = ss.SchedSwitchMonitor.stop
 
         def __init__(self, producer_finished=False):
@@ -104,8 +106,10 @@ def make_monitor():
             self._ring_buffer_config = MagicMock()
             self._ring_buffer_config.sentinel = SENTINEL
             self._producer_finished = producer_finished
+            self._producer_death_reported = False
             self._rb_sched_switch = MagicMock()
             self._rb_sched_switch.is_alive.return_value = False
+            self._rb_sched_switch.exitcode = -9
             self._calculate_and_cache_metrics = MagicMock()
             self.get_data = MagicMock(return_value="RECORD")
 
@@ -178,3 +182,37 @@ def test_stop_is_bounded_and_kills_an_unresponsive_producer(make_monitor, no_ipc
     assert 0.9 < elapsed < 4.0, f"took {elapsed:.1f}s"
     assert monitor._rb_sched_switch.kill.called
     assert monitor._calculate_and_cache_metrics.call_count == 0, "no data means no cache build"
+
+
+def _errors(action):
+    messages = []
+    sink_id = logger.add(lambda message: messages.append(str(message)), level="ERROR")
+    try:
+        action()
+    finally:
+        logger.remove(sink_id)
+    return messages
+
+
+@needs_bpf_stack
+def test_a_producer_that_dies_mid_run_is_reported_once(make_monitor, no_ipc_reads):
+    """The OOM killer ends the producer without a sentinel; the run must say so."""
+    monitor = make_monitor()
+
+    errors = _errors(lambda: [monitor._get_raw_monitoring_data() for _ in range(3)])
+
+    assert len(errors) == 1
+    assert "exit code -9" in errors[0]
+
+
+@needs_bpf_stack
+def test_a_producer_that_finished_normally_is_not_reported(make_monitor, no_ipc_reads):
+    monitor = make_monitor()
+    monitor._queue_monitoring_data.put(SENTINEL)
+    time.sleep(0.3)
+
+    def stop_and_collect_again():
+        monitor.stop([])
+        monitor._get_raw_monitoring_data()
+
+    assert _errors(stop_and_collect_again) == []

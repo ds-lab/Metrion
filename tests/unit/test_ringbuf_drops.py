@@ -1,4 +1,6 @@
+import ctypes
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -6,6 +8,7 @@ from loguru import logger
 
 from metrion.monitoring.data_source.cpu.ring_buff_base import (
     _DROP_WARNING_INTERVAL_S,
+    _POLL_INTERVAL_S,
     EbpfRingBufferProcess,
     RingBufferConfig,
 )
@@ -131,3 +134,47 @@ def test_shutdown_still_reports_when_the_final_flush_fails(proc):
         proc._stop_monitoring()
 
     assert any("Events processed: 4200" in m for m in messages)
+
+
+def test_endless_events_leave_the_buffer_bounded(proc):
+    """Under overload libbpf never runs out of events, so only the callback can end a pass."""
+    proc._use_raw_bytes = True
+    event = ctypes.create_string_buffer(8)
+    peak = 0
+
+    def consume():
+        # Like ring_buffer__consume with a producer faster than the consumer: it stops only on a
+        # negative return from the callback.
+        nonlocal peak
+        for _ in range(100_000):
+            ret = proc._handle_ring_event(None, ctypes.addressof(event), 8)
+            peak = max(peak, len(proc._raw_buffer))
+            if ret < 0:
+                return
+        pytest.fail("the pass never ended")
+
+    flushes = []
+    proc._bpf = SimpleNamespace(ring_buffer_consume=consume)
+    proc._flush_to_queue = lambda: flushes.append(len(proc._raw_buffer)) or proc._raw_buffer.clear()
+    proc._stop_event = SimpleNamespace(wait=lambda timeout: len(flushes) == 3)
+
+    proc._poll_loop()
+
+    assert flushes == [10, 10, 10]
+    assert peak == 10
+
+
+def test_a_pass_that_ended_on_a_full_buffer_is_continued_at_once(proc):
+    waits = []
+    full = iter([True, False])  # the first pass ends on a full buffer, the second drains it
+
+    def consume():
+        proc._flush_requested = next(full)
+
+    proc._bpf = SimpleNamespace(ring_buffer_consume=consume)
+    proc._flush_to_queue = MagicMock()
+    proc._stop_event = SimpleNamespace(wait=lambda timeout: waits.append(timeout) or len(waits) == 3)
+
+    proc._poll_loop()
+
+    assert waits == [_POLL_INTERVAL_S, 0, _POLL_INTERVAL_S]
