@@ -22,6 +22,7 @@ WITH
             m.metric_id = 'CPU_SOCKET_PKG_ENERGY'
             AND m."start_ts" >= '{start_time}'
             AND m."start_ts" <= '{end_time}'
+            AND m.value IS NOT NULL
     ),
     energy_interval AS (
         SELECT
@@ -33,7 +34,6 @@ WITH
                     "start_ts" AS interval_start,
                     lead ("start_ts") over w AS interval_end,
                     CASE
-                        WHEN lead (value) over w IS NULL THEN 0
                         WHEN lead (value) over w >= value THEN lead (value) over w - value
                         ELSE (energy_wrap_j - value) + lead (value) over w
                     END AS energy_j

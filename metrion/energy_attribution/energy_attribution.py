@@ -302,6 +302,7 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
             (pl.col("metric_id") == self._PKG_METRIC)
             & (pl.col("start_ts") >= start_time)
             & (pl.col("start_ts") <= end_time)
+            & (pl.col("value").is_not_null())
         ).select(
             pl.col("value"),
             pl.col("metric_id"),
@@ -330,15 +331,14 @@ class CPUEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.col("value").shift(-1).over(partition_by="package_id", order_by="start_ts").alias("lead_value"),
             )
             .with_columns(
-                pl.when(pl.col("lead_value").is_null())
-                .then(0.0)
-                .when(pl.col("lead_value") >= pl.col("value"))
+                pl.when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
                 .otherwise(
                     pl.col("energy_wrap_j").fill_null(self._ENERGY_WRAP_CPU) - pl.col("value") + pl.col("lead_value")
                 )
                 .alias("energy_j")
             )
+            # The last sample has no successor, so neither an interval nor an energy; this drops it.
             .filter(pl.col("interval_end").is_not_null())
             .select(["package_id", "interval_start", "interval_end", "energy_j"])
             .sort(["package_id", "interval_start"])
@@ -657,15 +657,14 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.col("value").shift(-1).over(partition_by="dram_id", order_by="start_ts").alias("lead_value"),
             )
             .with_columns(
-                pl.when(pl.col("lead_value").is_null())
-                .then(0.0)
-                .when(pl.col("lead_value") >= pl.col("value"))
+                pl.when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
                 .otherwise(
                     pl.col("energy_wrap_j").fill_null(self._ENERGY_WRAP_DRAM) - pl.col("value") + pl.col("lead_value")
                 )
                 .alias("energy_j")
             )
+            # The last sample has no successor, so neither an interval nor an energy; this drops it.
             .filter(pl.col("interval_end").is_not_null())
             .select(["dram_id", "cpu_id", "interval_start", "interval_end", "energy_j"])
             .sort(["dram_id", "interval_start"])
@@ -840,6 +839,9 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             "value",
         )
 
+        # The PMU counts a read that missed into another socket's memory, but not which socket
+        # that was. "Every DRAM but my own" is exact with two sockets; with more, one read is
+        # booked on every foreign DRAM at once. The orchestrator warns at startup in that case.
         dram_remote_reads_by_thread = (
             self._join_overlapping(
                 remote_read_samples,
@@ -1060,6 +1062,7 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
             (pl.col("metric_id") == self._ENERGY_METRIC)
             & (pl.col("start_ts") >= start_time if start_time else True)
             & (pl.col("start_ts") <= end_time if end_time else True)
+            & (pl.col("value").is_not_null())
         ).select(
             pl.col("value"),
             pl.col("physical_entity_id").alias("gpu_id"),
@@ -1088,13 +1091,12 @@ class GPUEnergyAttributionModel(EnergyAttributionModelBase):
                 pl.col("value").shift(-1).over(partition_by="gpu_id", order_by="start_ts").alias("lead_value"),
             )
             .with_columns(
-                pl.when(pl.col("lead_value").is_null())
-                .then(0.0)
-                .when(pl.col("lead_value") >= pl.col("value"))
+                pl.when(pl.col("lead_value") >= pl.col("value"))
                 .then(pl.col("lead_value") - pl.col("value"))
                 .otherwise(pl.lit(self._ENERGY_WRAP_GPU) - pl.col("value") + pl.col("lead_value"))
                 .alias("energy_j")
             )
+            # The last sample has no successor, so neither an interval nor an energy; this drops it.
             .filter(pl.col("interval_end").is_not_null())
         )
 

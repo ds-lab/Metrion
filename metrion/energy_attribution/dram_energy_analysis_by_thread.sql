@@ -21,6 +21,7 @@ WITH energy_samples_dram AS (
         m.metric_id = 'DRAM_SOCKET_TOTAL_ENERGY'
         AND m.start_ts >= '{start_time}'
         AND m.start_ts <= '{end_time}'
+        AND m.value IS NOT NULL
     ORDER BY
         m.start_ts
 ),
@@ -33,7 +34,6 @@ energy_interval_dram AS (
             "start_ts" AS interval_start,
             LEAD("start_ts") OVER w AS interval_end,
             CASE
-                WHEN LEAD(value) OVER w IS NULL THEN 0
                 WHEN LEAD(value) OVER w >= value THEN LEAD(value) OVER w - value
                 ELSE (energy_wrap_j - value) + LEAD(value) OVER w
             END AS energy_j
@@ -164,7 +164,9 @@ dram_local_reads_by_thread AS (
         dei.dram_id, dei.cpu_id, dei.interval_start, dei.interval_end, m.logical_entity_id
 ),
 
---     Remote reads: cores on other CPUs -> this DRAM (accurate for 2-socket)
+--     Remote reads: cores on other CPUs -> this DRAM. The PMU counts a read that missed into
+--     another socket's memory, but not which socket that was. "Every DRAM but my own" is exact
+--     with two sockets; with more, one read is booked on every foreign DRAM at once.
 dram_remote_reads_by_thread AS (
     SELECT
         dei.dram_id,                -- target DRAM (remote to those cores)

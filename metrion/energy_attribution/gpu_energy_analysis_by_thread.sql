@@ -18,6 +18,7 @@ WITH energy_samples_gpu AS (
         m.metric_id = 'GPU_DEVICE_TOTAL_ENERGY'
         AND m.start_ts >= '{start_time}'
         AND m.start_ts <= '{end_time}'
+        AND m.value IS NOT NULL
     ORDER BY m.start_ts
 ),
 energy_interval_gpu AS (
@@ -29,7 +30,6 @@ energy_interval_gpu AS (
             LEAD(start_ts) OVER w AS interval_end,
             CASE
                 -- Energy counter wrap-around: 64-bit counter in mJ converted to J
-                WHEN LEAD(value) OVER w IS NULL THEN 0
                 WHEN LEAD(value) OVER w >= value THEN LEAD(value) OVER w - value
                 ELSE ((18446744073709551615.0 / 1000.0) - value) + LEAD(value) OVER w
             END AS energy_j

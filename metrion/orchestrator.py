@@ -20,7 +20,7 @@ from metrion.entity.host import Host
 from metrion.entity.logical_entity_registry import LogicalEntityRegistry
 from metrion.entity.network_interface import NetworkInterface
 from metrion.entity.physical_entity import PhysicalEntity
-from metrion.metric import Metric
+from metrion.metric import CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM, Metric
 from metrion.monitoring.entity_monitor import EntityTypeMonitor
 
 # Maps entity types to the config key used in the energy_model.components dict.
@@ -194,6 +194,21 @@ class Orchestrator:
         assert self._config is not None, "Config must be loaded before creating entities."
         hardware_detection = HardwareDetection(self._config)
         self._entities = hardware_detection.get_physical_entities()
+        self._warn_if_remote_reads_cannot_be_placed()
+
+    def _warn_if_remote_reads_cannot_be_placed(self) -> None:
+        assert self._config is not None, "Config must be loaded before checking the remote reads."
+        # The PMU counts a read that missed into another socket's memory, but not which socket that
+        # was. With two sockets it can only be the other one; with more, the DRAM attribution books
+        # the read on every foreign socket at once. The information does not exist, so warn.
+        drams = len(self._entities.get(DRAM, []))
+        cpu_metrics = self._config.energy_model.get_component_metrics("cpu")
+        remote_reads = cpu_metrics == "*" or CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM.name in cpu_metrics
+        if drams > 2 and remote_reads:
+            logger.warning(
+                f"{drams} memory sockets detected. Remote DRAM reads cannot be placed: the counter does not say "
+                "which foreign socket a read went to, so its energy is booked on every foreign socket at once."
+            )
 
     def save_physical_entities(self) -> None:
         """
