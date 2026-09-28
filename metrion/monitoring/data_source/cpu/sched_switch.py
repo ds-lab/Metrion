@@ -49,7 +49,7 @@ from metrion.monitoring.data_source.data_source_base import DataSource
 from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
 from metrion.monitoring.timing_context import TimingContext, TimingContextRegistry
 from metrion.queue_util import drain_remaining, drain_until_sentinel
-from metrion.util import check_entity_type, read_temp_ipc, split_large_df
+from metrion.util import boot_epoch_s, check_entity_type, read_temp_ipc, split_large_df
 
 # Where an event sits in the energy interval it is grouped into. Events in the guard band at
 # either end, and events that cross an interval boundary, are summed apart from the ones that
@@ -680,7 +680,6 @@ class SchedSwitchMonitor(DataSource):
     _instance = None
     SENTINEL = float(2**64 - 1)
     HT_FACTOR = 1.15
-    _boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=UTC)
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -793,7 +792,7 @@ class SchedSwitchMonitor(DataSource):
             )
 
             # timing data
-            self._boot_time_s = psutil.boot_time()
+            self._boot_time_s = boot_epoch_s()
             self._boot_time_dt = datetime.fromtimestamp(self._boot_time_s, tz=UTC)
 
             # core map

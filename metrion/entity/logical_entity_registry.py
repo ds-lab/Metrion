@@ -23,7 +23,7 @@ from metrion.monitoring.data_source.cpu.utils import (
     read_starttime_from_stat_file_in_ns,
 )
 from metrion.queue_util import drain_remaining, drain_until_sentinel
-from metrion.util import build_cgroup_id_map, read_temp_ipc
+from metrion.util import boot_epoch_s, build_cgroup_id_map, read_temp_ipc
 
 
 class LogicalEntityRegistryBpfProcess(EbpfRingBufferProcess):
@@ -138,7 +138,7 @@ class LogicalEntityRegistry:
         )
 
         # Boot time for converting ticks to ns
-        self._boot_time_s = psutil.boot_time()
+        self._boot_time_s = boot_epoch_s()
         self._boot_time_dt = datetime.fromtimestamp(self._boot_time_s, tz=UTC)
         self._clk_tck = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
 
@@ -655,7 +655,7 @@ class LogicalEntityRegistry:
         # serach for 190
         # 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300, 320, 340, 360, 380, 400
         # -90, -70, -50, -30, -10, 10,   30,  50,  70,  90, 110, 130, 150, 170, 190, 210
-        # 
+        #
         nearest = min(self._starts_by_tid.get(pid, []), key=lambda start: abs(start - start_ns), default=None)
         if nearest is None or abs(nearest - start_ns) > tolerance_ns:
             return None

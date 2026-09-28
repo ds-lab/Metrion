@@ -281,6 +281,13 @@ def transform_measuremnent_list_to_polars(
     return data_measurements_df, data_communication_measurements_df
 
 
+def boot_epoch_s() -> float:
+    """Epoch seconds of the boot, to turn CLOCK_BOOTTIME timestamps (BPF) into wall clock time."""
+    # Not psutil.boot_time(): btime in /proc/stat is cut to whole seconds, and the lost fraction
+    # would shift every BPF event against the energy readings.
+    return time.time() - time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
 def build_cgroup_id_map(root="/sys/fs/cgroup") -> dict[int, str]:
     id2path = {}
     for dirpath, _, _ in os.walk(root):

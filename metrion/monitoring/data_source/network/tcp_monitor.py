@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, override
 
 import polars as pl
-import psutil
 from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
@@ -28,7 +27,7 @@ from metrion.metric import NETWORK_HOST_PID_TOTAL_BYTES_RECEIVED, NETWORK_HOST_P
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.data_source_base import DataSource
 from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
-from metrion.util import check_entity_type, read_temp_ipc
+from metrion.util import boot_epoch_s, check_entity_type, read_temp_ipc
 
 
 def _ipv4_to_string(addr: int) -> str:
@@ -182,7 +181,7 @@ class TCPDataSource(DataSource):
     }
 
     _instance = None
-    _boot_time = datetime.fromtimestamp(psutil.boot_time(), tz=UTC).replace(tzinfo=None)
+    _boot_time = datetime.fromtimestamp(boot_epoch_s(), tz=UTC).replace(tzinfo=None)
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -224,7 +223,7 @@ class TCPDataSource(DataSource):
         # Start the eBPF ring buffer process
         self._bpf_process = TCPMonitorBpfProcess.start_singleton(self._ring_config, daemon=True)
 
-        self._boot_time_s = psutil.boot_time()
+        self._boot_time_s = boot_epoch_s()
         self._clock_validated = False
         self._initialized = True
 

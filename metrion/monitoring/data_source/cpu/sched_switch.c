@@ -177,7 +177,7 @@ static __always_inline void collect_metadata_inline(
 
 TRACEPOINT_PROBE(sched, sched_switch)
 {
-  u64 current_time = bpf_ktime_get_boot_ns();  // CLOCK_BOOTTIME: includes suspend time, matches psutil.boot_time() + offset
+  u64 current_time = bpf_ktime_get_boot_ns();  // CLOCK_BOOTTIME: includes suspend time, matches boot_epoch_s() + offset
   u32 cpu_core = bpf_get_smp_processor_id();
 
   // Read performance counters
