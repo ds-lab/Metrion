@@ -153,8 +153,12 @@ class EbpfRingBufferProcess(mp.Process, ABC):
 
     def _poll_loop(self) -> None:
         assert self._bpf is not None
-        while not self._stop_event.wait(_POLL_INTERVAL_S):
+        wait_s = _POLL_INTERVAL_S
+        while not self._stop_event.wait(wait_s):
             self._bpf.ring_buffer_consume()
+            # A pass that ended on a full buffer (see _handle_ring_event) left events behind, so
+            # the next one starts right after the flush instead of one interval later.
+            wait_s = 0 if self._flush_requested else _POLL_INTERVAL_S
             if self._flush_requested:
                 self._flush_requested = False
                 self._flush_to_queue()
@@ -209,7 +213,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         elif self._time_flush_due():
             self._flush_requested = True
 
-    def _handle_ring_event(self, ctx, data, size) -> None:
+    def _handle_ring_event(self, ctx, data, size) -> int:
         """
         This is the callback you pass to open_ring_buffer.
         """
@@ -223,6 +227,11 @@ class EbpfRingBufferProcess(mp.Process, ABC):
             e = self._read_ring_event(data)
             self._buffer.append(self._event_to_record(e))
         self._request_flush_if_needed()
+
+        # ring_buffer_consume() reads for as long as events arrive. Arriving faster than this
+        # process takes them, it would never return and nothing would be flushed; the buffer would
+        # grow until the OOM killer ends the process. A negative return ends the pass.
+        return -1 if self._flush_requested else 0
 
     def _read_ring_event(self, data):
         assert self._bpf is not None

@@ -816,6 +816,7 @@ class SchedSwitchMonitor(DataSource):
             self._raw_events_received = 0
             self._clock_validated = False
             self._producer_finished = False
+            self._producer_death_reported = False
 
     def _core_entities_to_df(self) -> tuple[pl.DataFrame, list[Any]]:
         ids_cpu_cores = []
@@ -929,6 +930,8 @@ class SchedSwitchMonitor(DataSource):
                 break
             df_paths.append(item)
 
+        self._report_dead_producer()
+
         if len(df_paths) == 0:
             return pl.DataFrame()
 
@@ -938,6 +941,17 @@ class SchedSwitchMonitor(DataSource):
             dfs.append(df)
         df = pl.concat(dfs, how="vertical").unique()
         return df
+
+    def _report_dead_producer(self) -> None:
+        # A producer killed mid-run, by the OOM killer say, sends no sentinel and no final count;
+        # this is the only place the run learns that its CPU data stops.
+        if self._producer_finished or self._producer_death_reported or self._rb_sched_switch.is_alive():
+            return
+        self._producer_death_reported = True
+        logger.error(
+            f"sched_switch: the eBPF producer died (exit code {self._rb_sched_switch.exitcode}; -9 is "
+            "usually the OOM killer). No CPU measurements are recorded from here on."
+        )
 
     def _add_physical_entity_id_to_df(self, df: pl.DataFrame) -> pl.DataFrame:
         # core id is the physical entity where the work was executed
@@ -1435,7 +1449,9 @@ class SchedSwitchMonitor(DataSource):
                 deadline_s=30.0,
                 name="sched_switch",
             )
+            self._producer_finished = seen
             if not seen:
+                self._report_dead_producer()
                 logger.warning("sched_switch: sentinel not received, continuing anyway")
 
         df_list = [read_temp_ipc(path) for path in df_paths]
