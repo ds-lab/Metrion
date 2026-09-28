@@ -10,6 +10,7 @@ def test_prepare_monitoring_data_single_task():
     raw = pl.DataFrame(
         {
             "pid": [1],
+            "pid_start": [11],
             "exec_count": [0],
             "cpu_core": [0],
             "time_start": [1_000_000],  # microseconds
@@ -23,6 +24,7 @@ def test_prepare_monitoring_data_single_task():
         },
         schema={
             "pid": pl.UInt32,
+            "pid_start": pl.UInt64,
             "exec_count": pl.UInt64,
             "cpu_core": pl.UInt32,
             "time_start": pl.UInt64,
@@ -43,6 +45,7 @@ def test_prepare_monitoring_data_single_task():
     # Verify output structure
     expected_columns = [
         "pid",
+        "pid_start",
         "start_time",
         "end_time",
         "cpu_core",
@@ -58,16 +61,16 @@ def test_prepare_monitoring_data_single_task():
     assert result.height == 1
 
     # Check the values
-    row = result.row(0)
-    assert row[0] == 1  # pid
-    assert row[1] == 1_000_000  # start_time
-    assert row[2] == 2_000_000  # end_time
-    assert row[3] == 0  # cpu_core
-    assert row[4] == 50  # delta_aperf (150 - 100)
-    assert row[5] == 50  # delta_mperf (250 - 200)
-    assert row[6] == 100  # delta_unhalted_core_cycles (400 - 300)
-    assert row[7] == 1_000_000.0  # execution_time (2_000_000 - 1_000_000)
-    assert row[8] == "alone"  # shared_state
+    row = result.row(0, named=True)
+    assert row["pid"] == 1
+    assert row["start_time"] == 1_000_000
+    assert row["end_time"] == 2_000_000
+    assert row["cpu_core"] == 0
+    assert row["delta_aperf"] == 50  # 150 - 100
+    assert row["delta_mperf"] == 50  # 250 - 200
+    assert row["delta_unhalted_core_cycles"] == 100  # 400 - 300
+    assert row["execution_time"] == 1_000_000.0  # 2_000_000 - 1_000_000
+    assert row["shared_state"] == "alone"
 
 
 def test_prepare_monitoring_data_empty_input():
@@ -75,6 +78,7 @@ def test_prepare_monitoring_data_empty_input():
     raw = pl.DataFrame(
         schema={
             "pid": pl.UInt32,
+            "pid_start": pl.UInt64,
             "exec_count": pl.UInt64,
             "cpu_core": pl.UInt32,
             "time_start": pl.UInt64,
@@ -97,6 +101,7 @@ def test_prepare_monitoring_data_filtered_zero_values():
     raw = pl.DataFrame(
         {
             "pid": [1, 2, 3],
+            "pid_start": [11, 11, 11],
             "exec_count": [0, 1, 2],
             "cpu_core": [0, 0, 0],
             "time_start": [1_000_000, 2_000_000, 3_000_000],
@@ -110,6 +115,7 @@ def test_prepare_monitoring_data_filtered_zero_values():
         },
         schema={
             "pid": pl.UInt32,
+            "pid_start": pl.UInt64,
             "exec_count": pl.UInt64,
             "cpu_core": pl.UInt32,
             "time_start": pl.UInt64,
@@ -135,6 +141,7 @@ def test_prepare_monitoring_data_same_time_filtered():
     raw = pl.DataFrame(
         {
             "pid": [1, 2],
+            "pid_start": [11, 11],
             "exec_count": [0, 1],
             "cpu_core": [0, 0],
             "time_start": [1_000_000, 2_000_000],
@@ -148,6 +155,7 @@ def test_prepare_monitoring_data_same_time_filtered():
         },
         schema={
             "pid": pl.UInt32,
+            "pid_start": pl.UInt64,
             "exec_count": pl.UInt64,
             "cpu_core": pl.UInt32,
             "time_start": pl.UInt64,
@@ -173,6 +181,7 @@ def test_prepare_monitoring_data_multiple_tasks():
     raw = pl.DataFrame(
         {
             "pid": [1, 2],
+            "pid_start": [11, 11],
             "exec_count": [0, 0],
             "cpu_core": [0, 0],
             "time_start": [1_000_000, 1_500_000],
@@ -186,6 +195,7 @@ def test_prepare_monitoring_data_multiple_tasks():
         },
         schema={
             "pid": pl.UInt32,
+            "pid_start": pl.UInt64,
             "exec_count": pl.UInt64,
             "cpu_core": pl.UInt32,
             "time_start": pl.UInt64,

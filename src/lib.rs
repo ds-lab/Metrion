@@ -353,7 +353,8 @@ fn linear_interpolate_sibling_values(
             aperf: aperf_intermediate,
             mperf: mperf_intermediate,
             unhalted_core_cycles: unhalted_core_cycles_intermediate,
-            time: active.start_values.time,
+            // The next cut interpolates from here, so the base time has to move with the values.
+            time: measurement.time,
         },
         end_values: active.end_values.clone(),
     };
