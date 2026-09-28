@@ -13,6 +13,7 @@ from metrion.config_reader import (
     AgentConfig,
     ComponentConfig,
     ConfigReader,
+    EbpfConfig,
     EnergyModelConfig,
     SourceIntervals,
     StorageConfig,
@@ -220,6 +221,24 @@ class TestSourceIntervals:
         assert (config.timing.ebpf_flush, config.timing.storage_flush) == (1.0, 2.0)
         assert config.timing.sources.rapl == 1.0
         assert config.timing.sources.tcp_monitor == 5.0
+        assert config.ebpf.ringbuf_mib == 32
+
+
+class TestEbpfConfig:
+    def test_default_is_32_mib(self):
+        assert EbpfConfig().ringbuf_mib == 32
+
+    @pytest.mark.parametrize("mib", [0, 48, -64])
+    def test_rejects_what_the_kernel_would_reject(self, mib):
+        """The kernel only takes a power of two; anything else fails later as an opaque BPF error."""
+        with pytest.raises(ValidationError):
+            EbpfConfig(ringbuf_mib=mib)
+
+    def test_is_read_from_yaml(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text("ebpf:\n  ringbuf_mib: 256\nenergy_model:\n  components: {}\n")
+
+        assert AgentConfig.from_yaml_file(path).ebpf.ringbuf_mib == 256
 
 
 class TestTimingConfig:

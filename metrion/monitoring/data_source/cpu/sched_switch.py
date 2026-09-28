@@ -1,4 +1,5 @@
 import ctypes as ct
+import mmap
 import multiprocessing as mp
 import queue as q
 from collections.abc import Sequence
@@ -13,7 +14,7 @@ from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
 import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
 from metrion.entity.cpu import CPU
@@ -77,6 +78,8 @@ def _band_expr(interval_ns: int, threshold_ns: int) -> pl.Expr:
 
 
 class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
+    _overflow_hint = " Raise ebpf.ringbuf_mib in the config for a larger buffer."
+
     # NumPy structured dtype matching sched_event_v2 (328 bytes)
     # Must match the BPF struct layout exactly
     SCHED_EVENT_DTYPE = np.dtype(
@@ -122,6 +125,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         cls,
         config: RingBufferConfig,
         collection_plan: SchedSwitchCollectionPlan | None = None,
+        ringbuf_mib: int | None = None,
         daemon: bool = True,
     ):
         with cls._singletons_lock:
@@ -137,7 +141,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 enabled_groups,
                 disabled_groups,
             )
-            inst = cls(config=config, collection_plan=collection_plan, daemon=daemon)
+            inst = cls(config=config, collection_plan=collection_plan, ringbuf_mib=ringbuf_mib, daemon=daemon)
             inst.start()
             cls._singletons[cls] = inst
             return inst
@@ -146,6 +150,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         self,
         config: RingBufferConfig,
         collection_plan: SchedSwitchCollectionPlan | None = None,
+        ringbuf_mib: int | None = None,
         name: str | None = None,
         daemon: bool = True,
     ) -> None:
@@ -153,6 +158,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         # Enable fast raw bytes mode
         self._use_raw_bytes = True
         self._collection_plan = collection_plan or SchedSwitchCollectionPlan.all_enabled()
+        self._ringbuf_mib = ringbuf_mib or EbpfConfig().ringbuf_mib
 
     @override
     def _parse_raw_events(self, raw_events: list[bytes]) -> pl.DataFrame:
@@ -250,6 +256,8 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             cflags=[
                 "-DNUM_CPUS=%d" % psutil.cpu_count(logical=True),  # noqa: UP031
                 "-DNUM_SOCKETS=%d" % count_cpu_sockets_from_sysfs(),  # noqa: UP031
+                # BPF_RINGBUF_OUTPUT takes pages, not bytes
+                "-DRINGBUF_PAGES=%d" % (self._ringbuf_mib * 1024 * 1024 // mmap.PAGESIZE),  # noqa: UP031
                 "-I%s" % str(helpers_dir),  # noqa: UP031
             ],
         )
@@ -693,6 +701,7 @@ class SchedSwitchMonitor(DataSource):
         interval: float | None = None,
         enabled_metrics: Sequence[Metric] | None = None,
         timing: TimingConfig | None = None,
+        ebpf: EbpfConfig | None = None,
     ):
         """Initialize the SchedSwitchMonitor.
 
@@ -707,7 +716,7 @@ class SchedSwitchMonitor(DataSource):
             Metrics enabled in config for the CPU component.
         """
         if not hasattr(self, "_initialized"):
-            super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
+            super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing, ebpf=ebpf)
             self._initialized = True
 
             check_entity_type(entities)
@@ -789,6 +798,7 @@ class SchedSwitchMonitor(DataSource):
             self._rb_sched_switch = SchedSwitchBpfMonitor.start_singleton(
                 self._ring_buffer_config,
                 collection_plan=self._collection_plan,
+                ringbuf_mib=self._ebpf.ringbuf_mib,
             )
 
             # timing data

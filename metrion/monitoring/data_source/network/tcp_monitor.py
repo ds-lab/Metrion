@@ -17,7 +17,7 @@ import polars as pl
 from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.communication_endpoint import CommunicationEndpoint, NetworkAddress, NetworkTransport
 from metrion.entity.entity import Entity
@@ -194,11 +194,12 @@ class TCPDataSource(DataSource):
         interval: float | None = None,
         enabled_metrics: list[Metric] | None = None,
         timing: TimingConfig | None = None,
+        ebpf: EbpfConfig | None = None,
     ) -> None:
         if hasattr(self, "_initialized"):
             return
 
-        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing, ebpf=ebpf)
         check_entity_type(entities, expected_type=NetworkInterface)
 
         self._logical_entity_registry = LogicalEntityRegistry.get_instance()

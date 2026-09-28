@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 from loguru import logger
 
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import Metric
@@ -25,6 +25,8 @@ class EntityTypeMonitor:
         The metrics to collect for the entities.
     timing : TimingConfig, optional
         The timing section of the config. Defaults to TimingConfig().
+    ebpf : EbpfConfig, optional
+        The ebpf section of the config. Defaults to EbpfConfig().
     """
 
     # One config field per data source class. The names are deliberately spelled out because the
@@ -37,7 +39,13 @@ class EntityTypeMonitor:
         "TCPDataSource": "tcp_monitor",
     }
 
-    def __init__(self, entities: Sequence[Entity], metrics: list[Metric], timing: TimingConfig | None = None):
+    def __init__(
+        self,
+        entities: Sequence[Entity],
+        metrics: list[Metric],
+        timing: TimingConfig | None = None,
+        ebpf: EbpfConfig | None = None,
+    ):
         """
         Initialize the EntityTypeMonitor.
 
@@ -49,10 +57,13 @@ class EntityTypeMonitor:
             The metrics to collect for the entities.
         timing : TimingConfig, optional
             The timing section of the config. Defaults to TimingConfig().
+        ebpf : EbpfConfig, optional
+            The ebpf section of the config. Defaults to EbpfConfig().
         """
         self._entities = entities
         self._metrics = metrics
         self._timing = timing or TimingConfig()
+        self._ebpf = ebpf or EbpfConfig()
 
         check_entity_type(entities)
         DataSourceFactory.auto_register()
@@ -81,7 +92,7 @@ class EntityTypeMonitor:
         for data_source, metrics in self._data_source_metrics.items():
             queue = q.Queue()
             interval = self._interval_for(data_source)
-            runner = DataSourceRunner(data_source, self._entities, metrics, interval, queue, self._timing)
+            runner = DataSourceRunner(data_source, self._entities, metrics, interval, queue, self._timing, self._ebpf)
             self._data_source_runners[runner] = queue
             logger.info(f"{data_source.__name__}: collection interval {interval} s")
 

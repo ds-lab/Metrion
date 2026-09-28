@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.metric import Metric
@@ -24,6 +24,7 @@ class DataSource(ABC):
         interval: float | None = None,
         enabled_metrics: Sequence[Metric] | None = None,
         timing: TimingConfig | None = None,
+        ebpf: EbpfConfig | None = None,
     ):
         """
         Initialize the data source with a list of entities.
@@ -38,6 +39,8 @@ class DataSource(ABC):
             Metrics enabled in config for this data source's component.
         timing : TimingConfig, optional
             The timing section of the config. Only the sources that run an eBPF producer read it.
+        ebpf : EbpfConfig, optional
+            The ebpf section of the config. Only SchedSwitchMonitor reads it.
 
         Notes
         -----
@@ -47,6 +50,7 @@ class DataSource(ABC):
         self._interval = interval
         self._enabled_metrics: Sequence[Metric] | None = enabled_metrics
         self._timing = timing or TimingConfig()
+        self._ebpf = ebpf or EbpfConfig()
         check_entity_type(entities)
 
     @abstractmethod

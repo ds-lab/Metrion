@@ -67,6 +67,14 @@ timing:
     # Socket events, from which per-process network traffic is derived.
     tcp_monitor: 5.0
 
+# The eBPF probes in the kernel.
+ebpf:
+  # Size of the ring buffer that carries every context switch from the kernel to the agent, in
+  # MiB, a power of two. The kernel pins it in memory for the whole run. 32 MiB hold about half a
+  # second of 200 000 switches per second. Raise it when the log warns about a ring buffer
+  # overflow, which happens on large machines under heavy load.
+  ringbuf_mib: 32
+
 # Attribute energy while the agent runs and write one row per time window and thread, with the
 # thread's name, cmdline and cgroup, into its own Parquet directory. Off, the attribution runs
 # afterwards with `metrion analyze`.

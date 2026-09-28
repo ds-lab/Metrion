@@ -4,6 +4,7 @@ Pydantic configuration schema for the Metrion agent.
 This module defines the configuration structure for:
 - Storage settings (type, path)
 - Timing: the collection cycle and the interval of every data source
+- eBPF: size of the sched_switch ring buffer
 - Energy model configuration (granularity, components)
 - Component configuration (CPU, GPU, DRAM, Network) with include/exclude modes
 - Live attribution while the agent runs
@@ -131,6 +132,22 @@ class TimingConfig(BaseModel):
     ebpf_flush: float = Field(default=1.0, gt=0, description="eBPF producer: buffered events -> IPC writer")
     storage_flush: float = Field(default=2.0, gt=0, description="IPC writer: buffered rows -> file on disk")
     sources: SourceIntervals = Field(default_factory=SourceIntervals)
+
+
+class EbpfConfig(BaseModel):
+    """Settings of the eBPF probes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ringbuf_mib: int = Field(default=32, gt=0, description="Size of the sched_switch ring buffer in MiB")
+
+    @field_validator("ringbuf_mib")
+    @classmethod
+    def check_power_of_two(cls, value: int) -> int:
+        # The kernel only accepts a power of two, and would reject anything else with an opaque BPF error.
+        if value & (value - 1):
+            raise ValueError(f"ebpf.ringbuf_mib must be a power of two, got {value}")
+        return value
 
 
 # ─────────────────────────────
@@ -378,6 +395,7 @@ class AgentConfig(BaseModel):
     debug: bool = False
     storage: StorageConfig = Field(default_factory=StorageConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
+    ebpf: EbpfConfig = Field(default_factory=EbpfConfig)
     energy_model: EnergyModelConfig = Field(default_factory=EnergyModelConfig)
     live_attribution: LiveAttributionConfig = Field(default_factory=LiveAttributionConfig)
 

@@ -28,7 +28,7 @@ from _common import Bench
 
 EVENT_SIZE_CURRENT = 328  # struct sched_event_v2
 EVENT_SIZE_DATA_ONLY = 136  # monitoring payload without the inline metadata block
-RINGBUF_BYTES = 524_288  # BPF_RINGBUF_OUTPUT(events, 524288)
+RINGBUF_BYTES = 32 * 1024 * 1024  # ebpf.ringbuf_mib default
 
 
 def main() -> None:
@@ -113,14 +113,14 @@ def main() -> None:
         print(f"at {rate:>9,} events/s:              {share:8.2f} % of one core, callback only")
     print()
 
-    print("=== ring-buffer bandwidth (BPF_RINGBUF_OUTPUT(events, 524288)) ===")
+    print("=== ring-buffer bandwidth (ebpf.ringbuf_mib: 32) ===")
     for size, label in ((EVENT_SIZE_CURRENT, "current 328 B event"), (EVENT_SIZE_DATA_ONLY, "proposed 136 B event")):
         capacity = RINGBUF_BYTES // size
         for rate in (args.rate, args.rate * 4):
             fill_ms = capacity / rate * 1000
             mib_s = size * rate / 1024 / 1024
             print(
-                f"{label:<22} capacity {capacity:>6,} events | "
+                f"{label:<22} capacity {capacity:>9,} events | "
                 f"at {rate:>8,}/s: {mib_s:6.1f} MiB/s, buffer full in {fill_ms:6.1f} ms"
             )
     print()

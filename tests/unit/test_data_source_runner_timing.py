@@ -11,7 +11,7 @@ WORK_S = 0.05
 class SlowDataSource:
     """Data source whose get_data takes a fixed amount of time and records when it ran."""
 
-    def __init__(self, entities, interval=None, enabled_metrics=None, timing=None):
+    def __init__(self, entities, interval=None, enabled_metrics=None, timing=None, ebpf=None):
         self.timestamps: list[float] = []
 
     def get_data(self, metrics):

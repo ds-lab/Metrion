@@ -8,6 +8,7 @@ from metrion.config_reader.config_reader import ConfigReader, read_config
 from metrion.config_reader.config_schema import (
     AgentConfig,
     ComponentConfig,
+    EbpfConfig,
     EnergyModelConfig,
     LiveAttributionConfig,
     SourceIntervals,
@@ -22,6 +23,7 @@ __all__ = [
     "AgentConfig",
     "StorageConfig",
     "TimingConfig",
+    "EbpfConfig",
     "SourceIntervals",
     "EnergyModelConfig",
     "ComponentConfig",

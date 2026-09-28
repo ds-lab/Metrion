@@ -55,6 +55,9 @@ class EbpfRingBufferProcess(mp.Process, ABC):
     _singletons: ClassVar[dict[type[EbpfRingBufferProcess], EbpfRingBufferProcess]] = {}
     _singletons_lock: ClassVar[threading.Lock] = threading.Lock()
 
+    # Appended to the overflow warning, for producers whose buffer size can be configured.
+    _overflow_hint: ClassVar[str] = ""
+
     def __init__(self, config: RingBufferConfig, *, name: str | None = None, daemon: bool = True) -> None:
         super().__init__(name=name or self.__class__.__name__, daemon=daemon)
 
@@ -293,7 +296,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         seen = self._total_events + buffered + missing_events
         logger.warning(
             f"[{self.name}] Ring buffer overflow: {missing_events} of {seen} events dropped by the "
-            f"kernel ({100.0 * missing_events / seen:.2f} %). Dropped events cannot be recovered."
+            f"kernel ({100.0 * missing_events / seen:.2f} %). Dropped events cannot be recovered.{self._overflow_hint}"
         )
 
     # -----------------------------

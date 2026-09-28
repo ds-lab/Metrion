@@ -8,7 +8,7 @@ import psutil
 import pynvml
 from loguru import logger
 
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.entity import Entity
 from metrion.entity.gpu import GPU
@@ -66,6 +66,7 @@ class NVMLDataSource(DataSource):
         interval: float | None = None,
         enabled_metrics: list[Metric] | None = None,
         timing: TimingConfig | None = None,
+        ebpf: EbpfConfig | None = None,
     ):
         """
         Initializes the NVML data source.
@@ -77,7 +78,7 @@ class NVMLDataSource(DataSource):
         interval : float, optional
              The collection interval in seconds.
         """
-        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing, ebpf=ebpf)
         self.gpu_entities: list[GPU] = [e for e in self.entities if isinstance(e, GPU)]
         self._handles: dict[str, Any] = {}
         self._last_seen: dict[str, int] = {}

@@ -1,3 +1,4 @@
+#include <linux/sched.h>
 #include "common_bpf.h"
 /*
  * sched_switch_v2.c - Zero-loss entity matching via inline metadata
@@ -36,8 +37,9 @@ struct pid_key {
   u32 start_bucket;  // start_time_ns / 10_000_000 (10ms buckets)
 };
 
-/* Tracks which (pid, start_bucket) combinations we've already seen */
-BPF_HASH(pid_seen, struct pid_key, u8, 524288);
+/* Tracks which (pid, start_bucket) combinations we've already seen. A task's key is removed at
+ * its last switch, so this only holds live threads. */
+BPF_HASH(pid_seen, struct pid_key, u8, 65536);
 
 /*
  * Full event structure with embedded metadata for first-seen PIDs.
@@ -99,7 +101,7 @@ struct start_snapshot {
 
 BPF_PERCPU_ARRAY(cpu_snapshot, struct start_snapshot, 1);
 BPF_PERCPU_ARRAY(rb_drops, u64, 1);
-BPF_RINGBUF_OUTPUT(events, 524288);
+BPF_RINGBUF_OUTPUT(events, RINGBUF_PAGES);  // in pages, set from ebpf.ringbuf_mib
 
 static __always_inline void drop_inc(void) {
   u32 k = 0;
@@ -125,6 +127,13 @@ static __always_inline int mark_first_seen(u32 pid, u64 start_ns) {
   u8 one = 1;
   pid_seen.update(&key, &one);
   return 1;  // First time
+}
+
+static __always_inline void forget_seen(u32 pid, u64 start_ns) {
+  struct pid_key key = {};
+  key.pid = pid;
+  key.start_bucket = (u32)(start_ns / 10000000);
+  pid_seen.delete(&key);
 }
 
 /*
@@ -217,6 +226,10 @@ TRACEPOINT_PROBE(sched, sched_switch)
     struct sched_event_v2 *out = events.ringbuf_reserve(sizeof(struct sched_event_v2));
     if (!out) {
       drop_inc();
+      // The metadata went down with this event: forget the task so the next switch sends it again.
+      if (is_first) {
+        forget_seen(prev_pid, task_start);
+      }
     } else {
       // Fill monitoring data (always present)
       out->pid_start = task_start;
@@ -263,6 +276,14 @@ TRACEPOINT_PROBE(sched, sched_switch)
 
       events.ringbuf_submit(out, 0);
     }
+
+    // A dying task switches out one last time after sched_process_exit, so its key is dropped
+    // here; dropped any earlier, that last switch would mark it as seen again for good.
+    u32 flags = 0;
+    bpf_probe_read_kernel(&flags, sizeof(flags), &task->flags);
+    if (flags & PF_EXITING) {
+      forget_seen(prev_pid, task_start);
+    }
   }
 
   // --- Handle incoming task (next) START INTERVAL ---
@@ -277,28 +298,6 @@ TRACEPOINT_PROBE(sched, sched_switch)
     snap->loads_remote_start = loads_remote;
     snap->stores_start = stores;
   }
-
-  return 0;
-}
-
-/*
- * Handle task exit: clean up pid_seen to prevent memory growth.
- * This is optional but helps with long-running systems.
- */
-TRACEPOINT_PROBE(sched, sched_process_exit)
-{
-  u64 pid_tgid = bpf_get_current_pid_tgid();
-  u32 pid = (u32)pid_tgid;
-
-  struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-  u64 start_ns = 0;
-  bpf_probe_read_kernel(&start_ns, sizeof(start_ns), &task->start_boottime);
-
-  struct pid_key key = {};
-  key.pid = pid;
-  key.start_bucket = (u32)(start_ns / 10000000);
-
-  pid_seen.delete(&key);
 
   return 0;
 }

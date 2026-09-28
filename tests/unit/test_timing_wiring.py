@@ -2,7 +2,7 @@ import queue
 
 import pytest
 
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_collector import DataCollector
 from metrion.entity.entity import Entity
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
@@ -20,8 +20,8 @@ class _RecordingSource(DataSource):
 
     seen = {}
 
-    def __init__(self, entities, interval=None, enabled_metrics=None, timing=None):
-        _RecordingSource.seen = {"interval": interval, "timing": timing}
+    def __init__(self, entities, interval=None, enabled_metrics=None, timing=None, ebpf=None):
+        _RecordingSource.seen = {"interval": interval, "timing": timing, "ebpf": ebpf}
 
     def get_data(self, metrics):
         return None
@@ -47,12 +47,14 @@ class _BareProcess(EbpfRingBufferProcess):
         raise NotImplementedError
 
 
-def test_runner_hands_the_timing_section_to_the_data_source():
+def test_runner_hands_the_timing_and_ebpf_sections_to_the_data_source():
     timing = TimingConfig(ebpf_flush=0.25, storage_flush=0.5)
+    ebpf = EbpfConfig(ringbuf_mib=64)
 
-    DataSourceRunner(_RecordingSource, [], [], 1.0, queue.Queue(), timing)
+    DataSourceRunner(_RecordingSource, [], [], 1.0, queue.Queue(), timing, ebpf)
 
     assert _RecordingSource.seen["timing"] is timing
+    assert _RecordingSource.seen["ebpf"] is ebpf
 
 
 def test_runner_without_timing_leaves_the_source_on_defaults():
@@ -68,12 +70,15 @@ def test_data_source_falls_back_to_the_defaults():
 
     assert source._timing.ebpf_flush == 1.0
     assert source._timing.storage_flush == 2.0
+    assert source._ebpf.ringbuf_mib == 32
 
 
-def test_entity_monitor_passes_its_timing_to_every_runner(monkeypatch):
+def test_entity_monitor_passes_its_timing_and_ebpf_to_every_runner(monkeypatch):
     timing = TimingConfig(storage_flush=0.5)
+    ebpf = EbpfConfig(ringbuf_mib=64)
     monitor = EntityTypeMonitor.__new__(EntityTypeMonitor)
     monitor._timing = timing
+    monitor._ebpf = ebpf
     monitor._entities = []
     monitor._data_source_metrics = {_RecordingSource: []}
     monitor._data_source_runners = {}
@@ -82,6 +87,7 @@ def test_entity_monitor_passes_its_timing_to_every_runner(monkeypatch):
 
     assert next(iter(monitor._data_source_runners))._datasource is not None
     assert _RecordingSource.seen["timing"] is timing
+    assert _RecordingSource.seen["ebpf"] is ebpf
 
 
 def test_writer_flush_reaches_the_producer_process():

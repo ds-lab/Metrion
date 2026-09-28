@@ -2,7 +2,7 @@ from enum import Enum
 from pathlib import Path
 from typing import override
 
-from metrion.config_reader.config_schema import TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.entity.cpu import CPU
 from metrion.entity.dram import DRAM
@@ -42,6 +42,7 @@ class RAPLCPU(DataSource):
         interval: float | None = None,
         enabled_metrics: list[Metric] | None = None,
         timing: TimingConfig | None = None,
+        ebpf: EbpfConfig | None = None,
     ):
         """Initializes a RAPL data source for a list of entities.
 
@@ -55,7 +56,7 @@ class RAPLCPU(DataSource):
         interval : float, optional
              The collection interval in seconds.
         """
-        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing)
+        super().__init__(entities, interval=interval, enabled_metrics=enabled_metrics, timing=timing, ebpf=ebpf)
         self.powercap_tree = powercap_tree or Path("/sys/devices/virtual/powercap/intel-rapl")
         self._socket_info: dict[int, dict] = {}
         self._timing_registered_pkg = False
