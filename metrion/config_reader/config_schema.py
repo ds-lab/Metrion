@@ -42,6 +42,8 @@ class StorageConfig(BaseModel):
 
     type: Literal["duckdb", "parquet"] = "duckdb"
     path: str = "./monitor.db"
+    # Off keeps only the result stream of the live attribution; the entities are written either way.
+    store_raw_measurements: bool = True
 
     @field_validator("path")
     @classmethod
@@ -402,6 +404,16 @@ class AgentConfig(BaseModel):
             raise ValueError(
                 f"live_attribution.cutoff ({live.cutoff} s) is shorter than the waiting steps in timing "
                 f"({latency} s); measurements would arrive after their interval was attributed"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_the_measurements_reach_someone(self) -> "AgentConfig":
+        """Reject a run that neither stores its measurements nor attributes them."""
+        if not self.storage.store_raw_measurements and not self.live_attribution.enabled:
+            raise ValueError(
+                "storage.store_raw_measurements is off and live_attribution.enabled is off; "
+                "the run would discard every measurement. Turn on the live attribution or keep the raw stream"
             )
         return self
 

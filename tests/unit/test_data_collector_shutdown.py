@@ -26,6 +26,7 @@ def saver():
     instance._data_storage = MagicMock()
     instance._live = LiveAttributionConfig()
     instance._energy_writer = None
+    instance._store_raw = True
     return instance
 
 

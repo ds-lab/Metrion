@@ -17,6 +17,10 @@ storage:
   # appended, so ./monitor.db becomes ./monitor_2026_09_08_10_15_00.db and no run can
   # overwrite another. The path in use is logged at startup.
   path: ./monitor.db
+  # Keep the measurements themselves. Off writes only the result stream of the live attribution,
+  # which is smaller by orders of magnitude - but the run can then never be attributed again with
+  # another model. Off requires live_attribution.enabled, otherwise the agent refuses to start.
+  store_raw_measurements: true
 
 # How often things happen. Every value here is one waiting step between an event in the kernel
 # and the moment its energy is attributed - change when latency matters.

@@ -605,3 +605,12 @@ class TestLiveAttributionConfig:
             AgentConfig(live_attribution={"enabled": True, "cutoff": 10.0})
 
         assert AgentConfig(live_attribution={"cutoff": 10.0}).live_attribution.cutoff == 10.0, "only checked when on"
+
+    def test_dropping_the_raw_stream_without_live_attribution_is_rejected(self):
+        """Neither stored nor attributed, so the run would produce nothing and only an empty file shows it."""
+        with pytest.raises(ValidationError, match="discard every measurement"):
+            AgentConfig(storage={"store_raw_measurements": False})
+
+    def test_dropping_the_raw_stream_with_live_attribution_is_allowed(self):
+        config = AgentConfig(storage={"store_raw_measurements": False}, live_attribution={"enabled": True})
+        assert config.storage.store_raw_measurements is False

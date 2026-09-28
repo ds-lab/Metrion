@@ -48,6 +48,7 @@ class DataSaver:
         storage_path: str,
         live_config: LiveAttributionConfig,
         hardware: Sequence[Entity],
+        store_raw: bool = True,
     ):
         self._entities_queue = entities_queue
         self._measurements_queue = measurements_queue
@@ -58,6 +59,7 @@ class DataSaver:
         self.dyn_eam.update_entites(hardware)
         self._storage_type = storage_type
         self._storage_path = storage_path
+        self._store_raw = store_raw
 
         self._received_sent_e = False
         self._received_sent_m = False
@@ -205,7 +207,7 @@ class DataSaver:
                 logger.error(f"Error processing measurement path: {e}")
                 break
 
-        if dfs:
+        if dfs and self._store_raw:
             self._data_storage.save_measurements(dfs)
         return dfs
 
@@ -227,7 +229,8 @@ class DataSaver:
             )
             for path in items:
                 df = read_temp_ipc(path)
-                self._data_storage.save_measurements([df])
+                if self._store_raw:
+                    self._data_storage.save_measurements([df])
                 measurement_dfs.append(df)
             self._received_sent_m = seen
             if not seen:
@@ -263,6 +266,7 @@ class DataCollector:
         flush_interval: float = 2.0,
         live_config: LiveAttributionConfig | None = None,
         hardware: Sequence[Entity] = (),
+        store_raw: bool = True,
     ):
         """
         Initialize the DataCollector.
@@ -273,6 +277,7 @@ class DataCollector:
             flush_interval: Seconds the IPC writer holds rows before writing a file
             live_config: Attribution while the agent runs; off when not given
             hardware: Detected CPUs, DRAM and GPUs, whose energy the attribution splits
+            store_raw: Write the measurements themselves; off keeps only the result stream
         """
         self._ctx = mp.get_context("spawn")
 
@@ -282,6 +287,7 @@ class DataCollector:
         self._storage_path = storage_path
         self._live_config = live_config or LiveAttributionConfig()
         self._hardware = hardware
+        self._store_raw = store_raw
 
         # Buffering for measurements
         self._measurement_buffer = []
@@ -311,6 +317,7 @@ class DataCollector:
             self._storage_path,
             self._live_config,
             self._hardware,
+            self._store_raw,
         )
 
         self.process = self._ctx.Process(

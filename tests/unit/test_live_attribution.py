@@ -1,5 +1,6 @@
 import datetime as dt
-from unittest.mock import MagicMock
+from queue import Empty
+from unittest.mock import MagicMock, patch
 
 import polars as pl
 
@@ -168,3 +169,32 @@ def test_a_forgotten_thread_keeps_its_identity_until_its_windows_are_written():
 
     _cycle(saver, [], attributed_until=dt.datetime.now(dt.UTC).replace(tzinfo=None) + dt.timedelta(minutes=1))
     assert thread.id not in saver._identities
+
+
+def _saver_with_one_measurement(store_raw):
+    saver = _saver()
+    saver._store_raw = store_raw
+    saver._data_storage = MagicMock()
+    saver._measurements_queue = MagicMock()
+    saver._measurements_queue.get_nowait.side_effect = ["/tmp/batch.arrow", Empty]
+    return saver
+
+
+def test_the_raw_stream_is_written_by_default():
+    saver = _saver_with_one_measurement(True)
+
+    with patch("metrion.data_collector.read_temp_ipc", return_value=pl.DataFrame({"value": [1.0]})):
+        saver._process_measurements()
+
+    assert saver._data_storage.save_measurements.call_count == 1
+
+
+def test_the_raw_stream_is_dropped_when_switched_off_but_the_attribution_still_sees_it():
+    """The point of the switch: the measurements pass through the saver and only the result stream is kept."""
+    saver = _saver_with_one_measurement(False)
+
+    with patch("metrion.data_collector.read_temp_ipc", return_value=pl.DataFrame({"value": [1.0]})):
+        dfs = saver._process_measurements()
+
+    saver._data_storage.save_measurements.assert_not_called()
+    assert len(dfs) == 1
