@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import click
+import duckdb
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import plotly.express as px
@@ -30,6 +31,18 @@ from rich.text import Text
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
+
+from metrion.metric import (
+    CPU_PKG_PID_DYNAMIC_ENERGY,
+    CPU_PKG_PID_IDLE_ENERGY,
+    CPU_PKG_PID_TOTAL_ENERGY,
+    DRAM_SOCKET_PID_DYNAMIC_ENERGY,
+    DRAM_SOCKET_PID_IDLE_ENERGY,
+    DRAM_SOCKET_PID_TOTAL_ENERGY,
+    GPU_DEVICE_PID_DYNAMIC_ENERGY,
+    GPU_DEVICE_PID_IDLE_ENERGY,
+    GPU_DEVICE_PID_TOTAL_ENERGY,
+)
 
 # ============================================================================
 # Configuration Constants
@@ -193,6 +206,64 @@ def _execute_group_query(
         df = pl.DataFrame(result, schema=schema)
 
     return df
+
+
+# The table each per-thread query leaves behind, with the metrics of its total, idle and active column.
+_THREAD_TABLES = {
+    "total_energy_per_thread_view": (CPU_PKG_PID_TOTAL_ENERGY, CPU_PKG_PID_IDLE_ENERGY, CPU_PKG_PID_DYNAMIC_ENERGY),
+    "dram_energy_per_thread_view": (
+        DRAM_SOCKET_PID_TOTAL_ENERGY,
+        DRAM_SOCKET_PID_IDLE_ENERGY,
+        DRAM_SOCKET_PID_DYNAMIC_ENERGY,
+    ),
+    "gpu_energy_per_thread_view": (
+        GPU_DEVICE_PID_TOTAL_ENERGY,
+        GPU_DEVICE_PID_IDLE_ENERGY,
+        GPU_DEVICE_PID_DYNAMIC_ENERGY,
+    ),
+}
+
+
+def get_energy_per_thread(
+    con: duckdb.DuckDBPyConnection, start_time: datetime.datetime, end_time: datetime.datetime
+) -> list[pl.DataFrame]:
+    """Run the per-thread queries of `metrion analyze` and return their result as attribution frames.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        Sees the run's tables. The queries create their own tables only where they are missing,
+        so the connection must not hold them yet.
+    start_time, end_time : datetime.datetime
+        Range of the energy samples to attribute, by their start.
+
+    Returns
+    -------
+    list[pl.DataFrame]
+        One frame per component and part, one row per energy interval and thread, in the schema
+        of the attribution models without physical_entity_id; to_wide takes them as they are.
+    """
+    cpu_query, _, dram_query, _, gpu_query, _ = load_sql_queries()
+    bounds = {"start_time": start_time.strftime(DATETIME_FORMAT), "end_time": end_time.strftime(DATETIME_FORMAT)}
+    for query in (cpu_query, dram_query, gpu_query):
+        for statement in sqlparse.split(query.format(**bounds)):
+            con.execute(statement)
+
+    frames = []
+    for table, metrics in _THREAD_TABLES.items():
+        # A row without a thread belongs to no one; the GPU query writes two with 0 J per idle GPU and interval.
+        rows = con.sql(f"SELECT * FROM {table} WHERE logical_entity_id IS NOT NULL").pl()
+        for metric, column in zip(metrics, ("total_energy_j", "idle_energy_j", "active_energy_j"), strict=True):
+            frames.append(
+                rows.select(
+                    pl.lit(metric.name).alias("metric_id"),
+                    "logical_entity_id",
+                    pl.col(column).alias("value"),
+                    pl.col("interval_start").alias("start_ts"),
+                    pl.col("interval_end").alias("end_ts"),
+                )
+            )
+    return frames
 
 
 def execute_queries(

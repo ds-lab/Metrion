@@ -1,20 +1,27 @@
 import datetime as dt
 from pathlib import Path
+from unittest.mock import MagicMock
 
+import duckdb
 import polars as pl
 import polars.testing as plt
 import pytest
 
+from metrion.config_reader import LiveAttributionConfig
+from metrion.data_collector import DataSaver
 from metrion.energy_attribution.energy_attribution import (
     CPUEnergyAttributionModel,
     DRAMEnergyAttributionModel,
     DyncamicEnergyAttributionModel,
     GPUEnergyAttributionModel,
 )
+from metrion.energy_attribution.energy_attribution_cli import get_energy_per_thread
+from metrion.energy_attribution.wide_result import ENERGY_COLUMNS, add_up, to_wide
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "data"
 
 CUTOFF = 15.0
+WINDOW = 10.0
 CHUNK_SECONDS = [1.0, 5.0, 20.0]
 COMPONENTS = ["cpu", "dram", "gpu"]
 PARTS = ["total", "idle", "dynamic"]
@@ -84,7 +91,7 @@ def _assert_same(actual: pl.DataFrame, expected: pl.DataFrame) -> None:
 @pytest.fixture(scope="module")
 def recorded() -> dict[str, pl.DataFrame]:
     """The recorded run: measurements plus the entities they are resolved against."""
-    names = ("measurement", "cpu", "core", "dram", "gpu")
+    names = ("measurement", "cpu", "core", "dram", "gpu", "entity")
     return {name: pl.read_parquet(FIXTURE_DIR / f"{name}.parquet") for name in names}
 
 
@@ -141,3 +148,37 @@ def test_no_interval_is_attributed_twice(chunked, component, seconds):
     keys = _collect(chunked[seconds], component, "total").select(SORT_KEYS)
 
     assert keys.height == keys.unique().height
+
+
+def test_the_live_stream_matches_what_metrion_analyze_computes(recorded):
+    """End to end: what the saver writes during the run is what the SQL of `metrion analyze` computes afterwards."""
+    saver = DataSaver(
+        None, None, None, "duckdb", "unused", LiveAttributionConfig(enabled=True, cutoff=CUTOFF, window=WINDOW), []
+    )
+    model = saver.dyn_eam
+    model._cpu_df, model._core_df, model._dram_df, model._gpu_df = (
+        recorded[name] for name in ("cpu", "core", "dram", "gpu")
+    )
+    saver._energy_writer = MagicMock()
+    for batch in _chunks(recorded["measurement"], 5.0):
+        saver._run_live_attribution([batch])
+    saver._run_live_attribution([], force=True)
+    live = add_up([call.args[0] for call in saver._energy_writer.write.call_args_list])
+
+    con = duckdb.connect()
+    for name, frame in recorded.items():
+        con.register(name, frame)
+    measurement = recorded["measurement"]
+    sql = to_wide(get_energy_per_thread(con, measurement["start_ts"].min(), measurement["end_ts"].max()), WINDOW)
+
+    # A thread with nothing on one side counts as 0 J there. Only an absolute tolerance: the two sides
+    # add up in a different order and lie 6e-5 J apart, while a slice that arrived late moves up to
+    # 2e-2 J, which a relative tolerance hides in a busy window.
+    compared = live.join(sql, on=["window_start", "window_end", "logical_entity_id"], how="full", coalesce=True)
+    plt.assert_frame_equal(
+        compared.select(pl.col(ENERGY_COLUMNS).fill_null(0.0)),
+        compared.select(pl.col(f"{column}_right").fill_null(0.0).alias(column) for column in ENERGY_COLUMNS),
+        check_exact=False,
+        rel_tol=0.0,
+        abs_tol=1e-3,
+    )
