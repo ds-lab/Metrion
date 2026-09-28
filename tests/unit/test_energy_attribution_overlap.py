@@ -202,3 +202,72 @@ def test_dram_point_memory_samples_still_mark_presence():
     present = idle.filter(pl.col("logical_entity_id") == "pid-1")
     assert present.height == 2, "point memory samples no longer mark the PID as present"
     assert present["value"].sum() == pytest.approx(20.0)  # 10 W over two one-second intervals
+
+
+def test_dram_memory_snapshots_count_until_the_next_read():
+    """The source reads every few seconds. Read as points, the seconds in between own no memory
+    and hand their base load to nobody; on a real run four of five seconds were lost that way."""
+    energy_ts = [_ts(second) for second in range(8)]
+    memory_ts = [_ts(1, 500_000), _ts(6, 500_000)]
+    measurement_df = pl.DataFrame(
+        {
+            "metric_id": ["DRAM_SOCKET_TOTAL_ENERGY"] * 8 + ["DRAM_SOCKET_PID_MEMORY"] * 2,
+            "physical_entity_id": ["dram-0"] * 10,
+            "logical_entity_id": pl.Series([None] * 8 + ["pid-1"] * 2, dtype=pl.String),
+            "value": [100.0 * second for second in range(8)] + [1000.0, 1000.0],
+            "start_ts": energy_ts + memory_ts,
+            "end_ts": energy_ts + memory_ts,
+        }
+    )
+    dram_df, core_df = _dram_frames(10.0)
+    _, idle, _ = DRAMEnergyAttributionModel().attribute_energy(
+        measurement_df=measurement_df, core_df=core_df, dram_df=dram_df
+    )
+
+    present = idle.filter(pl.col("logical_entity_id") == "pid-1")
+    assert present.height == 6, "the seconds between two reads got no owner"
+    assert present["value"].sum() == pytest.approx(60.0)  # 10 W over six one-second intervals
+    assert present["start_ts"].min() == _ts(1), "a read must not reach back before it happened"
+
+
+def _dram_one_interval(memory_values):
+    """One second of DRAM energy, and one memory snapshot inside it per entry of memory_values."""
+    threads = list(memory_values)
+    return pl.DataFrame(
+        {
+            "metric_id": ["DRAM_SOCKET_TOTAL_ENERGY"] * 2 + ["DRAM_SOCKET_PID_MEMORY"] * len(threads),
+            "physical_entity_id": ["dram-0"] * (2 + len(threads)),
+            "logical_entity_id": pl.Series([None, None] + threads, dtype=pl.String),
+            "value": [0.0, 100.0] + [memory_values[thread] for thread in threads],
+            "start_ts": [_ts(0), _ts(1)] + [_ts(0, 500_000)] * len(threads),
+            "end_ts": [_ts(0), _ts(1)] + [_ts(0, 500_000)] * len(threads),
+        }
+    )
+
+
+def test_dram_base_load_follows_the_memory_a_thread_holds():
+    """Refresh scales with the capacity a thread occupies. Three times the memory, three times the
+    base load - by head count both would have got half."""
+    dram_df, core_df = _dram_frames(10.0)
+    _, idle, _ = DRAMEnergyAttributionModel().attribute_energy(
+        measurement_df=_dram_one_interval({"pid-big": 300.0, "pid-small": 100.0}),
+        core_df=core_df,
+        dram_df=dram_df,
+    )
+
+    per_thread = dict(zip(idle["logical_entity_id"], idle["value"], strict=True))
+    assert per_thread["pid-big"] == pytest.approx(7.5)  # 300 of 400 MB
+    assert per_thread["pid-small"] == pytest.approx(2.5)
+    assert sum(per_thread.values()) == pytest.approx(10.0), "the shares must add up to the whole base load"
+
+
+def test_dram_base_load_stays_unattributed_while_nobody_holds_memory():
+    """The denominator is zero. Nobody can be charged for the refresh, and nothing may blow up."""
+    dram_df, core_df = _dram_frames(10.0)
+    _, idle, _ = DRAMEnergyAttributionModel().attribute_energy(
+        measurement_df=_dram_one_interval({}),
+        core_df=core_df,
+        dram_df=dram_df,
+    )
+
+    assert idle.is_empty()

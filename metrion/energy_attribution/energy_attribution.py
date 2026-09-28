@@ -564,6 +564,8 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
 
     _DRAM_METRIC = "DRAM_SOCKET_TOTAL_ENERGY"
     _MEMORY_METRIC = "DRAM_SOCKET_PID_MEMORY"
+    # End of validity for a memory snapshot that has no successor: "still holds" as a timestamp.
+    _NO_SUCCESSOR = dt.datetime(2999, 1, 1)
     _READ_LOCAL_METRIC = "CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM"
     _READ_REMOTE_METRIC = "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"
     _ENERGY_WRAP_DRAM = 65_712_999_613.0 / 1_000_000.0
@@ -711,9 +713,28 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             "logical_entity_id",
             "physical_entity_id",
             pl.col("start_ts").alias("meas_start"),
-            pl.col("end_ts").alias("meas_end"),
             "value",
         )
+
+        # The source reads every process at once every few seconds and reports a point in time.
+        # What a process holds between two reads is what the last read said, so a sample counts
+        # until the next read of the same socket instead of only in the interval it falls into.
+        # Reading it as a point handed the base load of four out of five seconds to nobody. A
+        # process that is gone from the next read loses its memory there; the last read of all
+        # has no successor and counts on, so the end of a run keeps its base load.
+        snapshot_validity = (
+            dram_memory_samples.select("physical_entity_id", "meas_start")
+            .unique()
+            .sort("meas_start")
+            .with_columns(
+                pl.col("meas_start")
+                .shift(-1)
+                .over("physical_entity_id")
+                .fill_null(self._NO_SUCCESSOR)
+                .alias("meas_end")
+            )
+        )
+        dram_memory_samples = dram_memory_samples.join(snapshot_validity, on=["physical_entity_id", "meas_start"])
 
         # No value_col: resident memory is a level, not an amount. A sample that overlaps the
         # interval only partly still reports the whole memory the process holds.
@@ -724,7 +745,7 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
                 [pl.col("physical_entity_id") == pl.col("dram_id")],
             )
             .group_by(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
-            .agg(pl.col("value").sum().alias("total_memory_usage_by_thread"))
+            .agg(pl.col("value").mean().alias("total_memory_usage_by_thread"))
             .select(
                 [
                     "dram_id",
@@ -737,16 +758,37 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             )
         )
 
-        dram_pids_present_on_dram = (
-            dram_memory_usage_by_thread.filter(pl.col("total_memory_usage_by_thread") > 0)
-            .select(["dram_id", "cpu_id", "interval_start", "interval_end", "logical_entity_id"])
-            .unique()
+        # A thread that holds nothing carries no refresh and stays out, denominator and rows alike.
+        dram_memory_holders = dram_memory_usage_by_thread.filter(pl.col("total_memory_usage_by_thread") > 0)
+
+        dram_memory_total_on_dram = (
+            dram_memory_holders.group_by(["dram_id", "cpu_id", "interval_start", "interval_end"])
+            .agg(pl.col("total_memory_usage_by_thread").sum().alias("total_memory_on_dram"))
+            .select(["dram_id", "cpu_id", "interval_start", "interval_end", "total_memory_on_dram"])
         )
 
-        active_pids_on_dram = (
-            dram_pids_present_on_dram.group_by(["dram_id", "cpu_id", "interval_start", "interval_end"])
-            .agg(pl.count("logical_entity_id").alias("pid_count"))
-            .select(["dram_id", "cpu_id", "interval_start", "interval_end", "pid_count"])
+        dram_memory_share_by_thread = (
+            dram_memory_holders.join(
+                dram_memory_total_on_dram,
+                on=["dram_id", "cpu_id", "interval_start", "interval_end"],
+            )
+            .with_columns(
+                (
+                    pl.when(pl.col("total_memory_on_dram") <= 0)
+                    .then(0.0)
+                    .otherwise(pl.col("total_memory_usage_by_thread") / pl.col("total_memory_on_dram"))
+                ).alias("pid_memory_share")
+            )
+            .select(
+                [
+                    "dram_id",
+                    "cpu_id",
+                    "interval_start",
+                    "interval_end",
+                    "logical_entity_id",
+                    "pid_memory_share",
+                ]
+            )
         )
 
         # core_mapping = core_lf.select(["id", "parent_id"]).rename({"id": "core_id", "parent_id": "cpu_id"})
@@ -870,12 +912,13 @@ class DRAMEnergyAttributionModel(EnergyAttributionModelBase):
             )
         )
 
+        # The base load is refresh: it scales with the capacity a thread occupies, not with how
+        # many threads happen to hold something. Same shape as the read share of the work above.
         dram_idle_energy_per_thread_per_dram = (
             dram_interval_energy_split.join(
-                active_pids_on_dram, on=["dram_id", "cpu_id", "interval_start", "interval_end"]
+                dram_memory_share_by_thread, on=["dram_id", "cpu_id", "interval_start", "interval_end"]
             )
-            .join(dram_pids_present_on_dram, on=["dram_id", "cpu_id", "interval_start", "interval_end"])
-            .with_columns((pl.col("idle_energy_j") / pl.col("pid_count")).alias("idle_energy_j"))
+            .with_columns((pl.col("pid_memory_share") * pl.col("idle_energy_j")).alias("idle_energy_j"))
             .select(
                 [
                     pl.lit(DRAM_SOCKET_PID_IDLE_ENERGY.name).alias("metric_id"),
@@ -1672,7 +1715,18 @@ class DyncamicEnergyAttributionModel:
             ts for (metric, _), (ts, _) in self._last_energy_samples.items() if metric not in self._reported_stalls
         ]
         deletion_point = min(min_bound, *anchors) if anchors else min_bound
+
+        # A memory snapshot counts until the next one, so the last one before the deletion point
+        # still describes the intervals that follow it. Like the energy anchors it has to survive
+        # the trimming, otherwise the piecewise path would hand their base load to nobody.
+        memory_anchor = self._measurements_df.filter(
+            (pl.col("metric_id") == DRAMEnergyAttributionModel._MEMORY_METRIC) & (pl.col("start_ts") <= deletion_point)
+        )
+        memory_anchor = memory_anchor.filter(pl.col("start_ts") == pl.col("start_ts").max().over("physical_entity_id"))
+
         self._measurements_df = self._measurements_df.filter(pl.col("end_ts") > deletion_point)
+        if not memory_anchor.is_empty():
+            self._measurements_df = pl.concat([self._measurements_df, memory_anchor])
 
         # Put back the anchors the deletion just took. The filter keeps end_ts > deletion_point,
         # so a newer anchor is still in the buffer; re-adding it would leave two rows at the same

@@ -77,7 +77,26 @@ dram_interval_energy_split AS (
     FROM dram_interval_powers
 ),
 
--- (B) PIDs present on DRAM (used for IDLE equal split). Presence = has memory in the interval.
+-- (B) Memory each thread holds on a DRAM (drives the IDLE split).
+--     The source reads every process at once every few seconds and reports a point in time.
+--     What a process holds between two reads is what the last read said, so a snapshot counts
+--     until the next read of the same socket. The last read has no successor and counts on.
+dram_memory_snapshot_validity AS (
+    SELECT
+        physical_entity_id,
+        start_ts,
+        COALESCE(
+            LEAD(start_ts) OVER (PARTITION BY physical_entity_id ORDER BY start_ts),
+            TIMESTAMP '2999-01-01'
+        ) AS valid_until
+    FROM (
+        SELECT DISTINCT physical_entity_id, start_ts
+        FROM measurement
+        WHERE metric_id = 'DRAM_SOCKET_PID_MEMORY'
+          AND value IS NOT NULL
+          AND ABS(value) < 1e307
+    )
+),
 dram_memory_usage_by_thread AS (
     SELECT
         dei.dram_id,
@@ -87,7 +106,9 @@ dram_memory_usage_by_thread AS (
         m.logical_entity_id,
         -- Not scaled by the overlap: resident memory is a level, not an amount. A sample that
         -- overlaps the interval only partly still reports the whole memory the process holds.
-        SUM(m.value) AS total_memory_usage_by_thread
+        -- Averaged where two snapshots reach into one interval, which is what the thread held
+        -- there; adding them up would invent memory that never existed.
+        AVG(m.value) AS total_memory_usage_by_thread
     FROM energy_interval_dram_tmp AS dei
     JOIN measurement AS m
       ON m.physical_entity_id = dei.dram_id
@@ -95,21 +116,24 @@ dram_memory_usage_by_thread AS (
      AND m.value IS NOT NULL
      AND ABS(m.value) < 1e307
      AND m.start_ts < dei.interval_end
-     AND m."end_ts" > dei.interval_start
+    JOIN dram_memory_snapshot_validity AS v
+      ON v.physical_entity_id = m.physical_entity_id
+     AND v.start_ts = m.start_ts
+     AND v.valid_until > dei.interval_start
     GROUP BY
         dei.dram_id, dei.cpu_id, dei.interval_start, dei.interval_end, m.logical_entity_id
 ),
-dram_threads_present_on_dram AS (
-    SELECT DISTINCT
-        dram_id, cpu_id, interval_start, interval_end, logical_entity_id
+-- A thread that holds nothing carries no refresh and stays out, denominator and rows alike.
+dram_memory_holders AS (
+    SELECT *
     FROM dram_memory_usage_by_thread
     WHERE total_memory_usage_by_thread > 0
 ),
-active_threads_on_dram AS (
+dram_memory_total_on_dram AS (
     SELECT
         dram_id, cpu_id, interval_start, interval_end,
-        COUNT(DISTINCT logical_entity_id) AS thread_count
-    FROM dram_threads_present_on_dram
+        SUM(total_memory_usage_by_thread) AS total_memory_on_dram
+    FROM dram_memory_holders
     GROUP BY
         dram_id, cpu_id, interval_start, interval_end
 ),
@@ -195,7 +219,7 @@ dram_access_share_by_thread AS (
      AND a.interval_end   = t.interval_end
 ),
 
--- 4) Allocate per-DRAM active energy by access share; idle energy equally by PID count
+-- 4) Allocate per-DRAM active energy by access share, idle energy by memory share
 dram_active_energy_per_thread_per_dram AS (
     SELECT
         s.dram_id, s.cpu_id, s.interval_start, s.interval_end, sh.logical_entity_id,
@@ -207,24 +231,26 @@ dram_active_energy_per_thread_per_dram AS (
      AND s.interval_start = sh.interval_start
      AND s.interval_end   = sh.interval_end
 ),
+-- The base load is refresh: it scales with the capacity a thread occupies, not with how many
+-- threads happen to hold something.
 dram_idle_energy_per_thread_per_dram AS (
     SELECT
-        s.dram_id, s.cpu_id, s.interval_start, s.interval_end, p.logical_entity_id,
-        CASE WHEN ap.thread_count > 0
-             THEN s.idle_energy_j_total * 1.0 / ap.thread_count
+        s.dram_id, s.cpu_id, s.interval_start, s.interval_end, u.logical_entity_id,
+        CASE WHEN t.total_memory_on_dram > 0
+             THEN s.idle_energy_j_total * (u.total_memory_usage_by_thread / t.total_memory_on_dram)
              ELSE 0.0
         END AS idle_energy_per_dram_per_thread_j
     FROM dram_interval_energy_split s
-    JOIN active_threads_on_dram ap
-      ON ap.dram_id = s.dram_id
-     AND ap.cpu_id  = s.cpu_id
-     AND ap.interval_start = s.interval_start
-     AND ap.interval_end   = s.interval_end
-    JOIN dram_threads_present_on_dram p
-      ON p.dram_id = s.dram_id
-     AND p.cpu_id  = s.cpu_id
-     AND p.interval_start = s.interval_start
-     AND p.interval_end   = s.interval_end
+    JOIN dram_memory_holders u
+      ON u.dram_id = s.dram_id
+     AND u.cpu_id  = s.cpu_id
+     AND u.interval_start = s.interval_start
+     AND u.interval_end   = s.interval_end
+    JOIN dram_memory_total_on_dram t
+      ON t.dram_id = s.dram_id
+     AND t.cpu_id  = s.cpu_id
+     AND t.interval_start = s.interval_start
+     AND t.interval_end   = s.interval_end
 ),
 
 -- 5) Sum per-DRAM allocations to per-PID totals per interval
