@@ -335,11 +335,9 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
 
         # Setup FDs lists
         fds_ucc: list[int] = []
-        fds_load_local_dram: list[int] = []
-        fds_load_remote_dram: list[int] = []
-        fds_store: list[int] = []
+        hybrid = len(atom_cpus) != 0 and len(core_cpus) != 0
 
-        if self._collection_plan.needs_cpu_perf and len(atom_cpus) != 0 and len(core_cpus) != 0:
+        if self._collection_plan.needs_cpu_perf and hybrid:
             # hybrid system detected
             # select only cores in topology
             # Unhalted Core Cycles for Atom cores, read from /sys/bus/event_source/devices/cpu_atom/events/cpu-cycles
@@ -444,66 +442,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 pid=-1,
             )
 
-        needs_memory_perf = (
-            self._collection_plan.needs_l3_local
-            or self._collection_plan.needs_l3_remote
-            or self._collection_plan.needs_stores
-        )
-        if needs_memory_perf and not (len(atom_cpus) != 0 and len(core_cpus) != 0):
-            # Events for DRAM Energy Consumption (non-hybrid systems only)
-            # https://perfmon-events.intel.com/skylake_server.html
-            if self._collection_plan.needs_l3_local:
-                event_load_local_dram = "mem_load_l3_miss_retired.local_dram"
-                config_load_local_dram = resolve_with_strace(event_load_local_dram, cpu=0)
-                attr_load_local_dram = CustomPerf.perf_event_attr()
-                attr_load_local_dram.type = config_load_local_dram["type"]
-                attr_load_local_dram.config = config_load_local_dram["config"]
-                attr_load_local_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
-                attr_load_local_dram.sample_period = 0
-                attr_load_local_dram.sample_type = 0
-                attr_load_local_dram.disabled = 0
-                attr_load_local_dram.exclude_kernel = 0
-                attr_load_local_dram.exclude_user = 0
-                attr_load_local_dram.freq = 0
-                attr_load_local_dram.exclude_guest = 0
-                attr_load_local_dram.config1 = config_load_local_dram.get("config1", 0)
-                fds_load_local_dram = CustomPerf.perf_custom_event_open_with_results(attr=attr_load_local_dram, pid=-1)
-
-            if self._collection_plan.needs_l3_remote:
-                event_load_remote_dram = "mem_load_l3_miss_retired.remote_dram"
-                config_load_remote_dram = resolve_with_strace(event_load_remote_dram, cpu=0)
-                attr_load_remote_dram = CustomPerf.perf_event_attr()
-                attr_load_remote_dram.type = config_load_remote_dram["type"]
-                attr_load_remote_dram.config = config_load_remote_dram["config"]
-                attr_load_remote_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
-                attr_load_remote_dram.sample_period = 0
-                attr_load_remote_dram.sample_type = 0
-                attr_load_remote_dram.disabled = 0
-                attr_load_remote_dram.exclude_kernel = 0
-                attr_load_remote_dram.exclude_user = 0
-                attr_load_remote_dram.freq = 0
-                attr_load_remote_dram.exclude_guest = 0
-                attr_load_remote_dram.config1 = config_load_remote_dram.get("config1", 0)
-                fds_load_remote_dram = CustomPerf.perf_custom_event_open_with_results(
-                    attr=attr_load_remote_dram, pid=-1
-                )
-
-            if self._collection_plan.needs_stores:
-                event_store = "mem_inst_retired.all_stores"
-                config_store = resolve_with_strace(event_store, cpu=0)
-                attr_store = CustomPerf.perf_event_attr()
-                attr_store.type = config_store["type"]
-                attr_store.config = config_store["config"]
-                attr_store.size = ct.sizeof(CustomPerf.perf_event_attr)
-                attr_store.sample_period = 0
-                attr_store.sample_type = 0
-                attr_store.disabled = 0
-                attr_store.exclude_kernel = 0
-                attr_store.exclude_user = 0
-                attr_store.freq = 0
-                attr_store.exclude_guest = 0
-                attr_store.config1 = config_store.get("config1", 0)
-                fds_store = CustomPerf.perf_custom_event_open_with_results(attr=attr_store, pid=-1)
+        fds_load_local_dram, fds_load_remote_dram, fds_store = self._open_memory_events(hybrid)
 
         fds_aperf: list[int] = []
         fds_mperf: list[int] = []
@@ -582,6 +521,44 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             len(fds_load_remote_dram),
             len(fds_store),
         )
+
+    def _open_memory_events(self, hybrid: bool) -> tuple[list[int], list[int], list[int]]:
+        """File descriptors of the L3 local, L3 remote and store counters the config asks for."""
+        plan = self._collection_plan
+        if not (plan.needs_l3_local or plan.needs_l3_remote or plan.needs_stores):
+            return [], [], []
+        if hybrid:
+            logger.warning(
+                "sched_switch BPF: memory counters are not collected on hybrid CPUs (P- and E-cores), "
+                "so DRAM dynamic energy is not attributed to processes"
+            )
+            return [], [], []
+
+        # Event names from https://perfmon-events.intel.com/skylake_server.html
+        return (
+            self._open_memory_event("mem_load_l3_miss_retired.local_dram") if plan.needs_l3_local else [],
+            self._open_memory_event("mem_load_l3_miss_retired.remote_dram") if plan.needs_l3_remote else [],
+            self._open_memory_event("mem_inst_retired.all_stores") if plan.needs_stores else [],
+        )
+
+    def _open_memory_event(self, event: str) -> list[int]:
+        """Open a counter by its perf name on every CPU; an empty list where this CPU lacks it."""
+        try:
+            config = resolve_with_strace(event, cpu=0)
+            # Every field left out stays zero: counting, not sampling, enabled, user and kernel.
+            attr = CustomPerf.perf_event_attr()
+            attr.type = config["type"]
+            attr.config = config["config"]
+            attr.config1 = config.get("config1", 0)
+            attr.size = ct.sizeof(CustomPerf.perf_event_attr)
+            return CustomPerf.perf_custom_event_open_with_results(attr=attr, pid=-1)
+        except (RuntimeError, OSError) as e:
+            # Without the counter only DRAM loses its per-process split; CPU attribution carries on.
+            logger.warning(
+                f"sched_switch BPF: memory counter {event} is not available on this machine ({e}), "
+                "so DRAM dynamic energy is attributed without it"
+            )
+            return []
 
     @override
     def _attach_ringbuf(self) -> None:
