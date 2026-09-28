@@ -139,7 +139,7 @@ class EbpfConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ringbuf_mib: int = Field(default=32, gt=0, description="Size of the sched_switch ring buffer in MiB")
+    ringbuf_mib: int = Field(default=256, gt=0, description="Size of the sched_switch ring buffer in MiB")
 
     @field_validator("ringbuf_mib")
     @classmethod

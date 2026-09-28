@@ -221,12 +221,12 @@ class TestSourceIntervals:
         assert (config.timing.ebpf_flush, config.timing.storage_flush) == (1.0, 2.0)
         assert config.timing.sources.rapl == 1.0
         assert config.timing.sources.tcp_monitor == 5.0
-        assert config.ebpf.ringbuf_mib == 32
+        assert config.ebpf.ringbuf_mib == 256
 
 
 class TestEbpfConfig:
-    def test_default_is_32_mib(self):
-        assert EbpfConfig().ringbuf_mib == 32
+    def test_default_is_256_mib(self):
+        assert EbpfConfig().ringbuf_mib == 256
 
     @pytest.mark.parametrize("mib", [0, 48, -64])
     def test_rejects_what_the_kernel_would_reject(self, mib):

@@ -70,7 +70,7 @@ def test_data_source_falls_back_to_the_defaults():
 
     assert source._timing.ebpf_flush == 1.0
     assert source._timing.storage_flush == 2.0
-    assert source._ebpf.ringbuf_mib == 32
+    assert source._ebpf.ringbuf_mib == 256
 
 
 def test_entity_monitor_passes_its_timing_and_ebpf_to_every_runner(monkeypatch):
