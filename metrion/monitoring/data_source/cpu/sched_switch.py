@@ -939,7 +939,7 @@ class SchedSwitchMonitor(DataSource):
         for df_path in df_paths:
             df = read_temp_ipc(df_path)
             dfs.append(df)
-        df = pl.concat(dfs, how="vertical").unique()
+        df = pl.concat(dfs, how="vertical")
         return df
 
     def _report_dead_producer(self) -> None:
@@ -1258,22 +1258,28 @@ class SchedSwitchMonitor(DataSource):
         self._validate_bpf_clock_domain(raw_data_df)
         self._raw_events_received += raw_data_df.height
 
-        raw_data_inline_metadata_df = raw_data_df.select(
-            pl.col("pid"),
-            pl.col("pid_start"),
-            pl.col("tgid"),
-            pl.col("tgid_start"),
-            pl.col("parent_tid"),
-            pl.col("parent_tgid"),
-            pl.col("parent_tid_start"),
-            pl.col("parent_tgid_start"),
-            pl.col("cgroup_id"),
-            pl.col("uid"),
-            pl.col("gid"),
-            pl.col("comm"),
-            pl.col("cmdline"),
-            pl.col("event_type"),
-        ).unique()
+        # Only the first event of a thread carries its metadata, and both registry paths below
+        # ignore the others.
+        raw_data_inline_metadata_df = (
+            raw_data_df.filter(pl.col("event_type") == 1)
+            .select(
+                pl.col("pid"),
+                pl.col("pid_start"),
+                pl.col("tgid"),
+                pl.col("tgid_start"),
+                pl.col("parent_tid"),
+                pl.col("parent_tgid"),
+                pl.col("parent_tid_start"),
+                pl.col("parent_tgid_start"),
+                pl.col("cgroup_id"),
+                pl.col("uid"),
+                pl.col("gid"),
+                pl.col("comm"),
+                pl.col("cmdline"),
+                pl.col("event_type"),
+            )
+            .unique()
+        )
 
         # Register entities from inline metadata (zero-loss path)
         self._logical_entity_registry._register_entities_from_inline_metadata(raw_data_inline_metadata_df)
@@ -1299,7 +1305,7 @@ class SchedSwitchMonitor(DataSource):
             pl.col("loads_remote_end"),
             pl.col("stores_start"),
             pl.col("stores_end"),
-        ).unique()
+        )
 
         pid_work_measurements_df = pl.DataFrame()
         if self._collection_plan.needs_cpu_perf:
@@ -1458,7 +1464,7 @@ class SchedSwitchMonitor(DataSource):
 
         # build final cache of metrics
         if df_list:
-            df = pl.concat(df_list, how="vertical").unique()
+            df = pl.concat(df_list, how="vertical")
             self._calculate_and_cache_metrics(df)
         final_data_record = self.get_data(metrics)
 
