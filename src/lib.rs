@@ -626,10 +626,15 @@ fn prepare_one_df(df: DataFrame, ht_factor: f64) -> Result<DataFrame, String> {
 
     let mut data = dataframe_to_measurements(df)?;
 
+    // Ends before starts at the same time. The two SMT siblings can switch in the same
+    // nanosecond; without the core and the row as the last keys, their order would depend on
+    // the input order and so would the split between them.
     data.sort_unstable_by(|a, b| {
         a.time
             .cmp(&b.time)
             .then(b.interval_type.cmp(&a.interval_type))
+            .then(a.cpu_core.cmp(&b.cpu_core))
+            .then(a.exec_count.cmp(&b.exec_count))
     });
 
     let processed = process_monitoring_data(data, ht_factor)?;

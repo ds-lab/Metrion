@@ -131,3 +131,22 @@ def test_every_segment_gets_its_time_share():
         # short; the interpolation this guards against was off by thousands.
         for counter in ("aperf", "mperf"):
             assert abs(row[f"delta_{counter}"] - deltas[counter] * share) < 2
+
+
+def test_the_result_does_not_depend_on_the_input_order():
+    """Siblings that switch in the same nanosecond give the same result whatever order the rows come in."""
+    rng = np.random.default_rng(20260929)
+    events = []
+    for pid, core in ((1, 0), (2, 1)):
+        time = 1_000_000
+        for _ in range(60):
+            # A coarse grid, so that both cores often start or stop at the same time.
+            duration = int(rng.integers(1, 6)) * 1_000
+            values = counters(*[(1_000_000, 1_000_000 + duration * rate) for rate in (2, 1, 3)])
+            events.append((pid, core, time, time + duration, values))
+            time += duration + int(rng.integers(0, 3)) * 1_000
+
+    forward = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
+    backward = mar.prepare_monitoring_data_for_tuples(frame(events[::-1]), [(0, 1)], HT)
+
+    assert forward.equals(backward)
