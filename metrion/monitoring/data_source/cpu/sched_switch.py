@@ -39,6 +39,7 @@ from metrion.monitoring.data_source.cpu.collection_plan import (
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.cpu.utils import (
     CustomPerf,
+    get_online_cpus,
     grouping_threshold_ms,
     read_perf_event,
     read_perf_type,
@@ -324,7 +325,11 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         else:
             core_cpus = []
 
-        # Setup FDs lists
+        # Setup FDs lists. The BPF program reads a counter by CPU ID, so every fd list keeps the
+        # CPUs it was opened on, in the same order.
+        online_cpus = get_online_cpus()
+        ucc_cpus: list[int] = []
+        memory_cpus: list[int] = []
         fds_ucc: list[int] = []
         fds_load_local_dram: list[int] = []
         fds_load_remote_dram: list[int] = []
@@ -377,6 +382,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 attr=attr_ucc_core, pid=-1, cpus=list(core_cpus)
             )
             fds_ucc = fds_ucc_core + fds_ucc_atom
+            ucc_cpus = list(core_cpus) + list(atom_cpus)
 
             # L2_RQSTS.MISS for Core cores
             attr_l2_rqsts_miss_core = CustomPerf.perf_event_attr()
@@ -433,7 +439,9 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             fds_ucc = CustomPerf.perf_custom_event_open_with_results(
                 attr=attr_ucc,
                 pid=-1,
+                cpus=online_cpus,
             )
+            ucc_cpus = online_cpus
 
         needs_memory_perf = (
             self._collection_plan.needs_l3_local
@@ -443,6 +451,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         if needs_memory_perf and not (len(atom_cpus) != 0 and len(core_cpus) != 0):
             # Events for DRAM Energy Consumption (non-hybrid systems only)
             # https://perfmon-events.intel.com/skylake_server.html
+            memory_cpus = online_cpus
             if self._collection_plan.needs_l3_local:
                 event_load_local_dram = "mem_load_l3_miss_retired.local_dram"
                 config_load_local_dram = resolve_with_strace(event_load_local_dram, cpu=0)
@@ -458,7 +467,9 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 attr_load_local_dram.freq = 0
                 attr_load_local_dram.exclude_guest = 0
                 attr_load_local_dram.config1 = config_load_local_dram.get("config1", 0)
-                fds_load_local_dram = CustomPerf.perf_custom_event_open_with_results(attr=attr_load_local_dram, pid=-1)
+                fds_load_local_dram = CustomPerf.perf_custom_event_open_with_results(
+                    attr=attr_load_local_dram, pid=-1, cpus=memory_cpus
+                )
 
             if self._collection_plan.needs_l3_remote:
                 event_load_remote_dram = "mem_load_l3_miss_retired.remote_dram"
@@ -476,7 +487,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 attr_load_remote_dram.exclude_guest = 0
                 attr_load_remote_dram.config1 = config_load_remote_dram.get("config1", 0)
                 fds_load_remote_dram = CustomPerf.perf_custom_event_open_with_results(
-                    attr=attr_load_remote_dram, pid=-1
+                    attr=attr_load_remote_dram, pid=-1, cpus=memory_cpus
                 )
 
             if self._collection_plan.needs_stores:
@@ -494,7 +505,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 attr_store.freq = 0
                 attr_store.exclude_guest = 0
                 attr_store.config1 = config_store.get("config1", 0)
-                fds_store = CustomPerf.perf_custom_event_open_with_results(attr=attr_store, pid=-1)
+                fds_store = CustomPerf.perf_custom_event_open_with_results(attr=attr_store, pid=-1, cpus=memory_cpus)
 
         fds_aperf: list[int] = []
         fds_mperf: list[int] = []
@@ -515,7 +526,9 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             attr_mperf.exclude_user = 0
             attr_mperf.freq = 0
             attr_mperf.exclude_guest = 0
-            fds_mperf = CustomPerf.perf_custom_event_open_with_results(attr=attr_mperf, pid=-1, group_fds=fds_ucc)
+            fds_mperf = CustomPerf.perf_custom_event_open_with_results(
+                attr=attr_mperf, pid=-1, cpus=ucc_cpus, group_fds=fds_ucc
+            )
 
             # APERF
             aperf_type = read_perf_type("/sys/bus/event_source/devices/msr/type")
@@ -531,28 +544,30 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             attr_aperf.exclude_user = 0
             attr_aperf.freq = 0
             attr_aperf.exclude_guest = 0
-            fds_aperf = CustomPerf.perf_custom_event_open_with_results(attr=attr_aperf, pid=-1, group_fds=fds_ucc)
+            fds_aperf = CustomPerf.perf_custom_event_open_with_results(
+                attr=attr_aperf, pid=-1, cpus=ucc_cpus, group_fds=fds_ucc
+            )
 
         # Attach the perf events to the BPF program
         if self._collection_plan.needs_cpu_perf and self._bpf is not None:
-            for i, fd in enumerate(fds_ucc):
-                self._bpf.set_perf_fd("cycles_core", i, fd)
-            for i, apfd in enumerate(fds_aperf):
-                self._bpf.set_perf_fd("aperf_core", i, apfd)
-            for i, mpfd in enumerate(fds_mperf):
-                self._bpf.set_perf_fd("mperf_core", i, mpfd)
+            for cpu, fd in zip(ucc_cpus, fds_ucc, strict=True):
+                self._bpf.set_perf_fd("cycles_core", cpu, fd)
+            for cpu, apfd in zip(ucc_cpus, fds_aperf, strict=True):
+                self._bpf.set_perf_fd("aperf_core", cpu, apfd)
+            for cpu, mpfd in zip(ucc_cpus, fds_mperf, strict=True):
+                self._bpf.set_perf_fd("mperf_core", cpu, mpfd)
 
         if self._collection_plan.needs_l3_local and self._bpf is not None:
-            for i, fd in enumerate(fds_load_local_dram):
-                self._bpf.set_perf_fd("load_local_perf", i, fd)
+            for cpu, fd in zip(memory_cpus, fds_load_local_dram, strict=True):
+                self._bpf.set_perf_fd("load_local_perf", cpu, fd)
 
         if self._collection_plan.needs_l3_remote and self._bpf is not None:
-            for i, fd in enumerate(fds_load_remote_dram):
-                self._bpf.set_perf_fd("load_remote_perf", i, fd)
+            for cpu, fd in zip(memory_cpus, fds_load_remote_dram, strict=True):
+                self._bpf.set_perf_fd("load_remote_perf", cpu, fd)
 
         if self._collection_plan.needs_stores and self._bpf is not None:
-            for i, fd in enumerate(fds_store):
-                self._bpf.set_perf_fd("store_perf", i, fd)
+            for cpu, fd in zip(memory_cpus, fds_store, strict=True):
+                self._bpf.set_perf_fd("store_perf", cpu, fd)
 
         logger.info(
             "sched_switch BPF: attached perf fds (ucc={}, aperf={}, mperf={}, l3_local={}, l3_remote={}, stores={})",
