@@ -148,10 +148,28 @@ def test_the_report_fits_a_narrow_terminal_and_sums_up_what_it_leaves_out(monkey
     assert "30.0" in text, "the sum covers the rows left out"
 
 
-def test_an_empty_selection_says_so():
-    rows = _rows(ENERGY)
+def test_an_empty_selection_says_so_and_fails(tmp_path):
+    _rows(ENERGY).write_parquet(tmp_path / "part-00000.parquet")
 
-    assert "Nothing matched" in _printed(rows, rows.clear(), None, 'cmdline "x"', 80)
+    result = CliRunner().invoke(app, ["analyze", str(tmp_path), "--cmdline", "no such program"])
+
+    assert result.exit_code == 1
+    assert "Nothing matched" in result.output
+
+
+def test_csv_holds_every_row_and_the_full_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "TOP", 1)
+    _rows(ENERGY).write_parquet(tmp_path / "part-00000.parquet")
+
+    result = CliRunner().invoke(app, ["analyze", str(tmp_path), "--csv", str(tmp_path / "out"), "--unit", "Wh"])
+
+    assert result.exit_code == 0, result.output
+    table = pl.read_csv(tmp_path / "out" / "table.csv")
+    assert table["pid"].to_list() == [300, 200, 400]
+    assert table["total_j"].sum() == pytest.approx(30.0), "joules whatever the terminal shows"
+    assert "nginx -g daemon off;" in table["cmdline"].to_list()
+    rows = pl.read_csv(tmp_path / "out" / "rows.csv")
+    assert rows.height == 2 * len(ENERGY)
 
 
 def test_only_one_filter_at_a_time(tmp_path):

@@ -53,6 +53,13 @@ def analyze(
         datetime | None, typer.Option(formats=TIME_FORMATS, metavar="DATE", help="End of the analysis (UTC).")
     ] = None,
     unit: Annotated[Literal["J", "Wh"], typer.Option(help="Unit of the energy shown.")] = "J",
+    csv: Annotated[
+        Path | None,
+        typer.Option(
+            metavar="DIR",
+            help="Also write the whole table and the selected rows per window and thread as CSV, in joules.",
+        ),
+    ] = None,
 ):
     """Show how much energy each process of a run used; without a filter, the processes that used the most."""
     if sum(option is not None for option in (cmdline, pids, cgroup)) > 1:
@@ -80,7 +87,17 @@ def analyze(
         label = f'cgroup "{cgroup}"'
     else:
         label = "all processes"
-    print_report(rows, selected, summarize(selected, procs, cgroup is not None), label, unit)
+    if selected.is_empty():
+        typer.echo(f"Nothing matched {label}.", err=True)
+        raise typer.Exit(1)
+
+    table = summarize(selected, procs, cgroup is not None)
+    print_report(rows, selected, table, label, unit)
+    if csv is not None:
+        csv.mkdir(parents=True, exist_ok=True)
+        table.write_csv(csv / "table.csv")
+        selected.sort("window_start", "native_pid", "native_thread_id").write_csv(csv / "rows.csv")
+        typer.echo(f"Wrote table.csv and rows.csv to {csv}")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from rich.table import Table
 
 from metrion.data_storage.parquet_to_duckdb import ensure_duckdb
 from metrion.energy_attribution.sql_attribution import get_energy_per_thread
-from metrion.energy_attribution.wide_result import IDENTITY_COLUMNS, to_wide
+from metrion.energy_attribution.wide_result import ENERGY_COLUMNS, IDENTITY_COLUMNS, to_wide
 
 COMPONENTS = ["cpu", "dram", "gpu"]
 PARTS = [f"{component}_{part}_j" for component in COMPONENTS for part in ("idle", "dynamic")]
@@ -75,7 +75,7 @@ def load(path: Path, start: datetime | None, end: datetime | None) -> tuple[pl.D
         rows = rows.filter(pl.col("window_start") >= start)
     if end is not None:
         rows = rows.filter(pl.col("window_start") < end)
-    return rows, threads
+    return rows.select("window_start", "window_end", "logical_entity_id", *IDENTITY_COLUMNS, *ENERGY_COLUMNS), threads
 
 
 def processes(threads: pl.DataFrame) -> pl.DataFrame:
@@ -151,10 +151,6 @@ def print_report(
     console: Console | None = None,
 ) -> None:
     console = console or Console()
-    if selected.is_empty():
-        console.print(f"Nothing matched {label}.")
-        return
-
     total = table["total_j"].sum()
     energy = _amount(total, unit, True)
     if selected.height < rows.height:
