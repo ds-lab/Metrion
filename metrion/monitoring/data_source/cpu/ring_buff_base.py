@@ -14,14 +14,18 @@ from loguru import logger
 
 from metrion.util import IpcAsyncWriter
 
-# Drops are checked on every poll iteration; without a throttle a busy ring buffer would
-# produce a warning every few milliseconds.
+# How often the kernel's drop counter is read. Reading it is a syscall per CPU through bcc, and
+# losses only need to be noticed within about a second.
+_DROP_CHECK_INTERVAL_S = 1.0
+
+# A ring buffer that keeps overflowing would otherwise warn on every check.
 _DROP_WARNING_INTERVAL_S = 10.0
 
 # Pause between two drains of the ring buffer. Blocking until data arrives instead wakes the
 # process for the first event after every drain, and for sched_switch the process going back
-# to sleep is such an event, so it would never stay asleep.
-_POLL_INTERVAL_S = 0.005
+# to sleep is such an event, so it would never stay asleep. Each ring must hold what arrives in
+# one pause; the smallest (the registry's, 4 MiB) holds thousands of new threads.
+_POLL_INTERVAL_S = 0.020
 
 
 @dataclass(slots=True)
@@ -154,6 +158,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
     def _poll_loop(self) -> None:
         assert self._bpf is not None
         wait_s = _POLL_INTERVAL_S
+        last_drop_check = 0.0
         while not self._stop_event.wait(wait_s):
             self._consume()
             # A pass that ended on a full buffer (see _handle_ring_event) left events behind, so
@@ -163,7 +168,13 @@ class EbpfRingBufferProcess(mp.Process, ABC):
                 self._flush_requested = False
                 self._flush_to_queue()
 
-            self._check_missing_events()
+            now = time.monotonic()
+            if now - last_drop_check >= _DROP_CHECK_INTERVAL_S:
+                last_drop_check = now
+                self._check_missing_events()
+
+        # The final report must include what was dropped since the last check.
+        self._check_missing_events()
 
     def _consume(self) -> None:
         assert self._bpf is not None
