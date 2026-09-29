@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import multiprocessing as mp
 import signal
 import threading
@@ -14,7 +13,7 @@ from loguru import logger
 
 from metrion.util import IpcAsyncWriter
 
-# How often the kernel's drop counter is read. Reading it is a syscall per CPU through bcc, and
+# How often the kernel's drop counter is read. Reading it is a syscall, and
 # losses only need to be noticed within about a second.
 _DROP_CHECK_INTERVAL_S = 1.0
 
@@ -209,13 +208,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         Optional hook: override if your drops map is not 'rb_drops' or uses different semantics.
         """
         assert self._bpf is not None
-        drop_map = self._bpf["rb_drops"]
-        k = drop_map.Key(0)
-        v = drop_map[k]
-        try:
-            return int(sum(v))  # per-cpu array
-        except TypeError:
-            return int(v.value)  # scalar
+        return self._bpf.percpu_sum("rb_drops", 0)
 
     # -----------------------------
     # Ringbuf callback + flushing
@@ -231,15 +224,14 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         elif self._time_flush_due():
             self._flush_requested = True
 
-    def _handle_ring_event(self, ctx, data, size) -> int:
+    def _handle_ring_event(self, data: bytes) -> int:
         """
         This is the callback you pass to open_ring_buffer.
         """
         assert self._bpf is not None
         if self._use_raw_bytes:
-            # Fast path: just copy raw bytes, defer parsing to flush
-            raw = ctypes.string_at(data, size)
-            self._raw_buffer.append(raw)
+            # Fast path: keep the raw bytes, defer parsing to flush
+            self._raw_buffer.append(data)
         else:
             # Legacy path: parse each event to dict
             e = self._read_ring_event(data)
@@ -251,9 +243,11 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         # grow until the OOM killer ends the process. A negative return ends the pass.
         return -1 if self._flush_requested else 0
 
-    def _read_ring_event(self, data):
-        assert self._bpf is not None
-        return self._bpf["events"].event(data)
+    def _read_ring_event(self, data: bytes) -> Any:
+        """
+        Decode one ring-buffer record, e.g. with a ctypes structure's ``from_buffer_copy``.
+        """
+        raise NotImplementedError
 
     def _flush_to_queue(self) -> None:
         if self._use_raw_bytes:

@@ -5,7 +5,7 @@ from loguru import logger
 
 from metrion.entity.dram import DRAM
 
-orchestrator = pytest.importorskip("metrion.orchestrator", reason="needs bcc")
+orchestrator = pytest.importorskip("metrion.orchestrator", reason="needs the built metrion_rust extension")
 
 REMOTE_READS = "CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM"
 

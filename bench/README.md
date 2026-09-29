@@ -110,6 +110,25 @@ The frame at the top of each dumped stack is the thing that is hanging. It also
 reports orphaned `batch_*.ipc` files left in `/tmp`, which are measurements that
 never reached the database.
 
+## 6. BCC against libbpf CO-RE — `validate_bcc_vs_core.py`
+
+Loads the BCC probes of an older commit (default `a75b6e2`, the last one with BCC,
+taken from git) next to their CO-RE ports on the same tracepoints, runs a known
+workload and compares the events field by field. Needs root, BCC and the built
+extension; run it again after changing a `.bpf.c` file or on a new kernel.
+
+```bash
+sudo .venv/bin/python bench/validate_bcc_vs_core.py registry
+sudo .venv/bin/python bench/validate_bcc_vs_core.py sched_switch
+sudo .venv/bin/python bench/validate_bcc_vs_core.py tcp
+# what two programs on one tracepoint differ by anyway: CO-RE against CO-RE
+sudo .venv/bin/python bench/validate_bcc_vs_core.py sched_switch --control
+```
+
+Timestamps each program takes itself differ by some microseconds, and the perf
+counter deltas of `sched_switch` by about 0.3 % in both modes; everything else
+must match. The exit code is 1 if any run differs.
+
 ## Recording a baseline
 
 Before changing anything, capture a baseline so later runs are comparable:

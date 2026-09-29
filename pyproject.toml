@@ -12,20 +12,14 @@ authors = [
 
 
 dependencies = [
-    "pandas>=2.2.3,<3.0.0",
     "psutil>=7.0.0,<8.0.0",
-    "typing-extensions>=4.12.2,<5.0.0",
     "pynvml>=12.0.0,<13.0.0",
     "sqlalchemy>=2.0.40,<3.0.0",
     "loguru>=0.7.3",
     "polars>=1.44.1",
     "pyarrow>=20.0.0",
-    "ipykernel>=6.29.5",
     "matplotlib>=3.10.3",
-    "pyside6>=6.9.1",
     "plotly>=6.2.0",
-    "nbformat>=5.10.4",
-    "kaleido>=1.0.0",
     "click>=8.1.7",
     "tqdm>=4.67.1",
     "sqlparse>=0.5.3",
@@ -47,7 +41,10 @@ dev = [
     "torchvision>=0.24.1",
     "vulture>=2.14",
     "maturin>=1.9.1", 
-    "patchelf>=0.17.2.2"
+    "patchelf>=0.17.2.2",
+    "ipykernel>=6.29.5", # notebooks in VS Code
+    "nbformat>=5.10.4",
+    "pandas>=2.2.3,<3.0.0",
 ]
 docs = [
     "mkdocs>=1.6.1",

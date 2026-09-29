@@ -7,8 +7,7 @@ from pydantic import ValidationError
 from metrion.config_reader import SourceIntervals
 from metrion.monitoring.timing_context import TimingContext
 
-# grouping_threshold_ms lives in cpu/utils.py, which imports bcc at module level.
-pytest.importorskip("bcc", reason="metrion.monitoring.data_source.cpu.utils imports bcc")
+pytest.importorskip("metrion.metrion_rust", reason="sched_switch needs the built metrion_rust extension")
 
 from metrion.monitoring.data_source.cpu.sched_switch import SchedSwitchMonitor  # noqa: E402
 from metrion.monitoring.data_source.cpu.utils import grouping_threshold_ms  # noqa: E402

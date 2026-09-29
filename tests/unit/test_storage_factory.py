@@ -77,7 +77,7 @@ def test_duckdb_with_a_database_path_does_not_warn():
 
 def test_the_saver_writes_parquet_when_the_config_says_so(tmp_path):
     """The whole path in one test: config -> factory -> saver -> files on disk."""
-    dc = pytest.importorskip("metrion.data_collector", reason="needs bcc")
+    dc = pytest.importorskip("metrion.data_collector", reason="needs the built metrion_rust extension")
     from metrion.entity.host import Host, HostType
 
     config = StorageConfig(type="parquet", path=str(tmp_path / "run"))

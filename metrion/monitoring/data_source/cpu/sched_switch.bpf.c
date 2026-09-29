@@ -1,5 +1,10 @@
-#include <linux/sched.h>
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
 #include "common_bpf.h"
+
+char LICENSE[] SEC("license") = "GPL";
+
+#define PF_EXITING 0x00000004
 /*
  * sched_switch_v2.c - Zero-loss entity matching via inline metadata
  *
@@ -15,13 +20,37 @@
  * - Userspace creates LogicalEntity inline when it receives metadata events
  */
 
-/* Perf event arrays */
-BPF_PERF_ARRAY(cycles_core, NUM_CPUS);
-BPF_PERF_ARRAY(aperf_core, NUM_CPUS);
-BPF_PERF_ARRAY(mperf_core, NUM_CPUS);
-BPF_PERF_ARRAY(load_local_perf, NUM_CPUS);
-BPF_PERF_ARRAY(load_remote_perf, NUM_CPUS);
-BPF_PERF_ARRAY(store_perf, NUM_CPUS);
+/* Perf event arrays, one entry per CPU; the loader sets max_entries */
+struct {
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __type(key, u32);
+  __type(value, u32);
+} cycles_core SEC(".maps");
+struct {
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __type(key, u32);
+  __type(value, u32);
+} aperf_core SEC(".maps");
+struct {
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __type(key, u32);
+  __type(value, u32);
+} mperf_core SEC(".maps");
+struct {
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __type(key, u32);
+  __type(value, u32);
+} load_local_perf SEC(".maps");
+struct {
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __type(key, u32);
+  __type(value, u32);
+} load_remote_perf SEC(".maps");
+struct {
+  __uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+  __type(key, u32);
+  __type(value, u32);
+} store_perf SEC(".maps");
 
 /* Event type flags */
 #define EVENT_TYPE_DATA_ONLY      0
@@ -39,7 +68,12 @@ struct pid_key {
 
 /* Tracks which (pid, start_bucket) combinations we've already seen. A task's key is removed at
  * its last switch, so this only holds live threads. */
-BPF_HASH(pid_seen, struct pid_key, u8, 65536);
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 65536);
+  __type(key, struct pid_key);
+  __type(value, u8);
+} pid_seen SEC(".maps");
 
 /*
  * Full event structure with embedded metadata for first-seen PIDs.
@@ -99,13 +133,28 @@ struct start_snapshot {
   u32 tgid;
 };
 
-BPF_PERCPU_ARRAY(cpu_snapshot, struct start_snapshot, 1);
-BPF_PERCPU_ARRAY(rb_drops, u64, 1);
-BPF_RINGBUF_OUTPUT(events, RINGBUF_PAGES);  // in pages, set from ebpf.ringbuf_mib
+struct {
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, struct start_snapshot);
+} cpu_snapshot SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, u64);
+} rb_drops SEC(".maps");
+
+struct {
+  __uint(type, BPF_MAP_TYPE_RINGBUF);
+  __uint(max_entries, 4096);  // in bytes, the loader sets it from ebpf.ringbuf_mib
+} events SEC(".maps");
 
 static __always_inline void drop_inc(void) {
   u32 k = 0;
-  u64 *d = rb_drops.lookup(&k);
+  u64 *d = bpf_map_lookup_elem(&rb_drops, &k);
   if (d) (*d)++;
 }
 
@@ -118,14 +167,14 @@ static __always_inline int mark_first_seen(u32 pid, u64 start_ns) {
   key.pid = pid;
   key.start_bucket = (u32)(start_ns / 10000000);  // 10ms bucket
 
-  u8 *seen = pid_seen.lookup(&key);
+  u8 *seen = bpf_map_lookup_elem(&pid_seen, &key);
   if (seen) {
     return 0;  // Already seen
   }
 
   // Mark as seen
   u8 one = 1;
-  pid_seen.update(&key, &one);
+  bpf_map_update_elem(&pid_seen, &key, &one, BPF_ANY);
   return 1;  // First time
 }
 
@@ -133,7 +182,7 @@ static __always_inline void forget_seen(u32 pid, u64 start_ns) {
   struct pid_key key = {};
   key.pid = pid;
   key.start_bucket = (u32)(start_ns / 10000000);
-  pid_seen.delete(&key);
+  bpf_map_delete_elem(&pid_seen, &key);
 }
 
 /*
@@ -184,18 +233,19 @@ static __always_inline void collect_metadata_inline(
   read_cmdline_from_task(group_leader, evt->cmdline, comm);
 }
 
-TRACEPOINT_PROBE(sched, sched_switch)
+SEC("tracepoint/sched/sched_switch")
+int sched_switch(struct trace_event_raw_sched_switch *args)
 {
   u64 current_time = bpf_ktime_get_boot_ns();  // CLOCK_BOOTTIME: includes suspend time, matches boot_epoch_s() + offset
   u32 cpu_core = bpf_get_smp_processor_id();
 
   // Read performance counters
-  s64 cycles_tmp = cycles_core.perf_read(cpu_core);
-  s64 aperf_tmp = aperf_core.perf_read(cpu_core);
-  s64 mperf_tmp = mperf_core.perf_read(cpu_core);
-  s64 loads_local_tmp = load_local_perf.perf_read(cpu_core);
-  s64 loads_remote_tmp = load_remote_perf.perf_read(cpu_core);
-  s64 stores_tmp = store_perf.perf_read(cpu_core);
+  s64 cycles_tmp = bpf_perf_event_read(&cycles_core, cpu_core);
+  s64 aperf_tmp = bpf_perf_event_read(&aperf_core, cpu_core);
+  s64 mperf_tmp = bpf_perf_event_read(&mperf_core, cpu_core);
+  s64 loads_local_tmp = bpf_perf_event_read(&load_local_perf, cpu_core);
+  s64 loads_remote_tmp = bpf_perf_event_read(&load_remote_perf, cpu_core);
+  s64 stores_tmp = bpf_perf_event_read(&store_perf, cpu_core);
 
   u64 cycles = (cycles_tmp >= 0) ? cycles_tmp : 0;
   u64 aperf = (aperf_tmp >= 0) ? aperf_tmp : 0;
@@ -205,7 +255,7 @@ TRACEPOINT_PROBE(sched, sched_switch)
   u64 stores = (stores_tmp >= 0) ? stores_tmp : 0;
 
   u32 key = 0;
-  struct start_snapshot *snap = cpu_snapshot.lookup(&key);
+  struct start_snapshot *snap = bpf_map_lookup_elem(&cpu_snapshot, &key);
 
   // --- Handle outgoing task (prev) END INTERVAL ---
   // outgoing task is current task
@@ -223,7 +273,7 @@ TRACEPOINT_PROBE(sched, sched_switch)
     int is_first = mark_first_seen(prev_pid, task_start);
 
     // Reserve ring buffer space
-    struct sched_event_v2 *out = events.ringbuf_reserve(sizeof(struct sched_event_v2));
+    struct sched_event_v2 *out = bpf_ringbuf_reserve(&events, sizeof(struct sched_event_v2), 0);
     if (!out) {
       drop_inc();
       // The metadata went down with this event: forget the task so the next switch sends it again.
@@ -274,7 +324,7 @@ TRACEPOINT_PROBE(sched, sched_switch)
         collect_metadata_inline(out, task, args->prev_comm);
       }
 
-      events.ringbuf_submit(out, 0);
+      bpf_ringbuf_submit(out, 0);
     }
 
     // A dying task switches out one last time after sched_process_exit, so its key is dropped

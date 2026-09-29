@@ -1,12 +1,13 @@
-#include <uapi/linux/ptrace.h>
-#include <uapi/linux/ip.h>
-#include <uapi/linux/ipv6.h>
-#include <uapi/linux/tcp.h>
-#include <uapi/linux/udp.h>
-#include <net/sock.h>
-#include <linux/skbuff.h>
-#include <linux/netdevice.h>
-#include <bcc/proto.h>
+#include "vmlinux.h"
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_endian.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+
+char LICENSE[] SEC("license") = "GPL";
+
+/* A macro in include/uapi/linux/in6.h, so not part of vmlinux.h */
+#define s6_addr in6_u.u6_addr8
 
 /*
  * TCP/UDP network traffic monitor v2 with inline metadata for zero-loss entity matching.
@@ -35,7 +36,12 @@ struct pid_key {
   u32 start_bucket;  // start_time_ns / 10_000_000 (10ms buckets)
 };
 
-BPF_HASH(pid_seen, struct pid_key, u8, 262144);
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 262144);
+  __type(key, struct pid_key);
+  __type(value, u8);
+} pid_seen SEC(".maps");
 
 /*
  * Network event with optional inline metadata.
@@ -76,15 +82,23 @@ struct tcp_event_v2
 };
 
 // Ring buffer for events
-BPF_RINGBUF_OUTPUT(events, 4096);
+struct {
+  __uint(type, BPF_MAP_TYPE_RINGBUF);
+  __uint(max_entries, 4096 * 4096);  // 4096 pages
+} events SEC(".maps");
 
 // Count dropped events (per-CPU for performance)
-BPF_PERCPU_ARRAY(rb_drops, u64, 1);
+struct {
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, u32);
+  __type(value, u64);
+} rb_drops SEC(".maps");
 
 static __always_inline void drop_inc(void)
 {
   u32 key = 0;
-  u64 *drops = rb_drops.lookup(&key);
+  u64 *drops = bpf_map_lookup_elem(&rb_drops, &key);
   if (drops)
     (*drops)++;
 }
@@ -98,13 +112,13 @@ static __always_inline int mark_first_seen(u32 pid, u64 start_ns) {
   key.pid = pid;
   key.start_bucket = (u32)(start_ns / 10000000);  // 10ms bucket
 
-  u8 *seen = pid_seen.lookup(&key);
+  u8 *seen = bpf_map_lookup_elem(&pid_seen, &key);
   if (seen) {
     return 0;  // Already seen
   }
 
   u8 one = 1;
-  pid_seen.update(&key, &one);
+  bpf_map_update_elem(&pid_seen, &key, &one, BPF_ANY);
   return 1;  // First time
 }
 
@@ -221,6 +235,7 @@ static __always_inline void collect_task_info(
   read_cmdline(group_leader, e->cmdline);
 }
 
+SEC("kprobe/tcp_cleanup_rbuf")
 int trace_tcp_cleanup_rbuf(struct pt_regs *ctx)
 {
   struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
@@ -241,7 +256,7 @@ int trace_tcp_cleanup_rbuf(struct pt_regs *ctx)
 
   int is_first = mark_first_seen(pid, start_ns);
 
-  struct tcp_event_v2 *e = events.ringbuf_reserve(sizeof(struct tcp_event_v2));
+  struct tcp_event_v2 *e = bpf_ringbuf_reserve(&events, sizeof(struct tcp_event_v2), 0);
   if (!e)
   {
     drop_inc();
@@ -265,14 +280,14 @@ int trace_tcp_cleanup_rbuf(struct pt_regs *ctx)
   bpf_probe_read_kernel(&ifidx, sizeof(ifidx), &sk->__sk_common.skc_bound_dev_if);
   e->ifindex = ifidx;
 
-  e->daddr = sk->__sk_common.skc_daddr;
-  e->saddr = sk->__sk_common.skc_rcv_saddr;
-  e->dport = bpf_ntohs(sk->__sk_common.skc_dport);
-  e->sport = sk->__sk_common.skc_num;
-  e->family = sk->__sk_common.skc_family;
+  e->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+  e->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+  e->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+  e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+  e->family = BPF_CORE_READ(sk, __sk_common.skc_family);
 
-  struct in6_addr ipv6_daddr = sk->__sk_common.skc_v6_daddr;
-  struct in6_addr ipv6_rcv_saddr = sk->__sk_common.skc_v6_rcv_saddr;
+  struct in6_addr ipv6_daddr = BPF_CORE_READ(sk, __sk_common.skc_v6_daddr);
+  struct in6_addr ipv6_rcv_saddr = BPF_CORE_READ(sk, __sk_common.skc_v6_rcv_saddr);
 #pragma unroll
   for (int i = 0; i < 16; i++)
   {
@@ -280,11 +295,12 @@ int trace_tcp_cleanup_rbuf(struct pt_regs *ctx)
     e->ipv6_rcv_saddr[i] = ipv6_rcv_saddr.s6_addr[i];
   }
 
-  events.ringbuf_submit(e, 0);
+  bpf_ringbuf_submit(e, 0);
   return 0;
 }
 
-int trace_udp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, size_t len)
+SEC("kprobe/udp_recvmsg")
+int BPF_KPROBE(trace_udp_recvmsg, struct sock *sk, struct msghdr *msg, size_t len)
 {
   if (!sk || len <= 0)
     return 0;
@@ -300,7 +316,7 @@ int trace_udp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
 
   int is_first = mark_first_seen(pid, start_ns);
 
-  struct tcp_event_v2 *e = events.ringbuf_reserve(sizeof(struct tcp_event_v2));
+  struct tcp_event_v2 *e = bpf_ringbuf_reserve(&events, sizeof(struct tcp_event_v2), 0);
   if (!e)
   {
     drop_inc();
@@ -323,14 +339,14 @@ int trace_udp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
   bpf_probe_read_kernel(&ifidx, sizeof(ifidx), &sk->__sk_common.skc_bound_dev_if);
   e->ifindex = ifidx;
 
-  e->family = sk->__sk_common.skc_family;
-  e->daddr = sk->__sk_common.skc_daddr;
-  e->saddr = sk->__sk_common.skc_rcv_saddr;
-  e->dport = bpf_ntohs(sk->__sk_common.skc_dport);
-  e->sport = sk->__sk_common.skc_num;
+  e->family = BPF_CORE_READ(sk, __sk_common.skc_family);
+  e->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+  e->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+  e->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+  e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
 
-  struct in6_addr ipv6_daddr = sk->__sk_common.skc_v6_daddr;
-  struct in6_addr ipv6_rcv_saddr = sk->__sk_common.skc_v6_rcv_saddr;
+  struct in6_addr ipv6_daddr = BPF_CORE_READ(sk, __sk_common.skc_v6_daddr);
+  struct in6_addr ipv6_rcv_saddr = BPF_CORE_READ(sk, __sk_common.skc_v6_rcv_saddr);
 #pragma unroll
   for (int i = 0; i < 16; i++)
   {
@@ -338,11 +354,12 @@ int trace_udp_recvmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
     e->ipv6_rcv_saddr[i] = ipv6_rcv_saddr.s6_addr[i];
   }
 
-  events.ringbuf_submit(e, 0);
+  bpf_ringbuf_submit(e, 0);
   return 0;
 }
 
-int trace_tcp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, size_t size)
+SEC("kprobe/tcp_sendmsg")
+int BPF_KPROBE(trace_tcp_sendmsg, struct sock *sk, struct msghdr *msg, size_t size)
 {
   if (!sk || size <= 0)
     return 0;
@@ -358,7 +375,7 @@ int trace_tcp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
 
   int is_first = mark_first_seen(pid, start_ns);
 
-  struct tcp_event_v2 *e = events.ringbuf_reserve(sizeof(struct tcp_event_v2));
+  struct tcp_event_v2 *e = bpf_ringbuf_reserve(&events, sizeof(struct tcp_event_v2), 0);
   if (!e)
   {
     drop_inc();
@@ -381,14 +398,14 @@ int trace_tcp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
   bpf_probe_read_kernel(&ifidx, sizeof(ifidx), &sk->__sk_common.skc_bound_dev_if);
   e->ifindex = ifidx;
 
-  e->daddr = sk->__sk_common.skc_daddr;
-  e->saddr = sk->__sk_common.skc_rcv_saddr;
-  e->dport = bpf_ntohs(sk->__sk_common.skc_dport);
-  e->sport = sk->__sk_common.skc_num;
-  e->family = sk->__sk_common.skc_family;
+  e->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+  e->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+  e->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+  e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+  e->family = BPF_CORE_READ(sk, __sk_common.skc_family);
 
-  struct in6_addr ipv6_daddr = sk->__sk_common.skc_v6_daddr;
-  struct in6_addr ipv6_rcv_saddr = sk->__sk_common.skc_v6_rcv_saddr;
+  struct in6_addr ipv6_daddr = BPF_CORE_READ(sk, __sk_common.skc_v6_daddr);
+  struct in6_addr ipv6_rcv_saddr = BPF_CORE_READ(sk, __sk_common.skc_v6_rcv_saddr);
 #pragma unroll
   for (int i = 0; i < 16; i++)
   {
@@ -396,11 +413,12 @@ int trace_tcp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
     e->ipv6_rcv_saddr[i] = ipv6_rcv_saddr.s6_addr[i];
   }
 
-  events.ringbuf_submit(e, 0);
+  bpf_ringbuf_submit(e, 0);
   return 0;
 }
 
-int trace_udp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, size_t len)
+SEC("kprobe/udp_sendmsg")
+int BPF_KPROBE(trace_udp_sendmsg, struct sock *sk, struct msghdr *msg, size_t len)
 {
   if (!sk || len <= 0)
     return 0;
@@ -416,7 +434,7 @@ int trace_udp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
 
   int is_first = mark_first_seen(pid, start_ns);
 
-  struct tcp_event_v2 *e = events.ringbuf_reserve(sizeof(struct tcp_event_v2));
+  struct tcp_event_v2 *e = bpf_ringbuf_reserve(&events, sizeof(struct tcp_event_v2), 0);
   if (!e)
   {
     drop_inc();
@@ -439,14 +457,14 @@ int trace_udp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
   bpf_probe_read_kernel(&ifidx, sizeof(ifidx), &sk->__sk_common.skc_bound_dev_if);
   e->ifindex = ifidx;
 
-  e->family = sk->__sk_common.skc_family;
-  e->daddr = sk->__sk_common.skc_daddr;
-  e->saddr = sk->__sk_common.skc_rcv_saddr;
-  e->dport = bpf_ntohs(sk->__sk_common.skc_dport);
-  e->sport = sk->__sk_common.skc_num;
+  e->family = BPF_CORE_READ(sk, __sk_common.skc_family);
+  e->daddr = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+  e->saddr = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+  e->dport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+  e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
 
-  struct in6_addr ipv6_daddr = sk->__sk_common.skc_v6_daddr;
-  struct in6_addr ipv6_rcv_saddr = sk->__sk_common.skc_v6_rcv_saddr;
+  struct in6_addr ipv6_daddr = BPF_CORE_READ(sk, __sk_common.skc_v6_daddr);
+  struct in6_addr ipv6_rcv_saddr = BPF_CORE_READ(sk, __sk_common.skc_v6_rcv_saddr);
 #pragma unroll
   for (int i = 0; i < 16; i++)
   {
@@ -454,12 +472,13 @@ int trace_udp_sendmsg(struct pt_regs *ctx, struct sock *sk, struct msghdr *msg, 
     e->ipv6_rcv_saddr[i] = ipv6_rcv_saddr.s6_addr[i];
   }
 
-  events.ringbuf_submit(e, 0);
+  bpf_ringbuf_submit(e, 0);
   return 0;
 }
 
 /* Clean up pid_seen on task exit to prevent memory growth */
-TRACEPOINT_PROBE(sched, sched_process_exit)
+SEC("tracepoint/sched/sched_process_exit")
+int sched_process_exit(struct trace_event_raw_sched_process_exit *args)
 {
   u64 pid_tgid = bpf_get_current_pid_tgid();
   u32 pid = (u32)pid_tgid;
@@ -472,7 +491,7 @@ TRACEPOINT_PROBE(sched, sched_process_exit)
   key.pid = pid;
   key.start_bucket = (u32)(start_ns / 10000000);
 
-  pid_seen.delete(&key);
+  bpf_map_delete_elem(&pid_seen, &key);
 
   return 0;
 }

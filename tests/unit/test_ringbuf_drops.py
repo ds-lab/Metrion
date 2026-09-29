@@ -1,4 +1,3 @@
-import ctypes
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -140,7 +139,7 @@ def test_shutdown_still_reports_when_the_final_flush_fails(proc):
 def test_endless_events_leave_the_buffer_bounded(proc):
     """Under overload libbpf never runs out of events, so only the callback can end a pass."""
     proc._use_raw_bytes = True
-    event = ctypes.create_string_buffer(8)
+    event = bytes(8)
     peak = 0
 
     def consume():
@@ -148,7 +147,7 @@ def test_endless_events_leave_the_buffer_bounded(proc):
         # negative return from the callback.
         nonlocal peak
         for _ in range(100_000):
-            ret = proc._handle_ring_event(None, ctypes.addressof(event), 8)
+            ret = proc._handle_ring_event(event)
             peak = max(peak, len(proc._raw_buffer))
             if ret < 0:
                 return

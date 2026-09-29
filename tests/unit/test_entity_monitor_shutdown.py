@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-em = pytest.importorskip("metrion.monitoring.entity_monitor", reason="needs bcc")
+em = pytest.importorskip("metrion.monitoring.entity_monitor", reason="needs the built metrion_rust extension")
 
 from metrion.data_record import DataRecord  # noqa: E402
 from metrion.monitoring.data_source.data_source_runner import DataSourceRunner  # noqa: E402

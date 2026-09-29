@@ -6,9 +6,6 @@ import sys
 from glob import glob
 from pathlib import Path
 
-from bcc import Perf
-from bcc.utils import get_online_cpus
-
 _ppid_start_cache: dict[int, float] = {}
 _CLK_TCK = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
 
@@ -251,7 +248,120 @@ def get_cpu_topology():
     return topo
 
 
-# https://github.com/iovisor/bcc/blob/v0.35.0/src/python/bcc/perf.py#L155
+def get_online_cpus() -> list[int]:
+    cpus = []
+    with open("/sys/devices/system/cpu/online") as f:
+        for cpu_range in f.read().split(","):
+            start, _, end = cpu_range.partition("-")
+            cpus.extend(range(int(start), int(end or start) + 1))
+    return cpus
+
+
+# The perf_event_open parts of bcc's perf.py, Copyright 2016 Sasha Goldshtein, Apache License 2.0:
+# https://github.com/iovisor/bcc/blob/v0.35.0/src/python/bcc/perf.py
+class _sample_period_union(ct.Union):  # noqa: N801
+    _fields_ = [("sample_period", ct.c_ulong), ("sample_freq", ct.c_ulong)]
+
+
+class _wakeup_events_union(ct.Union):  # noqa: N801
+    _fields_ = [("wakeup_events", ct.c_uint), ("wakeup_watermark", ct.c_uint)]
+
+
+class _bp_addr_union(ct.Union):  # noqa: N801
+    _fields_ = [
+        ("bp_addr", ct.c_ulong),
+        ("kprobe_func", ct.c_ulong),
+        ("uprobe_path", ct.c_ulong),
+        ("config1", ct.c_ulong),
+    ]
+
+
+class _bp_len_union(ct.Union):  # noqa: N801
+    _fields_ = [
+        ("bp_len", ct.c_ulong),
+        ("kprobe_addr", ct.c_ulong),
+        ("probe_offset", ct.c_ulong),
+        ("config2", ct.c_ulong),
+    ]
+
+
+class Perf:
+    class perf_event_attr(ct.Structure):  # noqa: N801
+        _anonymous_ = ["_sample_period_union", "_wakeup_events_union", "_bp_addr_union", "_bp_len_union"]
+        _fields_ = [
+            ("type", ct.c_uint),
+            ("size", ct.c_uint),
+            ("config", ct.c_ulong),
+            ("_sample_period_union", _sample_period_union),
+            ("sample_type", ct.c_ulong),
+            ("read_format", ct.c_ulong),
+            ("disabled", ct.c_uint, 1),
+            ("inherit", ct.c_uint, 1),
+            ("pinned", ct.c_uint, 1),
+            ("exclusive", ct.c_uint, 1),
+            ("exclude_user", ct.c_uint, 1),
+            ("exclude_kernel", ct.c_uint, 1),
+            ("exclude_hv", ct.c_uint, 1),
+            ("exclude_idle", ct.c_uint, 1),
+            ("mmap", ct.c_uint, 1),
+            ("comm", ct.c_uint, 1),
+            ("freq", ct.c_uint, 1),
+            ("inherit_stat", ct.c_uint, 1),
+            ("enable_on_exec", ct.c_uint, 1),
+            ("task", ct.c_uint, 1),
+            ("watermark", ct.c_uint, 1),
+            ("precise_ip", ct.c_uint, 2),
+            ("mmap_data", ct.c_uint, 1),
+            ("sample_id_all", ct.c_uint, 1),
+            ("exclude_host", ct.c_uint, 1),
+            ("exclude_guest", ct.c_uint, 1),
+            ("exclude_callchain_kernel", ct.c_uint, 1),
+            ("exclude_callchain_user", ct.c_uint, 1),
+            ("mmap2", ct.c_uint, 1),
+            ("comm_exec", ct.c_uint, 1),
+            ("use_clockid", ct.c_uint, 1),
+            ("context_switch", ct.c_uint, 1),
+            ("write_backward", ct.c_uint, 1),
+            ("namespaces", ct.c_uint, 1),
+            ("ksymbol", ct.c_uint, 1),
+            ("bpf_event", ct.c_uint, 1),
+            ("aux_output", ct.c_uint, 1),
+            ("cgroup", ct.c_uint, 1),
+            ("text_poke", ct.c_uint, 1),
+            ("__reserved_1", ct.c_uint, 30),
+            ("_wakeup_events_union", _wakeup_events_union),
+            ("bp_type", ct.c_uint),
+            ("_bp_addr_union", _bp_addr_union),
+            ("_bp_len_union", _bp_len_union),
+            ("branch_sample_type", ct.c_ulong),
+            ("sample_regs_user", ct.c_ulong),
+            ("sample_stack_user", ct.c_uint),
+            ("clockid", ct.c_int),
+            ("sample_regs_intr", ct.c_ulong),
+            ("aux_watermark", ct.c_uint),
+            ("sample_max_stack", ct.c_uint16),
+            ("__reserved_2", ct.c_uint16),
+            ("aux_sample_size", ct.c_uint),
+            ("__reserved_3", ct.c_uint),
+        ]
+
+        def __init__(self):
+            super().__init__()
+            self.size = 120  # PERF_ATTR_SIZE_VER6
+
+    # x86 specific, from arch/x86/include/generated/uapi/asm/unistd_64.h
+    NR_PERF_EVENT_OPEN = 298
+
+    PERF_TYPE_TRACEPOINT = 2
+    PERF_FLAG_FD_CLOEXEC = 8
+    PERF_EVENT_IOC_SET_FILTER = 1074275334
+    PERF_EVENT_IOC_ENABLE = 9216
+
+    libc = ct.CDLL("libc.so.6", use_errno=True)
+    syscall = libc.syscall
+    ioctl = libc.ioctl
+
+
 class CustomPerf(Perf):
     @staticmethod
     def _open_for_cpu(cpu, attr, pid=-1, group_fd=-1):

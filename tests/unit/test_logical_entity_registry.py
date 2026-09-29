@@ -10,7 +10,7 @@ import pytest
 
 from metrion.util import write_temp_ipc
 
-ler = pytest.importorskip("metrion.entity.logical_entity_registry", reason="needs bcc")
+ler = pytest.importorskip("metrion.entity.logical_entity_registry", reason="needs the built metrion_rust extension")
 
 NEW, EXEC, EXIT = 1, 2, 4
 START_NS = 8_120_000_000_000

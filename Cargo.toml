@@ -11,7 +11,11 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.26", features = ["extension-module"] }
 polars = { version = "0.52", features = ["lazy", "temporal", "timezones"] }
-pyo3-polars = "0.25"                                           
-anyhow = "1"                                                   
-log = "0.4"           
-rayon = "1.10"                                         
+pyo3-polars = "0.25"
+anyhow = "1"
+log = "0.4"
+rayon = "1.10"
+libbpf-rs = "0.27"
+
+[build-dependencies]
+libbpf-cargo = "0.27"

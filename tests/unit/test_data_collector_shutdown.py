@@ -7,7 +7,7 @@ import pytest
 from metrion.config_reader import LiveAttributionConfig
 from metrion.queue_util import close_and_join_feeder
 
-dc = pytest.importorskip("metrion.data_collector", reason="needs bcc")
+dc = pytest.importorskip("metrion.data_collector", reason="needs the built metrion_rust extension")
 
 SENT_E = dc.DataCollector.SENT_E
 SENT_M = dc.DataCollector.SENT_M

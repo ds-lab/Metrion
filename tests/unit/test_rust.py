@@ -260,6 +260,12 @@ def test_input_in_several_chunks_is_read_like_one():
     assert result["delta_aperf"].to_list() == [50, 50]
 
 
+def test_bpf_program_rejects_an_unknown_map_size():
+    """A misspelt map name would otherwise leave that map at its compiled-in size."""
+    with pytest.raises(KeyError, match="sched_switch has no map evnets"):
+        mmr.BpfProgram("sched_switch", {"evnets": 4096})
+
+
 if __name__ == "__main__":
     # allows quick ad-hoc run:  `python test_rust.py`
     pytest.main([__file__])
