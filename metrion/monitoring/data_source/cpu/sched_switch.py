@@ -1230,8 +1230,6 @@ class SchedSwitchMonitor(DataSource):
 
         # prepare columns
         cpu_data_df = cpu_data_df.with_columns(
-            # Normalize shared_state to numeric (0/1)
-            (pl.when(pl.col("shared_state") == "alone").then(0).otherwise(1)).alias("shared_state_num"),
             # Convert execution time to milliseconds
             (pl.col("execution_time") / 1e6).alias("execution_time_ms"),
             # Work value once (avoid creating a second DF just for work)
@@ -1276,7 +1274,7 @@ class SchedSwitchMonitor(DataSource):
         execution_type_measurements_df = cpu_data_df.select(
             pl.lit(CPU_CORE_PID_EXECUTION_TYPE.name).alias("metric_id"),
             *base_cols,
-            pl.col("shared_state_num").cast(pl.Float64).alias("value"),
+            pl.col("shared_state").cast(pl.Float64).alias("value"),
         )
 
         pid_work_measurements_df = cpu_data_df.select(

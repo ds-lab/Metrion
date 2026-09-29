@@ -25,6 +25,10 @@ struct Measurement {
     end_values: MeasurementValues,
 }
 
+// shared_state: whether the SMT sibling ran during the interval.
+const ALONE: u32 = 0;
+const OVERLAP: u32 = 1;
+
 #[derive(Debug, Clone)]
 struct ProcessedInterval {
     pid: u32,
@@ -36,7 +40,7 @@ struct ProcessedInterval {
     delta_mperf: u64,
     delta_unhalted_core_cycles: u64,
     execution_time: f64, // microseconds
-    shared_state: String,
+    shared_state: u32,
 }
 
 /// State for tracking active tasks during processing
@@ -306,8 +310,8 @@ fn processed_intervals_to_dataframe(
             "shared_state".into(),
             intervals
                 .iter()
-                .map(|i| i.shared_state.as_str())
-                .collect::<Vec<&str>>(),
+                .map(|i| i.shared_state)
+                .collect::<Vec<u32>>(),
         ),
     ])
     .map_err(|e| e.to_string())
@@ -383,7 +387,7 @@ fn linear_interpolate_sibling_values(
 fn calc_split(
     active: &Measurement,
     measurement: &Measurement,
-    interval_type: &str,
+    shared_state: u32,
     weight: (f64, f64, f64),
 ) -> Result<
     (
@@ -424,7 +428,7 @@ fn calc_split(
                     weight.2,
                 ),
                 execution_time: (measurement.time - active.time) as f64,
-                shared_state: interval_type.to_string(),
+                shared_state,
             };
 
             Ok((
@@ -441,7 +445,7 @@ fn calc_split(
 fn calc_out_end(
     active: &Measurement,
     measurement: &Measurement,
-    interval_type: &str,
+    shared_state: u32,
     weight: (f64, f64, f64),
 ) -> ProcessedInterval {
     // active is the active task that is being descheduled
@@ -468,7 +472,7 @@ fn calc_out_end(
             weight.2,
         ),
         execution_time: (measurement.time - active.time) as f64,
-        shared_state: interval_type.to_string(),
+        shared_state,
     }
 }
 
@@ -479,7 +483,7 @@ fn handle_task_start(state: &mut ProcessingState, measurement: &Measurement) -> 
         if let Some(ref active_2_ref) = state.active_2 {
             if active_2_ref.time < measurement.time {
                 let (active_intermediate_start, _, active_metrics) =
-                    calc_split(active_2_ref, measurement, "alone", (1.0, 1.0, 1.0))?;
+                    calc_split(active_2_ref, measurement, ALONE, (1.0, 1.0, 1.0))?;
                 state.push_optional_metrics(active_metrics);
                 state.active_2 = active_intermediate_start;
             }
@@ -489,7 +493,7 @@ fn handle_task_start(state: &mut ProcessingState, measurement: &Measurement) -> 
         if let Some(ref active_1_ref) = state.active_1 {
             if active_1_ref.time < measurement.time {
                 let (active_intermediate_start, _, active_metrics) =
-                    calc_split(active_1_ref, measurement, "alone", (1.0, 1.0, 1.0))?;
+                    calc_split(active_1_ref, measurement, ALONE, (1.0, 1.0, 1.0))?;
                 state.push_optional_metrics(active_metrics);
                 state.active_1 = active_intermediate_start;
             }
@@ -506,13 +510,13 @@ fn handle_single_task_end(
 ) {
     if is_active_1 {
         if let Some(ref active_1_ref) = state.active_1 {
-            let active_metrics = calc_out_end(active_1_ref, measurement, "alone", (1.0, 1.0, 1.0));
+            let active_metrics = calc_out_end(active_1_ref, measurement, ALONE, (1.0, 1.0, 1.0));
             state.push_metrics(active_metrics);
             state.active_1 = None;
         }
     } else {
         if let Some(ref active_2_ref) = state.active_2 {
-            let active_metrics = calc_out_end(active_2_ref, measurement, "alone", (1.0, 1.0, 1.0));
+            let active_metrics = calc_out_end(active_2_ref, measurement, ALONE, (1.0, 1.0, 1.0));
             state.push_metrics(active_metrics);
             state.active_2 = None;
         }
@@ -533,10 +537,10 @@ fn handle_both_tasks_end(
     if active_1_ref.pid == measurement.pid && active_1_ref.exec_count == measurement.exec_count {
         // active_1 is terminated
         let active_metrics_1 =
-            calc_out_end(active_1_ref, measurement, "overlap", (1.0, 1.0, ht_factor));
+            calc_out_end(active_1_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor));
 
         let (active_intermediate_start, _, active_metrics_2) =
-            calc_split(active_2_ref, measurement, "overlap", (1.0, 1.0, ht_factor))?;
+            calc_split(active_2_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor))?;
 
         state.push_optional_metrics(active_metrics_2);
         state.active_2 = active_intermediate_start;
@@ -548,10 +552,10 @@ fn handle_both_tasks_end(
     {
         // active_2 is terminated
         let active_metrics_2 =
-            calc_out_end(active_2_ref, measurement, "overlap", (1.0, 1.0, ht_factor));
+            calc_out_end(active_2_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor));
 
         let (active_intermediate_start, _, active_metrics_1) =
-            calc_split(active_1_ref, measurement, "overlap", (1.0, 1.0, ht_factor))?;
+            calc_split(active_1_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor))?;
 
         state.push_optional_metrics(active_metrics_1);
         state.active_1 = active_intermediate_start;

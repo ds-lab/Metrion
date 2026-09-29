@@ -7,6 +7,7 @@ pytest.importorskip("metrion.metrion_rust", reason="the Rust extension has to be
 import metrion.metrion_rust as mar  # noqa: E402
 
 HT = 1.15
+ALONE, OVERLAP = 0, 1
 COUNTERS = ("aperf", "mperf", "unhalted_core_cycles")
 
 
@@ -70,11 +71,11 @@ def test_two_cuts_split_a_slice_by_time():
     result = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
 
     assert segments_of(result, 1) == [
-        (1000, 1500, "alone", 500, 500, 500),
-        (1500, 1750, "overlap", 250, 250, 287),  # 250 * 1.15, truncated
-        (1750, 2000, "alone", 250, 250, 250),
+        (1000, 1500, ALONE, 500, 500, 500),
+        (1500, 1750, OVERLAP, 250, 250, 287),  # 250 * 1.15, truncated
+        (1750, 2000, ALONE, 250, 250, 250),
     ]
-    assert segments_of(result, 2) == [(1500, 1750, "overlap", 250, 250, 287)]
+    assert segments_of(result, 2) == [(1500, 1750, OVERLAP, 250, 250, 287)]
 
 
 def test_five_cuts_keep_every_segment_proportional():
@@ -89,16 +90,16 @@ def test_five_cuts_keep_every_segment_proportional():
     result = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
 
     assert segments_of(result, 1) == [
-        (10_000, 11_000, "alone", 2000, 1000, 3000),
-        (11_000, 13_000, "overlap", 4000, 2000, 6899),
-        (13_000, 14_000, "alone", 2000, 1000, 3000),
-        (14_000, 15_000, "overlap", 2000, 1000, 3449),
-        (15_000, 16_000, "alone", 2000, 1000, 3000),
-        (16_000, 18_000, "overlap", 4000, 2000, 6899),
+        (10_000, 11_000, ALONE, 2000, 1000, 3000),
+        (11_000, 13_000, OVERLAP, 4000, 2000, 6899),
+        (13_000, 14_000, ALONE, 2000, 1000, 3000),
+        (14_000, 15_000, OVERLAP, 2000, 1000, 3449),
+        (15_000, 16_000, ALONE, 2000, 1000, 3000),
+        (16_000, 18_000, OVERLAP, 4000, 2000, 6899),
     ]
     assert segments_of(result, 4) == [
-        (16_000, 18_000, "overlap", 4000, 2000, 6899),
-        (18_000, 20_000, "alone", 4000, 2000, 6000),
+        (16_000, 18_000, OVERLAP, 4000, 2000, 6899),
+        (18_000, 20_000, ALONE, 4000, 2000, 6000),
     ]
 
 

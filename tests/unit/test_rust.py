@@ -70,7 +70,7 @@ def test_prepare_monitoring_data_single_task():
     assert row["delta_mperf"] == 50  # 250 - 200
     assert row["delta_unhalted_core_cycles"] == 100  # 400 - 300
     assert row["execution_time"] == 1_000_000.0  # 2_000_000 - 1_000_000
-    assert row["shared_state"] == "alone"
+    assert row["shared_state"] == 0  # alone
 
 
 def test_prepare_monitoring_data_empty_input():
