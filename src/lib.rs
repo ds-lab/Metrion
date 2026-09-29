@@ -43,19 +43,84 @@ struct ProcessedInterval {
     shared_state: u32,
 }
 
+/// The output table as one Vec per column, filled while the events are processed.
+#[derive(Default)]
+struct IntervalColumns {
+    pid: Vec<u32>,
+    pid_start: Vec<u64>,
+    start_time: Vec<u64>,
+    end_time: Vec<u64>,
+    cpu_core: Vec<u32>,
+    delta_aperf: Vec<u64>,
+    delta_mperf: Vec<u64>,
+    delta_unhalted_core_cycles: Vec<u64>,
+    execution_time: Vec<f64>,
+    shared_state: Vec<u32>,
+}
+
+impl IntervalColumns {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            pid: Vec::with_capacity(rows),
+            pid_start: Vec::with_capacity(rows),
+            start_time: Vec::with_capacity(rows),
+            end_time: Vec::with_capacity(rows),
+            cpu_core: Vec::with_capacity(rows),
+            delta_aperf: Vec::with_capacity(rows),
+            delta_mperf: Vec::with_capacity(rows),
+            delta_unhalted_core_cycles: Vec::with_capacity(rows),
+            execution_time: Vec::with_capacity(rows),
+            shared_state: Vec::with_capacity(rows),
+        }
+    }
+
+    fn push(&mut self, interval: ProcessedInterval) {
+        self.pid.push(interval.pid);
+        self.pid_start.push(interval.pid_start);
+        self.start_time.push(interval.start_time);
+        self.end_time.push(interval.end_time);
+        self.cpu_core.push(interval.cpu_core);
+        self.delta_aperf.push(interval.delta_aperf);
+        self.delta_mperf.push(interval.delta_mperf);
+        self.delta_unhalted_core_cycles
+            .push(interval.delta_unhalted_core_cycles);
+        self.execution_time.push(interval.execution_time);
+        self.shared_state.push(interval.shared_state);
+    }
+
+    fn into_dataframe(self) -> Result<DataFrame, String> {
+        DataFrame::new(vec![
+            Column::new("pid".into(), self.pid),
+            Column::new("pid_start".into(), self.pid_start),
+            Column::new("start_time".into(), self.start_time),
+            Column::new("end_time".into(), self.end_time),
+            Column::new("cpu_core".into(), self.cpu_core),
+            Column::new("delta_aperf".into(), self.delta_aperf),
+            Column::new("delta_mperf".into(), self.delta_mperf),
+            Column::new(
+                "delta_unhalted_core_cycles".into(),
+                self.delta_unhalted_core_cycles,
+            ),
+            Column::new("execution_time".into(), self.execution_time),
+            Column::new("shared_state".into(), self.shared_state),
+        ])
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// State for tracking active tasks during processing
 struct ProcessingState {
     active_1: Option<Measurement>,
     active_2: Option<Measurement>,
-    output: Vec<ProcessedInterval>,
+    output: IntervalColumns,
 }
 
 impl ProcessingState {
-    fn new() -> Self {
+    fn new(rows: usize) -> Self {
         Self {
             active_1: None,
             active_2: None,
-            output: Vec::new(),
+            output: IntervalColumns::with_capacity(rows),
         }
     }
 
@@ -251,70 +316,6 @@ fn dataframe_to_measurements(mut df: DataFrame) -> Result<Vec<Measurement>, Stri
     }
 
     Ok(data)
-}
-
-/// Converts a Vec<ProcessedInterval> to a Polars DataFrame
-fn processed_intervals_to_dataframe(
-    intervals: Vec<ProcessedInterval>,
-) -> Result<DataFrame, String> {
-    DataFrame::new(vec![
-        Column::new(
-            "pid".into(),
-            intervals.iter().map(|i| i.pid).collect::<Vec<u32>>(),
-        ),
-        Column::new(
-            "pid_start".into(),
-            intervals.iter().map(|i| i.pid_start).collect::<Vec<u64>>(),
-        ),
-        Column::new(
-            "start_time".into(),
-            intervals.iter().map(|i| i.start_time).collect::<Vec<u64>>(),
-        ),
-        Column::new(
-            "end_time".into(),
-            intervals.iter().map(|i| i.end_time).collect::<Vec<u64>>(),
-        ),
-        Column::new(
-            "cpu_core".into(),
-            intervals.iter().map(|i| i.cpu_core).collect::<Vec<u32>>(),
-        ),
-        Column::new(
-            "delta_aperf".into(),
-            intervals
-                .iter()
-                .map(|i| i.delta_aperf)
-                .collect::<Vec<u64>>(),
-        ),
-        Column::new(
-            "delta_mperf".into(),
-            intervals
-                .iter()
-                .map(|i| i.delta_mperf)
-                .collect::<Vec<u64>>(),
-        ),
-        Column::new(
-            "delta_unhalted_core_cycles".into(),
-            intervals
-                .iter()
-                .map(|i| i.delta_unhalted_core_cycles)
-                .collect::<Vec<u64>>(),
-        ),
-        Column::new(
-            "execution_time".into(),
-            intervals
-                .iter()
-                .map(|i| i.execution_time)
-                .collect::<Vec<f64>>(),
-        ),
-        Column::new(
-            "shared_state".into(),
-            intervals
-                .iter()
-                .map(|i| i.shared_state)
-                .collect::<Vec<u32>>(),
-        ),
-    ])
-    .map_err(|e| e.to_string())
 }
 
 /// Helper function to safely calculate difference with weight
@@ -603,12 +604,13 @@ fn handle_task_end(
 fn process_monitoring_data(
     raw_data: Vec<Measurement>,
     ht_factor: f64,
-) -> Result<Vec<ProcessedInterval>, String> {
+) -> Result<IntervalColumns, String> {
     if raw_data.is_empty() {
-        return Ok(Vec::new());
+        return Ok(IntervalColumns::default());
     }
 
-    let mut state = ProcessingState::new();
+    // About one output row per event: a slice gives two events and one or two rows.
+    let mut state = ProcessingState::new(raw_data.len());
 
     for measurement in raw_data.iter() {
         if measurement.interval_type == 0 {
@@ -642,7 +644,7 @@ fn prepare_one_df(df: DataFrame, ht_factor: f64) -> Result<DataFrame, String> {
     });
 
     let processed = process_monitoring_data(data, ht_factor)?;
-    processed_intervals_to_dataframe(processed)
+    processed.into_dataframe()
 }
 
 #[pyfunction]
