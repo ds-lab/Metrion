@@ -29,7 +29,7 @@ METRION_LOG_PATH="${METRION_LOG_PATH:-${DATA_DIR}/measurements/metrion/logs/metr
 start_metrion() {
   echo "Starting metrion as transient service: $ORCH_UNIT"
   local metrion_cmd
-  metrion_cmd="exec \"$PYTHON_ENV\" -m metrion.cli monitor"
+  metrion_cmd="exec \"$PYTHON_ENV\" -m metrion.cli monitor -c \"${PROJECT_ROOT%/}/metrion/config.yaml\""
   if [[ -n "${METRION_LOG_PATH:-}" ]]; then
     metrion_cmd+=" >>\"$METRION_LOG_PATH\" 2>&1"
   fi

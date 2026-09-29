@@ -52,7 +52,7 @@ class ConfigReader:
         config = cls._timestamp_storage_path(config)
 
         logger.info(f"Configuration loaded from {config_path}")
-        logger.info(f"Storage: {config.storage.type} at {config.storage.path}")
+        logger.info(f"Storage: {config.storage.type} at {Path(config.storage.path).absolute()}")
         logger.debug(f"Collection cycle: {config.timing.cycle}s")
         logger.debug(f"Energy model granularity: {config.energy_model.granularity}")
 

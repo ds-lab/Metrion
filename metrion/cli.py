@@ -1,3 +1,4 @@
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,20 +13,37 @@ app = typer.Typer(
 )
 
 TIME_FORMATS = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
+DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
+# Relative, so every command looks in the directory it runs in.
+CONFIG = Path("metrion.yaml")
+
+
+@app.command()
+def init():
+    """Write the default configuration to ./metrion.yaml, to adjust before the first run."""
+    if CONFIG.exists():
+        typer.echo(f"{CONFIG.absolute()} exists already; delete it to start from the default again.", err=True)
+        raise typer.Exit(1)
+    shutil.copyfile(DEFAULT_CONFIG, CONFIG)
+    # sudo only searches its own PATH, so name the program by its full path.
+    program = shutil.which("metrion") or "metrion"
+    typer.echo(f"Wrote {CONFIG.absolute()}. Adjust it, then start a run here with: sudo {program} monitor")
 
 
 @app.command()
 def monitor(
-    config_path: Annotated[Path, typer.Option("--config", "-c", help="Path to the configuration file.")] = Path(
-        __file__
-    ).parent.parent
-    / "configs"
-    / "config.yaml",
+    config_path: Annotated[
+        Path, typer.Option("--config", "-c", help="Configuration file; `metrion init` writes one.")
+    ] = CONFIG,
     timeout_minutes: Annotated[
         float | None, typer.Option("--timeout", "-t", help="Stop after this many minutes instead of on Ctrl+C.")
     ] = None,
 ):
     """Collect energy and resource usage data until Ctrl+C or the timeout."""
+    if not config_path.exists():
+        typer.echo(f"No configuration at {config_path.absolute()}; create one with `metrion init`.", err=True)
+        raise typer.Exit(1)
+
     from metrion.orchestrator import Orchestrator
 
     Orchestrator(str(config_path)).start(timeout_minutes=timeout_minutes)

@@ -183,3 +183,23 @@ def test_energy_too_small_to_show_is_not_shown_as_zero():
     assert report._amount(0.036, "J") == "<0.1"
     assert report._amount(0.0, "J") == "0.0"
     assert report._amount(7200.0, "Wh", True) == "2.00000 Wh"
+
+
+def test_init_writes_the_default_config_once(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    first = CliRunner().invoke(app, ["init"])
+    second = CliRunner().invoke(app, ["init"])
+
+    assert first.exit_code == 0
+    assert (tmp_path / "metrion.yaml").read_text().startswith("# METRION agent configuration.")
+    assert second.exit_code == 1, "an adjusted config must not be overwritten"
+
+
+def test_monitor_without_a_config_points_to_init(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(app, ["monitor"])
+
+    assert result.exit_code == 1
+    assert "metrion init" in result.output

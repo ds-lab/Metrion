@@ -1,9 +1,15 @@
+import os
 import pathlib
 import re
 import shutil
 import subprocess
 
 from loguru import logger
+
+
+def cache_dir() -> pathlib.Path:
+    """Where the idle power measured once per machine is kept; under sudo that is root's cache."""
+    return pathlib.Path(os.environ.get("XDG_CACHE_HOME", pathlib.Path.home() / ".cache")) / "metrion"
 
 
 def parse_cpu_list(cpu_list_str: str) -> tuple[int, ...]:
@@ -104,9 +110,8 @@ def run_rapl_idle_measurement(dwell_time=60, extra_units=None):
     subprocess.CompletedProcess
         The result of the script execution
     """
-    current_dir = pathlib.Path(__file__).parent.absolute()
-    log_folder = current_dir / "log"
-    script_path = current_dir / "freeze-idle-rapl.sh"
+    log_folder = cache_dir()
+    script_path = pathlib.Path(__file__).parent / "freeze-idle-rapl.sh"
 
     if not shutil.which("systemd-run"):
         raise RuntimeError(
@@ -133,7 +138,7 @@ def run_rapl_idle_measurement(dwell_time=60, extra_units=None):
             f"(errno={getattr(probe_exc, 'errno', None)})"
         )
 
-    log_folder.mkdir(exist_ok=True)
+    log_folder.mkdir(parents=True, exist_ok=True)
     log_file = log_folder / "rapl-idle.log"
 
     # Start from a clean log to avoid parsing stale data
@@ -235,8 +240,7 @@ def parse_rapl_idle_log(log_path: str | pathlib.Path | None = None) -> dict[int,
     """
     # Determine log path
     if log_path is None:
-        current_dir = pathlib.Path(__file__).parent.absolute()
-        log_path = current_dir / "log" / "rapl-idle.log"
+        log_path = cache_dir() / "rapl-idle.log"
     else:
         log_path = pathlib.Path(log_path)
 
@@ -299,8 +303,7 @@ def parse_rapl_idle_log(log_path: str | pathlib.Path | None = None) -> dict[int,
 
 def get_cpu_idle_power_data(log_path: str | pathlib.Path | None = None) -> dict[int, dict[str, float | None]]:
     if log_path is None:
-        current_dir = pathlib.Path(__file__).parent.absolute()
-        log_path = current_dir / "log" / "rapl-idle.log"
+        log_path = cache_dir() / "rapl-idle.log"
     else:
         log_path = pathlib.Path(log_path)
 

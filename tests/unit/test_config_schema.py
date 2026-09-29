@@ -35,9 +35,10 @@ class TestStorageConfig:
         assert config.type == "parquet"
         assert config.path == "/custom/path/run"
 
-    def test_relative_path_is_resolved_against_the_base(self):
+    def test_relative_path_starts_in_the_working_directory(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
         config = StorageConfig(type="duckdb", path="./test.db")
-        assert config.get_target(Path("/base")) == "duckdb:////base/test.db"
+        assert config.get_target() == f"duckdb:///{tmp_path}/test.db"
 
     def test_absolute_path_is_kept(self):
         config = StorageConfig(type="duckdb", path="/absolute/path/db.duckdb")
@@ -212,8 +213,8 @@ class TestSourceIntervals:
             SourceIntervals.model_validate({"tcp_moniter": 5.0})
 
     def test_shipped_config_yaml_is_valid(self):
-        """configs/config.yaml is the file users start from, so it has to validate."""
-        shipped = Path(__file__).parents[2] / "configs" / "config.yaml"
+        """metrion/config.yaml is the file `metrion init` starts users from, so it has to validate."""
+        shipped = Path(__file__).parents[2] / "metrion" / "config.yaml"
 
         config = AgentConfig.from_yaml_file(shipped)
 

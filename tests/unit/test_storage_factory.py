@@ -1,5 +1,4 @@
 import multiprocessing as mp
-from pathlib import Path
 
 import polars as pl
 import pytest
@@ -33,19 +32,21 @@ def test_factory_rejects_an_unknown_type(tmp_path):
         DataStorageFactory().create_data_storage("mongodb", str(tmp_path))
 
 
-def test_parquet_target_is_a_directory_path():
+def test_parquet_target_is_a_directory_path(monkeypatch, tmp_path):
     """The database backends want a connection string, parquet wants a plain path."""
-    target = StorageConfig(type="parquet", path="./runs/x").get_target(Path("/base"))
-    assert target == "/base/runs/x"
+    monkeypatch.chdir(tmp_path)
+    target = StorageConfig(type="parquet", path="./runs/x").get_target()
+    assert target == f"{tmp_path}/runs/x"
     assert "://" not in target
 
 
-def test_duckdb_target_is_a_connection_string():
-    assert StorageConfig(type="duckdb", path="./monitor.db").get_target(Path("/base")) == "duckdb:////base/monitor.db"
+def test_duckdb_target_is_a_connection_string(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    assert StorageConfig(type="duckdb", path="./monitor.db").get_target() == f"duckdb:///{tmp_path}/monitor.db"
 
 
 def test_absolute_parquet_path_is_kept():
-    assert StorageConfig(type="parquet", path="/srv/runs/x").get_target(Path("/base")) == "/srv/runs/x"
+    assert StorageConfig(type="parquet", path="/srv/runs/x").get_target() == "/srv/runs/x"
 
 
 def test_parquet_with_a_database_path_warns():

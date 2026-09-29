@@ -11,9 +11,9 @@ storage:
   # duckdb, sqlite or parquet.
   #   duckdb  - what the SQL analyses under metrion/energy_attribution/ expect. path is a file.
   #   parquet - append-only files, cheapest during the run. path is a directory, and
-  #             `metrion analyze --db-path <that directory>` builds the database it needs.
+  #             `metrion analyze <that directory>` builds the database it needs.
   type: duckdb
-  # A relative path is resolved against the repository root. Every run gets a timestamp
+  # A relative path starts in the directory metrion runs in. Every run gets a timestamp
   # appended, so ./monitor.db becomes ./monitor_2026_09_08_10_15_00.db and no run can
   # overwrite another. The path in use is logged at startup.
   path: ./monitor.db
@@ -87,7 +87,7 @@ live_attribution:
   # Length of one row of the result stream. At least the slowest energy source (rapl, nvml);
   # longer windows split fewer energy intervals and are more exact.
   window: 10
-  # A relative path is resolved against the repository root and gets the run's timestamp, like
+  # A relative path starts in the directory metrion runs in and gets the run's timestamp, like
   # storage.path.
   path: ./energy
 

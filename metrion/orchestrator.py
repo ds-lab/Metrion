@@ -170,17 +170,15 @@ class Orchestrator:
         assert self._entities, "Physical entities must be created before the data collector."
         storage = self._config.storage
         live = self._config.live_attribution
-        base_path = Path(__file__).parent.parent
 
         if not storage.store_raw_measurements:
             logger.warning("Raw measurements are NOT stored. This run cannot be attributed differently afterwards.")
 
         self._data_collector = DataCollector(
             storage_type=storage.type,
-            storage_path=storage.get_target(base_path),
+            storage_path=storage.get_target(),
             flush_interval=self._config.timing.storage_flush,
-            # A relative path is resolved against the repository root, like storage.path.
-            live_config=live.model_copy(update={"path": str(base_path / live.path)}),
+            live_config=live.model_copy(update={"path": str(Path(live.path).absolute())}),
             hardware=[entity for entities in self._entities.values() for entity in entities],
             store_raw=storage.store_raw_measurements,
         )

@@ -6,6 +6,7 @@ from pathlib import Path
 from loguru import logger
 
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_gpu_caps
+from metrion.discovery.system_scanner.bare_metal.linux.util import cache_dir
 
 
 def get_info(config: dict) -> list[dict]:
@@ -187,8 +188,8 @@ def _normalize_manual_power_entries(power_config) -> dict[str, dict[str, float |
 def _auto_idle_power_data(gpus: list[dict]) -> dict[str, float]:
     """Measure idle GPU power using the idle_gpu.sh script if available."""
     script_path = Path(__file__).parent / "idle_gpu.sh"
-    log_dir = Path(__file__).parent / "log"
-    log_dir.mkdir(exist_ok=True)
+    log_dir = cache_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "gpu-idle.log"
 
     if not log_path.exists() and script_path.exists():
