@@ -278,7 +278,7 @@ fn safe_diff(end_val: u64, start_val: u64, weight: f64) -> u64 {
 fn linear_interpolate_sibling_values(
     active: &Measurement,
     measurement: &Measurement,
-) -> Result<(Option<Measurement>, Option<Measurement>), String> {
+) -> Measurement {
     let time_diff = active.end_values.time - active.start_values.time;
     let time_factor = (measurement.time - active.start_values.time) as f64 / time_diff as f64;
 
@@ -294,7 +294,7 @@ fn linear_interpolate_sibling_values(
             - active.start_values.unhalted_core_cycles as f64)
             * time_factor) as u64;
 
-    let active_intermediate_start = Measurement {
+    Measurement {
         pid: active.pid,
         pid_start: active.pid_start,
         exec_count: active.exec_count,
@@ -309,84 +309,40 @@ fn linear_interpolate_sibling_values(
             time: measurement.time,
         },
         end_values: active.end_values.clone(),
-    };
-
-    let active_intermediate_end = Measurement {
-        interval_type: 1, // Change to end
-        ..active_intermediate_start.clone()
-    };
-
-    // Check if values are unchanged
-    if active_intermediate_start.start_values.aperf == active.end_values.aperf
-        && active_intermediate_start.start_values.mperf == active.end_values.mperf
-        && active_intermediate_start.start_values.unhalted_core_cycles
-            == active.end_values.unhalted_core_cycles
-    {
-        return Ok((None, None));
     }
-
-    Ok((
-        Some(active_intermediate_start),
-        Some(active_intermediate_end),
-    ))
 }
 
 /// Calculate split metrics for an active task at an intermediate point
+///
+/// Returns what is left of the task after the cut, if anything, and the interval up to the cut.
 fn calc_split(
     active: &Measurement,
     measurement: &Measurement,
     shared_state: u32,
     weight: (f64, f64, f64),
-) -> Result<
-    (
-        Option<Measurement>,
-        Option<Measurement>,
-        Option<ProcessedInterval>,
-    ),
-    String,
-> {
-    let (active_intermediate_start, active_intermediate_end) =
-        linear_interpolate_sibling_values(active, measurement).map_err(|e| e.to_string())?;
+) -> (Option<Measurement>, Option<ProcessedInterval>) {
+    let cut = linear_interpolate_sibling_values(active, measurement);
 
-    if active_intermediate_start.is_none() || active_intermediate_end.is_none() {
-        return Ok((None, None, None));
-    }
+    let active_metrics = (measurement.time > active.time).then(|| ProcessedInterval {
+        pid: active.pid,
+        pid_start: active.pid_start,
+        start_time: active.time,
+        end_time: cut.time,
+        cpu_core: active.cpu_core,
+        delta_aperf: safe_diff(cut.start_values.aperf, active.start_values.aperf, weight.0),
+        delta_mperf: safe_diff(cut.start_values.mperf, active.start_values.mperf, weight.1),
+        delta_unhalted_core_cycles: safe_diff(
+            cut.start_values.unhalted_core_cycles,
+            active.start_values.unhalted_core_cycles,
+            weight.2,
+        ),
+        execution_time: (measurement.time - active.time) as f64,
+        shared_state,
+    });
 
-    match (active_intermediate_start, active_intermediate_end) {
-        (Some(active_intermediate_start), Some(active_intermediate_end)) => {
-            let active_metrics = ProcessedInterval {
-                pid: active.pid,
-                pid_start: active.pid_start,
-                start_time: active.time,
-                end_time: active_intermediate_end.time,
-                cpu_core: active.cpu_core,
-                delta_aperf: safe_diff(
-                    active_intermediate_start.start_values.aperf,
-                    active.start_values.aperf,
-                    weight.0,
-                ),
-                delta_mperf: safe_diff(
-                    active_intermediate_start.start_values.mperf,
-                    active.start_values.mperf,
-                    weight.1,
-                ),
-                delta_unhalted_core_cycles: safe_diff(
-                    active_intermediate_start.start_values.unhalted_core_cycles,
-                    active.start_values.unhalted_core_cycles,
-                    weight.2,
-                ),
-                execution_time: (measurement.time - active.time) as f64,
-                shared_state,
-            };
-
-            Ok((
-                Some(active_intermediate_start),
-                Some(active_intermediate_end),
-                Some(active_metrics),
-            ))
-        }
-        _ => Ok((None, None, None)),
-    }
+    // A cut at the end of the slice (the sibling stopped in the same nanosecond) leaves nothing.
+    let rest = (measurement.time < active.end_values.time).then_some(cut);
+    (rest, active_metrics)
 }
 
 /// Calculate end metrics for a task when it's descheduled
@@ -430,8 +386,8 @@ fn handle_task_start(state: &mut ProcessingState, measurement: &Measurement) -> 
         state.active_1 = Some(measurement.clone());
         if let Some(ref active_2_ref) = state.active_2 {
             if active_2_ref.time < measurement.time {
-                let (active_intermediate_start, _, active_metrics) =
-                    calc_split(active_2_ref, measurement, ALONE, (1.0, 1.0, 1.0))?;
+                let (active_intermediate_start, active_metrics) =
+                    calc_split(active_2_ref, measurement, ALONE, (1.0, 1.0, 1.0));
                 state.push_optional_metrics(active_metrics);
                 state.active_2 = active_intermediate_start;
             }
@@ -440,8 +396,8 @@ fn handle_task_start(state: &mut ProcessingState, measurement: &Measurement) -> 
         state.active_2 = Some(measurement.clone());
         if let Some(ref active_1_ref) = state.active_1 {
             if active_1_ref.time < measurement.time {
-                let (active_intermediate_start, _, active_metrics) =
-                    calc_split(active_1_ref, measurement, ALONE, (1.0, 1.0, 1.0))?;
+                let (active_intermediate_start, active_metrics) =
+                    calc_split(active_1_ref, measurement, ALONE, (1.0, 1.0, 1.0));
                 state.push_optional_metrics(active_metrics);
                 state.active_1 = active_intermediate_start;
             }
@@ -487,8 +443,8 @@ fn handle_both_tasks_end(
         let active_metrics_1 =
             calc_out_end(active_1_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor));
 
-        let (active_intermediate_start, _, active_metrics_2) =
-            calc_split(active_2_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor))?;
+        let (active_intermediate_start, active_metrics_2) =
+            calc_split(active_2_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor));
 
         state.push_optional_metrics(active_metrics_2);
         state.active_2 = active_intermediate_start;
@@ -502,8 +458,8 @@ fn handle_both_tasks_end(
         let active_metrics_2 =
             calc_out_end(active_2_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor));
 
-        let (active_intermediate_start, _, active_metrics_1) =
-            calc_split(active_1_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor))?;
+        let (active_intermediate_start, active_metrics_1) =
+            calc_split(active_1_ref, measurement, OVERLAP, (1.0, 1.0, ht_factor));
 
         state.push_optional_metrics(active_metrics_1);
         state.active_1 = active_intermediate_start;
