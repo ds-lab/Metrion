@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from loguru import logger
 
+from metrion.monitoring.data_source.cpu import ring_buff_base
 from metrion.monitoring.data_source.cpu.ring_buff_base import (
     _DROP_WARNING_INTERVAL_S,
     _POLL_INTERVAL_S,
@@ -178,3 +179,28 @@ def test_a_pass_that_ended_on_a_full_buffer_is_continued_at_once(proc):
     proc._poll_loop()
 
     assert waits == [_POLL_INTERVAL_S, 0, _POLL_INTERVAL_S]
+
+
+def test_the_drop_counter_is_read_at_most_once_per_interval(proc, monkeypatch):
+    clock = iter([10.0, 10.3, 10.6, 11.2, 11.5])
+    monkeypatch.setattr(ring_buff_base.time, "monotonic", lambda: next(clock))
+    proc._bpf = SimpleNamespace(ring_buffer_consume=lambda: None)
+    proc._check_missing_events = MagicMock()
+    passes = []
+    proc._stop_event = SimpleNamespace(wait=lambda timeout: passes.append(timeout) or len(passes) == 6)
+
+    proc._poll_loop()
+
+    # Five passes: the first reads the counter, 0.3 and 0.6 s later are too soon, 1.2 s later
+    # reads it again, then once more after the loop ends.
+    assert proc._check_missing_events.call_count == 3
+
+
+def test_the_drop_counter_is_read_once_more_after_the_loop(proc):
+    proc._bpf = SimpleNamespace(ring_buffer_consume=lambda: None)
+    proc._check_missing_events = MagicMock()
+    proc._stop_event = SimpleNamespace(wait=lambda timeout: True)
+
+    proc._poll_loop()
+
+    assert proc._check_missing_events.call_count == 1

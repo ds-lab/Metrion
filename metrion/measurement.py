@@ -1,15 +1,26 @@
 import hashlib
 import os
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any, override
 
+import numpy as np
 import polars as pl
-from snowflake import SnowflakeGenerator
+
+# Snowflake layout: 41 bits of Unix milliseconds, 10 bits of instance, 12 bits of sequence.
+_SEQ_BITS = 12
+_SEQ_MASK = (1 << _SEQ_BITS) - 1
+_INSTANCE_BITS = 10
+_INSTANCE_MASK = (1 << _INSTANCE_BITS) - 1
 
 
 class Measurement:
-    _GEN: None | SnowflakeGenerator = None
+    _instance_id: int | None = None
+    # Millisecond and sequence of the last id handed out, as one number: ms << _SEQ_BITS | seq.
+    _last_slot: int = -1
+    _ids_lock = threading.Lock()
 
     """
     Represents a measurement that may be either a single point in time or an interval.
@@ -48,7 +59,7 @@ class Measurement:
         self._start_ts = start_ts if start_ts else now
         self._end_ts = end_ts if end_ts else now
 
-        self._id: int = self.next_ids(1)[0]
+        self._id: int = int(self.next_ids(1)[0])
 
     @property
     def value(self) -> Any:
@@ -136,33 +147,34 @@ class Measurement:
         return host_uuid
 
     @classmethod
-    def get_snowflake_generator(cls) -> SnowflakeGenerator:
-        if cls._GEN is None:
+    def get_instance_id(cls) -> int:
+        if cls._instance_id is None:
             host_uuid = cls.get_host_uuid()
 
             u = uuid.UUID(host_uuid).bytes if "-" in host_uuid else host_uuid.encode()
             digest = hashlib.sha256(u).digest()
 
-            instance_id = int.from_bytes(digest[:2], "big") & 1023
-            cls._GEN = SnowflakeGenerator(instance=instance_id)
+            cls._instance_id = int.from_bytes(digest[:2], "big") & _INSTANCE_MASK
 
-        return cls._GEN
+        return cls._instance_id
 
     @classmethod
-    def next_ids(cls, n: int) -> list[int]:
+    def next_ids(cls, n: int) -> np.ndarray:
         """
-        Draw n snowflake ids.
+        Draw n snowflake ids as an int64 array, unique and increasing within this process.
 
-        The generator hands out 4096 ids per millisecond and returns None once those are used up,
-        so it has to be asked again instead of being taken at its word.
+        A millisecond holds 4096 ids. A batch larger than what is left of the current millisecond
+        continues into the following ones instead of waiting for them.
         """
-        gen = cls.get_snowflake_generator()
-        ids: list[int] = []
-        while len(ids) < n:
-            generated = next(gen)
-            if generated is not None:
-                ids.append(generated)
-        return ids
+        instance = cls.get_instance_id()
+        with cls._ids_lock:
+            now_slot = (time.time_ns() // 1_000_000) << _SEQ_BITS
+            first = max(now_slot, cls._last_slot + 1)
+            cls._last_slot = first + n - 1
+
+        slots = np.arange(first, first + n, dtype=np.int64)
+        millis = slots >> _SEQ_BITS
+        return (millis << (_INSTANCE_BITS + _SEQ_BITS)) | (instance << _SEQ_BITS) | (slots & _SEQ_MASK)
 
 
 class CommunicationMeasurement(Measurement):

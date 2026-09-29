@@ -7,6 +7,7 @@ pytest.importorskip("metrion.metrion_rust", reason="the Rust extension has to be
 import metrion.metrion_rust as mar  # noqa: E402
 
 HT = 1.15
+ALONE, OVERLAP = 0, 1
 COUNTERS = ("aperf", "mperf", "unhalted_core_cycles")
 
 
@@ -70,11 +71,11 @@ def test_two_cuts_split_a_slice_by_time():
     result = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
 
     assert segments_of(result, 1) == [
-        (1000, 1500, "alone", 500, 500, 500),
-        (1500, 1750, "overlap", 250, 250, 287),  # 250 * 1.15, truncated
-        (1750, 2000, "alone", 250, 250, 250),
+        (1000, 1500, ALONE, 500, 500, 500),
+        (1500, 1750, OVERLAP, 250, 250, 287),  # 250 * 1.15, truncated
+        (1750, 2000, ALONE, 250, 250, 250),
     ]
-    assert segments_of(result, 2) == [(1500, 1750, "overlap", 250, 250, 287)]
+    assert segments_of(result, 2) == [(1500, 1750, OVERLAP, 250, 250, 287)]
 
 
 def test_five_cuts_keep_every_segment_proportional():
@@ -89,16 +90,16 @@ def test_five_cuts_keep_every_segment_proportional():
     result = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
 
     assert segments_of(result, 1) == [
-        (10_000, 11_000, "alone", 2000, 1000, 3000),
-        (11_000, 13_000, "overlap", 4000, 2000, 6899),
-        (13_000, 14_000, "alone", 2000, 1000, 3000),
-        (14_000, 15_000, "overlap", 2000, 1000, 3449),
-        (15_000, 16_000, "alone", 2000, 1000, 3000),
-        (16_000, 18_000, "overlap", 4000, 2000, 6899),
+        (10_000, 11_000, ALONE, 2000, 1000, 3000),
+        (11_000, 13_000, OVERLAP, 4000, 2000, 6899),
+        (13_000, 14_000, ALONE, 2000, 1000, 3000),
+        (14_000, 15_000, OVERLAP, 2000, 1000, 3449),
+        (15_000, 16_000, ALONE, 2000, 1000, 3000),
+        (16_000, 18_000, OVERLAP, 4000, 2000, 6899),
     ]
     assert segments_of(result, 4) == [
-        (16_000, 18_000, "overlap", 4000, 2000, 6899),
-        (18_000, 20_000, "alone", 4000, 2000, 6000),
+        (16_000, 18_000, OVERLAP, 4000, 2000, 6899),
+        (18_000, 20_000, ALONE, 4000, 2000, 6000),
     ]
 
 
@@ -131,3 +132,56 @@ def test_every_segment_gets_its_time_share():
         # short; the interpolation this guards against was off by thousands.
         for counter in ("aperf", "mperf"):
             assert abs(row[f"delta_{counter}"] - deltas[counter] * share) < 2
+
+
+def test_the_result_does_not_depend_on_the_input_order():
+    """Siblings that switch in the same nanosecond give the same result whatever order the rows come in."""
+    rng = np.random.default_rng(20260929)
+    events = []
+    for pid, core in ((1, 0), (2, 1)):
+        time = 1_000_000
+        for _ in range(60):
+            # A coarse grid, so that both cores often start or stop at the same time.
+            duration = int(rng.integers(1, 6)) * 1_000
+            values = counters(*[(1_000_000, 1_000_000 + duration * rate) for rate in (2, 1, 3)])
+            events.append((pid, core, time, time + duration, values))
+            time += duration + int(rng.integers(0, 3)) * 1_000
+
+    forward = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
+    backward = mar.prepare_monitoring_data_for_tuples(frame(events[::-1]), [(0, 1)], HT)
+
+    assert forward.equals(backward)
+
+
+@pytest.mark.parametrize("second_start", [1000, 1500], ids=["same start and end", "same end"])
+def test_siblings_that_stop_in_the_same_nanosecond_both_keep_their_overlap(second_start):
+    events = [
+        (1, 0, 1000, 2000, counters((1000, 2000), (1000, 2000), (1000, 2000))),
+        (2, 1, second_start, 2000, counters((5000, 6000), (5000, 6000), (5000, 6000))),
+    ]
+
+    result = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
+
+    overlap = segments_of(result, 2)
+    assert [(start, end, state) for start, end, state, *_ in overlap] == [(second_start, 2000, OVERLAP)]
+    assert overlap[0][3] == 1000  # the whole aperf delta of the slice
+
+
+def test_every_nanosecond_of_every_slice_is_attributed():
+    """With many simultaneous switches, the output time per task equals the time it ran."""
+    rng = np.random.default_rng(20260930)
+    events, ran = [], {}
+    for pid, core in ((1, 0), (2, 1)):
+        time = 1_000_000
+        for _ in range(200):
+            # A coarse grid, so that both cores often start or stop at the same time.
+            duration = int(rng.integers(1, 6)) * 1_000
+            values = counters(*[(1_000_000, 1_000_000 + duration * rate) for rate in (2, 1, 3)])
+            events.append((pid, core, time, time + duration, values))
+            ran[pid] = ran.get(pid, 0) + duration
+            time += duration + int(rng.integers(0, 3)) * 1_000
+
+    result = mar.prepare_monitoring_data_for_tuples(frame(events), [(0, 1)], HT)
+
+    for pid, total in ran.items():
+        assert result.filter(pl.col("pid") == pid)["execution_time"].sum() == total
