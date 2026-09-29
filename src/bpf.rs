@@ -54,7 +54,7 @@ impl BpfProgram {
 impl BpfProgram {
     #[new]
     #[pyo3(signature = (name, max_entries = HashMap::new()))]
-    fn new(name: &str, max_entries: HashMap<String, u32>) -> PyResult<Self> {
+    fn new(name: &str, mut max_entries: HashMap<String, u32>) -> PyResult<Self> {
         let (_, bytes) = OBJECTS
             .iter()
             .find(|(object_name, _)| *object_name == name)
@@ -63,9 +63,13 @@ impl BpfProgram {
         let mut open = ObjectBuilder::default().open_memory(bytes).map_err(os_error)?;
         for mut map in open.maps_mut() {
             let map_name = map.name().to_string_lossy().into_owned();
-            if let Some(&count) = max_entries.get(&map_name) {
+            if let Some(count) = max_entries.remove(&map_name) {
                 map.set_max_entries(count).map_err(os_error)?;
             }
+        }
+        // Whatever is left names no map of this object, most likely a typo.
+        if let Some(unknown) = max_entries.keys().next() {
+            return Err(PyKeyError::new_err(format!("{name} has no map {unknown}")));
         }
         let object = open.load().map_err(os_error)?;
 
