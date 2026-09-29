@@ -135,132 +135,70 @@ impl ProcessingState {
     }
 }
 
+/// A column as a plain slice of its values. Missing values are an error.
+fn u32_column<'a>(df: &'a DataFrame, name: &str) -> Result<&'a [u32], String> {
+    let values = df
+        .column(name)
+        .and_then(|c| c.u32())
+        .map_err(|e| e.to_string())?;
+    if values.null_count() > 0 {
+        return Err(format!("{name} has missing values"));
+    }
+    values.cont_slice().map_err(|e| format!("{name}: {e}"))
+}
+
+/// A column as a plain slice of its values. Missing values are an error.
+fn u64_column<'a>(df: &'a DataFrame, name: &str) -> Result<&'a [u64], String> {
+    let values = df
+        .column(name)
+        .and_then(|c| c.u64())
+        .map_err(|e| e.to_string())?;
+    if values.null_count() > 0 {
+        return Err(format!("{name} has missing values"));
+    }
+    values.cont_slice().map_err(|e| format!("{name}: {e}"))
+}
+
 /// Converts a Polars DataFrame to a Vec<Measurement>
 fn dataframe_to_measurements(mut df: DataFrame) -> Result<Vec<Measurement>, String> {
-    // Ensure the DataFrame is rechunked for better performance
+    // One chunk per column, so that each column is one slice.
     df.rechunk_mut();
 
-    // Extract columns as strongly-typed series
-    let pid_series = df
-        .column("pid")
-        .map_err(|e| e.to_string())?
-        .u32()
-        .map_err(|e| e.to_string())?;
+    let pid_col = u32_column(&df, "pid")?;
+    let pid_start_col = u64_column(&df, "pid_start")?;
+    let exec_count_col = u64_column(&df, "exec_count")?;
+    let cpu_core_col = u32_column(&df, "cpu_core")?;
+    let time_start_col = u64_column(&df, "time_start")?;
+    let aperf_start_col = u64_column(&df, "aperf_start")?;
+    let mperf_start_col = u64_column(&df, "mperf_start")?;
+    let ucc_start_col = u64_column(&df, "unhalted_core_cycles_start")?;
+    let time_end_col = u64_column(&df, "time_end")?;
+    let aperf_end_col = u64_column(&df, "aperf_end")?;
+    let mperf_end_col = u64_column(&df, "mperf_end")?;
+    let ucc_end_col = u64_column(&df, "unhalted_core_cycles_end")?;
 
-    let pid_start_series = df
-        .column("pid_start")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let exec_count_series = df
-        .column("exec_count")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let cpu_core_series = df
-        .column("cpu_core")
-        .map_err(|e| e.to_string())?
-        .u32()
-        .map_err(|e| e.to_string())?;
-
-    let time_start_series = df
-        .column("time_start")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let aperf_start_series = df
-        .column("aperf_start")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let mperf_start_series = df
-        .column("mperf_start")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let ucc_start_series = df
-        .column("unhalted_core_cycles_start")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let time_end_series = df
-        .column("time_end")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let aperf_end_series = df
-        .column("aperf_end")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let mperf_end_series = df
-        .column("mperf_end")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let ucc_end_series = df
-        .column("unhalted_core_cycles_end")
-        .map_err(|e| e.to_string())?
-        .u64()
-        .map_err(|e| e.to_string())?;
-
-    let mut data = Vec::with_capacity(df.height());
+    // Two events per row: its start and its end.
+    let mut data = Vec::with_capacity(2 * df.height());
 
     // remove all values that:
     // - Case-1: have a time difference of zero between start and end
     // - Case-2: have zero values in any aperf, mperf, or ucc values
     // - Case-3: have no end or no start values
     for i in 0..df.height() {
-        // The ? operator unwraps Ok(value) or returns early with Err(error)
-        // ID
-        let pid = pid_series
-            .get(i)
-            .ok_or_else(|| "Failed to get pid value".to_string())?;
-        let pid_start = pid_start_series
-            .get(i)
-            .ok_or_else(|| "Failed to get pid_start value".to_string())?;
-
-        let exec_count = exec_count_series
-            .get(i)
-            .ok_or_else(|| "Failed to get exec_count value".to_string())?;
-        let cpu_core = cpu_core_series
-            .get(i)
-            .ok_or_else(|| "Failed to get cpu_core value".to_string())?;
+        let pid = pid_col[i];
+        let pid_start = pid_start_col[i];
+        let exec_count = exec_count_col[i];
+        let cpu_core = cpu_core_col[i];
         // start
-        let start_time = time_start_series
-            .get(i)
-            .ok_or_else(|| "Failed to get time_start value".to_string())?;
-        let aperf_start = aperf_start_series
-            .get(i)
-            .ok_or_else(|| "Failed to get aperf_start value".to_string())?;
-        let mperf_start = mperf_start_series
-            .get(i)
-            .ok_or_else(|| "Failed to get mperf_start value".to_string())?;
-        let unhalted_core_cycles_start = ucc_start_series
-            .get(i)
-            .ok_or_else(|| "Failed to get unhalted_core_cycles_start value".to_string())?;
+        let start_time = time_start_col[i];
+        let aperf_start = aperf_start_col[i];
+        let mperf_start = mperf_start_col[i];
+        let unhalted_core_cycles_start = ucc_start_col[i];
         // end
-        let end_time = time_end_series
-            .get(i)
-            .ok_or_else(|| "Failed to get time_end value".to_string())?;
-        let aperf_end = aperf_end_series
-            .get(i)
-            .ok_or_else(|| "Failed to get aperf_end value".to_string())?;
-        let mperf_end = mperf_end_series
-            .get(i)
-            .ok_or_else(|| "Failed to get mperf_end value".to_string())?;
-        let unhalted_core_cycles_end = ucc_end_series
-            .get(i)
-            .ok_or_else(|| "Failed to get unhalted_core_cycles_end value".to_string())?;
+        let end_time = time_end_col[i];
+        let aperf_end = aperf_end_col[i];
+        let mperf_end = mperf_end_col[i];
+        let unhalted_core_cycles_end = ucc_end_col[i];
 
         // Skip if time difference is zero or any value is zero, handles case-1, case-2, and case-3
         if end_time == start_time

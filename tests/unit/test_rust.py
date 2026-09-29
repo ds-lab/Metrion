@@ -219,6 +219,47 @@ def test_prepare_monitoring_data_multiple_tasks():
     assert len(result["pid"].unique()) >= 2  # Should have both PIDs represented
 
 
+def _one_task(pid=1, time_start=1_000_000, aperf_start=100):
+    counters = ("aperf", "mperf", "unhalted_core_cycles")
+    return pl.DataFrame(
+        {
+            "pid": [pid],
+            "pid_start": [11],
+            "exec_count": [pid],
+            "cpu_core": [0],
+            "time_start": [time_start],
+            "aperf_start": [aperf_start],
+            "mperf_start": [200],
+            "unhalted_core_cycles_start": [300],
+            "time_end": [time_start + 1_000_000],
+            "aperf_end": [150],
+            "mperf_end": [250],
+            "unhalted_core_cycles_end": [400],
+        },
+        schema={
+            "pid": pl.UInt32,
+            "cpu_core": pl.UInt32,
+            **{name: pl.UInt64 for name in ("pid_start", "exec_count", "time_start", "time_end")},
+            **{f"{c}_{edge}": pl.UInt64 for c in counters for edge in ("start", "end")},
+        },
+    )
+
+
+def test_a_missing_value_is_reported_with_its_column():
+    with pytest.raises(RuntimeError, match="aperf_start has missing values"):
+        mmr.prepare_monitoring_data(_one_task(aperf_start=None), 1.0)
+
+
+def test_input_in_several_chunks_is_read_like_one():
+    chunked = pl.concat([_one_task(), _one_task(pid=2, time_start=3_000_000)], rechunk=False)
+    assert chunked.n_chunks() == 2
+
+    result = mmr.prepare_monitoring_data(chunked, 1.0)
+
+    assert result["pid"].to_list() == [1, 2]
+    assert result["delta_aperf"].to_list() == [50, 50]
+
+
 if __name__ == "__main__":
     # allows quick ad-hoc run:  `python test_rust.py`
     pytest.main([__file__])
