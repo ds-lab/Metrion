@@ -21,7 +21,7 @@ source "$SCRIPT_DIR/cgroup_freeze.sh"
 # Optional: freeze cgroups during workload (default: 0 = no freeze)
 FREEZE_DURING_WORKLOAD="${FREEZE_DURING_WORKLOAD:-0}"
 
-METRION_SCRIPT="${PROJECT_ROOT%/}/metrion/orchestrator.py"
+
 METRION_LOG_PATH="${METRION_LOG_PATH:-${DATA_DIR}/measurements/metrion/logs/metrion_$(date +%Y%m%d_%H%M%S).log}"
 
 
@@ -29,7 +29,7 @@ METRION_LOG_PATH="${METRION_LOG_PATH:-${DATA_DIR}/measurements/metrion/logs/metr
 start_metrion() {
   echo "Starting metrion as transient service: $ORCH_UNIT"
   local metrion_cmd
-  metrion_cmd="exec \"$PYTHON_ENV\" \"$METRION_SCRIPT\" monitor"
+  metrion_cmd="exec \"$PYTHON_ENV\" -m metrion.cli monitor"
   if [[ -n "${METRION_LOG_PATH:-}" ]]; then
     metrion_cmd+=" >>\"$METRION_LOG_PATH\" 2>&1"
   fi

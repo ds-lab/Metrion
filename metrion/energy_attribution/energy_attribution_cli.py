@@ -11,7 +11,6 @@ from datetime import UTC
 from pathlib import Path
 from typing import Literal
 
-import click
 import duckdb
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -2229,70 +2228,6 @@ def prepare_data(
 # ============================================================================
 
 
-@click.command()
-@click.option(
-    "--db-path", type=click.Path(exists=True, path_type=Path), required=True, help="Path to the DuckDB database file"
-)
-@click.option(
-    "--filter-cmdline",
-    type=str,
-    default="",
-    help="Command line pattern to filter processes (optional if --filter-pids is set)",
-)
-@click.option(
-    "--filter-pids",
-    type=str,
-    default="",
-    help="Comma-separated list of PIDs to filter by (e.g. '1234,5678')",
-)
-@click.option(
-    "--start-time",
-    type=click.DateTime(formats=["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]),
-    required=True,
-    help="Start time for analysis (format: YYYY-MM-DD HH:MM:SS or YYYY-MM-DD)",
-)
-@click.option(
-    "--end-time",
-    type=click.DateTime(formats=["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]),
-    required=True,
-    help="End time for analysis (format: YYYY-MM-DD HH:MM:SS or YYYY-MM-DD)",
-)
-@click.option(
-    "--unit",
-    type=click.Choice(["J", "Wh"], case_sensitive=False),
-    default="J",
-    help="Energy unit to use in plots (default: J)",
-)
-@click.option(
-    "--force",
-    type=bool,
-    default=False,
-    help="Force recreation of views (default: False)",
-)
-@click.option(
-    "--backend",
-    type=click.Choice(["matplotlib", "plotly"], case_sensitive=False),
-    default="plotly",
-    help="Plotting backend to use (default: plotly)",
-)
-@click.option(
-    "--export-summary",
-    is_flag=True,
-    default=False,
-    help="Export summary to CSV and JSON files",
-)
-@click.option(
-    "--no-plots",
-    is_flag=True,
-    default=False,
-    help="Skip plot and HTML report generation",
-)
-@click.option(
-    "--export-raw-data",
-    is_flag=True,
-    default=False,
-    help="Export raw filtered interval data to CSV files (one per device: cpu, dram, gpu)",
-)
 def main(
     db_path: Path,
     filter_cmdline: str,
@@ -2327,19 +2262,10 @@ def main(
             --filter-pids "1234,5678" \\
             --start-time "2025-07-16" --end-time "2025-07-29"
     """
-    # Validate that at least one filter is provided
-    if not filter_cmdline and not filter_pids:
-        raise click.UsageError("At least one of --filter-cmdline or --filter-pids must be provided.")
-
     # Parse PIDs and build SQL filter condition
     pid_filter_sql = ""
     if filter_pids:
-        try:
-            pid_list = [int(p.strip()) for p in filter_pids.split(",") if p.strip()]
-        except ValueError as e:
-            raise click.BadParameter(
-                "--filter-pids must be a comma-separated list of integers", param_hint="--filter-pids"
-            ) from e
+        pid_list = [int(p.strip()) for p in filter_pids.split(",") if p.strip()]
         if pid_list:
             pid_csv = ", ".join(str(p) for p in pid_list)
             pid_filter_sql = f"AND le.native_pid IN ({pid_csv})"

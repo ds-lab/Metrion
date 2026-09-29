@@ -4,7 +4,6 @@ import threading
 import time
 from pathlib import Path
 
-import click
 from loguru import logger
 
 from metrion.config_reader.config_reader import ConfigReader
@@ -12,7 +11,6 @@ from metrion.config_reader.config_schema import AgentConfig
 from metrion.data_collector import DataCollector
 from metrion.data_record import DataRecord
 from metrion.discovery.hardware_detection import HardwareDetection
-from metrion.energy_attribution.energy_attribution_cli import main as analyze_command
 from metrion.entity.cpu import CPU
 from metrion.entity.dram import DRAM
 from metrion.entity.gpu import GPU
@@ -375,72 +373,3 @@ class Orchestrator:
         """Tell the data collector which threads the registry has let go of."""
         assert self._data_collector is not None, "Data collector must be initialized before forgetting."
         self._data_collector.forget(ids)
-
-
-@click.group(invoke_without_command=True)
-@click.pass_context
-def cli(ctx):
-    """Metrion - A Linux agent for monitoring process-level resource usage metrics.
-
-    Use 'metrion monitor' to start the monitoring agent, or 'metrion analyze' to
-    run energy attribution analysis on collected data.
-
-    Examples:
-
-        metrion monitor                   # Run monitoring indefinitely
-
-        metrion monitor --timeout 5       # Run monitoring for 5 minutes
-
-        metrion analyze --db-path db.db --start-time "2025-01-01" --end-time "2025-12-31" --filter-cmdline "python"
-    """
-    # If no subcommand given, show help
-    if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
-
-
-@cli.command("monitor")
-@click.option(
-    "--config",
-    "-c",
-    "config_path",
-    default=str(Path(__file__).parent.parent / "configs" / "config.yaml"),
-    help="Path to the configuration file.",
-)
-@click.option(
-    "--timeout",
-    "-t",
-    "timeout_minutes",
-    type=float,
-    default=None,
-    help="Timeout in minutes. If not specified, monitoring runs indefinitely until interrupted with Ctrl+C.",
-)
-def monitor_command(config_path: str, timeout_minutes: float | None):
-    """Start the monitoring agent to collect energy and resource usage data.
-
-    The agent will run until interrupted with Ctrl+C or until the optional timeout is reached.
-
-    Examples:
-
-        metrion monitor                           # Run indefinitely with default config
-
-        metrion monitor --timeout 5               # Run for 5 minutes
-
-        metrion monitor -c /path/to/config.yaml   # Use custom config file
-
-        metrion monitor -t 10 -c custom.yaml      # Run for 10 minutes with custom config
-    """
-    orchestrator = Orchestrator(config_path)
-    orchestrator.start(timeout_minutes=timeout_minutes)
-
-
-# Add the analyze subcommand from energy_attribution_cli
-cli.add_command(analyze_command, name="analyze")
-
-
-def main():
-    """Entry point for the metrion CLI."""
-    cli()
-
-
-if __name__ == "__main__":
-    main()
