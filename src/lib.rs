@@ -704,7 +704,7 @@ fn prepare_monitoring_data_for_tuples(
     core_pairs: Vec<(i32, i32)>,
     ht_factor: f64,
 ) -> PyResult<PyDataFrame> {
-    let df: DataFrame = py_df.into();
+    let mut df: DataFrame = py_df.into();
 
     // Detached: return a single Rust DataFrame (no Python objects)
     let result: Result<DataFrame, String> = py.detach(move || {
@@ -712,83 +712,40 @@ fn prepare_monitoring_data_for_tuples(
             return Ok(DataFrame::default());
         }
 
-        // Partition once by cpu_core
-        let parts = df
-            .partition_by(["cpu_core"], true)
-            .map_err(|e| e.to_string())?;
+        // One chunk per column, so that cpu_core is one slice.
+        df.rechunk_mut();
 
-        // cpu_core -> partition DF
-        let mut by_core: HashMap<i32, DataFrame> = HashMap::with_capacity(parts.len());
-        for p in parts {
-            if p.height() == 0 {
-                continue;
-            }
-            let core_val = p
-                .column("cpu_core")
-                .map_err(|e| e.to_string())?
-                .u32()
-                .map_err(|e| e.to_string())?
-                .get(0)
-                .ok_or_else(|| "cpu_core partition had no first value".to_string())?;
-
-            by_core.insert(core_val as i32, p);
+        // cpu_core -> its row numbers, in input order
+        let cpu_core = u32_column(&df, "cpu_core")?;
+        let mut rows_by_core: HashMap<i32, Vec<IdxSize>> = HashMap::new();
+        for (row, &core) in cpu_core.iter().enumerate() {
+            rows_by_core
+                .entry(core as i32)
+                .or_default()
+                .push(row as IdxSize);
         }
 
-        // --- Per-tuple computation ---
-        // Sequential version (minimal dependencies):
-        // let mut prepared_dfs: Vec<DataFrame> = Vec::with_capacity(core_pairs.len());
-
-        // for (a, b) in core_pairs.iter().copied() {
-        //     let mut combined: Option<DataFrame> = None;
-
-        //     for core in [a, b] {
-        //         if core < 0 {
-        //             continue;
-        //         }
-        //         if let Some(part) = by_core.get(&core) {
-        //             if combined.is_none() {
-        //                 combined = Some(part.clone());
-        //             } else {
-        //                 combined
-        //                     .as_mut()
-        //                     .unwrap()
-        //                     .vstack_mut(part)
-        //                     .map_err(|e| e.to_string())?;
-        //             }
-        //         }
-        //     }
-
-        //     let tuple_df = combined.unwrap_or_else(DataFrame::default);
-        //     let prepared = prepare_one_df(tuple_df, ht_factor)?;
-        //     prepared_dfs.push(prepared);
-        // }
-
-        // --- Parallel version (optional): replace the sequential block above with this ---
         let prepared_dfs: Vec<DataFrame> = core_pairs
             .par_iter()
             .copied()
             .map(|(a, b)| -> Result<DataFrame, String> {
-                let mut combined: Option<DataFrame> = None;
-
+                let mut rows: Vec<IdxSize> = Vec::new();
                 for core in [a, b] {
                     if core < 0 {
                         continue;
                     }
-                    if let Some(part) = by_core.get(&core) {
-                        if combined.is_none() {
-                            combined = Some(part.clone());
-                        } else {
-                            combined
-                                .as_mut()
-                                .unwrap()
-                                .vstack_mut(part)
-                                .map_err(|e| e.to_string())?;
-                        }
+                    if let Some(core_rows) = rows_by_core.get(&core) {
+                        rows.extend_from_slice(core_rows);
                     }
                 }
-
-                let tuple_df = combined.unwrap_or_else(DataFrame::default);
-                prepare_one_df(tuple_df, ht_factor)
+                if rows.is_empty() {
+                    return Ok(DataFrame::default());
+                }
+                // Copied together, so that the processing reads the pair's rows in order
+                // instead of jumping through the whole input.
+                let rows = IdxCa::from_vec("rows".into(), rows);
+                let pair_df = df.take(&rows).map_err(|e| e.to_string())?;
+                prepare_one_df(pair_df, ht_factor)
             })
             .collect::<Result<Vec<_>, String>>()?;
 
