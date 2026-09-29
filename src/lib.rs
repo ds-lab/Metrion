@@ -6,6 +6,8 @@ use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
+mod bpf;
+
 #[derive(Debug, Clone)]
 struct MeasurementValues {
     aperf: u64,
@@ -732,5 +734,6 @@ fn prepare_monitoring_data_for_tuples(
 fn metrion_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(prepare_monitoring_data, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_monitoring_data_for_tuples, m)?)?;
+    m.add_class::<bpf::BpfProgram>()?;
     Ok(())
 }

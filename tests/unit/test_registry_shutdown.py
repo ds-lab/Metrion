@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-ler = pytest.importorskip("metrion.entity.logical_entity_registry", reason="needs bcc")
+ler = pytest.importorskip("metrion.entity.logical_entity_registry", reason="needs the built metrion_rust extension")
 
 SENTINEL = "SENTINEL"
 

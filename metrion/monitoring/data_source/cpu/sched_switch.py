@@ -10,7 +10,6 @@ from typing import Any, override
 import numpy as np
 import polars as pl
 import psutil
-from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
 import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
@@ -40,7 +39,6 @@ from metrion.monitoring.data_source.cpu.collection_plan import (
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.cpu.utils import (
     CustomPerf,
-    count_cpu_sockets_from_sysfs,
     grouping_threshold_ms,
     read_perf_event,
     read_perf_type,
@@ -251,23 +249,11 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
 
     @override
     def _create_bpf(self):
-        base_dir = Path(__file__).resolve().parent
-        helpers_dir = base_dir.parent / "helpers"
-        # Use v2 BPF program with inline metadata for zero-loss entity matching
-        c_file_path = base_dir / "sched_switch.c"
-
-        bpf = BPF(
-            src_file=str(c_file_path),
-            cflags=[
-                "-DNUM_CPUS=%d" % psutil.cpu_count(logical=True),  # noqa: UP031
-                "-DNUM_SOCKETS=%d" % count_cpu_sockets_from_sysfs(),  # noqa: UP031
-                # BPF_RINGBUF_OUTPUT takes pages, not bytes
-                "-DRINGBUF_PAGES=%d" % (self._ringbuf_mib * 1024 * 1024 // mmap.PAGESIZE),  # noqa: UP031
-                "-I%s" % str(helpers_dir),  # noqa: UP031
-            ],
-        )
-
-        return bpf
+        num_cpus = psutil.cpu_count(logical=True)
+        perf_arrays = ["cycles_core", "aperf_core", "mperf_core", "load_local_perf", "load_remote_perf", "store_perf"]
+        max_entries = {name: num_cpus for name in perf_arrays}
+        max_entries["events"] = self._ringbuf_mib * 1024 * 1024
+        return mar.BpfProgram("sched_switch", max_entries)
 
     @override
     def _setup_perf_events(self) -> None:
@@ -550,33 +536,23 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         # Attach the perf events to the BPF program
         if self._collection_plan.needs_cpu_perf and self._bpf is not None:
             for i, fd in enumerate(fds_ucc):
-                self._bpf["cycles_core"][self._bpf["cycles_core"].Key(i)] = self._bpf["cycles_core"].Leaf(fd)  # ty:ignore[not-subscriptable]
-                self._bpf["cycles_core"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+                self._bpf.set_perf_fd("cycles_core", i, fd)
             for i, apfd in enumerate(fds_aperf):
-                self._bpf["aperf_core"][self._bpf["aperf_core"].Key(i)] = self._bpf["aperf_core"].Leaf(apfd)  # ty:ignore[not-subscriptable]
-                self._bpf["aperf_core"]._open_key_fds[i] = apfd  # ty:ignore[not-subscriptable]
+                self._bpf.set_perf_fd("aperf_core", i, apfd)
             for i, mpfd in enumerate(fds_mperf):
-                self._bpf["mperf_core"][self._bpf["mperf_core"].Key(i)] = self._bpf["mperf_core"].Leaf(mpfd)  # ty:ignore[not-subscriptable]
-                self._bpf["mperf_core"]._open_key_fds[i] = mpfd  # ty:ignore[not-subscriptable]
+                self._bpf.set_perf_fd("mperf_core", i, mpfd)
 
         if self._collection_plan.needs_l3_local and self._bpf is not None:
             for i, fd in enumerate(fds_load_local_dram):
-                self._bpf["load_local_perf"][self._bpf["load_local_perf"].Key(i)] = self._bpf["load_local_perf"].Leaf(
-                    fd
-                )  # ty:ignore[not-subscriptable]
-                self._bpf["load_local_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+                self._bpf.set_perf_fd("load_local_perf", i, fd)
 
         if self._collection_plan.needs_l3_remote and self._bpf is not None:
             for i, fd in enumerate(fds_load_remote_dram):
-                self._bpf["load_remote_perf"][self._bpf["load_remote_perf"].Key(i)] = self._bpf[
-                    "load_remote_perf"
-                ].Leaf(fd)  # ty:ignore[not-subscriptable]
-                self._bpf["load_remote_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+                self._bpf.set_perf_fd("load_remote_perf", i, fd)
 
         if self._collection_plan.needs_stores and self._bpf is not None:
             for i, fd in enumerate(fds_store):
-                self._bpf["store_perf"][self._bpf["store_perf"].Key(i)] = self._bpf["store_perf"].Leaf(fd)  # ty:ignore[not-subscriptable]
-                self._bpf["store_perf"]._open_key_fds[i] = fd  # ty:ignore[not-subscriptable]
+                self._bpf.set_perf_fd("store_perf", i, fd)
 
         logger.info(
             "sched_switch BPF: attached perf fds (ucc={}, aperf={}, mperf={}, l3_local={}, l3_remote={}, stores={})",
@@ -591,7 +567,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
     @override
     def _attach_ringbuf(self) -> None:
         assert self._bpf is not None
-        fd = self._bpf["events"].map_fd
+        fd = self._bpf.map_fd("events")
         page = mmap.PAGESIZE
         size = self._ringbuf_mib * 1024 * 1024
         self._rb_mask = size - 1

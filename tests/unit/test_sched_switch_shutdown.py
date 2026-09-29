@@ -12,7 +12,7 @@ SENTINEL = "SENTINEL"
 
 
 # --------------------------------------------------------------------------
-# Drain behaviour, testable without bcc.
+# Drain behaviour, testable without the extension.
 # --------------------------------------------------------------------------
 
 
@@ -80,8 +80,8 @@ def test_drain_remaining_stops_at_the_deadline_when_items_keep_arriving():
 
 # --------------------------------------------------------------------------
 # The real SchedSwitchMonitor methods, bound to a stand-in instance.
-# The module needs bcc and the built metrion_rust extension, so these are
-# skipped where either is missing.
+# The module needs the built metrion_rust extension, so these are
+# skipped where it is missing.
 # --------------------------------------------------------------------------
 
 try:
@@ -89,7 +89,7 @@ try:
 except ImportError:
     ss = None
 
-needs_bpf_stack = pytest.mark.skipif(ss is None, reason="needs bcc and the built metrion_rust extension")
+needs_bpf_stack = pytest.mark.skipif(ss is None, reason="needs the built metrion_rust extension")
 
 
 @pytest.fixture

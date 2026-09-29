@@ -53,7 +53,7 @@ def test_the_registered_data_source_classes_are_all_wired():
     The name table cannot notice either on its own, and a miss is silent: the source keeps
     running at the 5.0 s fallback while the config says otherwise.
     """
-    pytest.importorskip("bcc")
+    pytest.importorskip("metrion.metrion_rust")
     pytest.importorskip("pynvml")
     from metrion.monitoring.data_source.data_source_factory import DataSourceFactory
 

@@ -1,7 +1,8 @@
+#include "vmlinux.h"
+#include <bpf/bpf_helpers.h>
 #include "common_bpf.h"
-#include <uapi/linux/ptrace.h>
-#include <uapi/linux/sched.h>
-#include <linux/sched.h>
+
+char LICENSE[] SEC("license") = "GPL";
 
 #ifndef TASK_COMM_LEN
 #define TASK_COMM_LEN 16
@@ -50,23 +51,49 @@ struct comm_t {
     char comm[TASK_COMM_LEN];
 };
 
-BPF_RINGBUF_OUTPUT(events, 1024);
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 1024 * 4096);  // 1024 pages
+} events SEC(".maps");
 
-BPF_HASH(tid_start_ns, u32, u64, 262144);
-BPF_HASH(tid_tgid,     u32, u32, 262144);
-BPF_HASH(tid_comm,     u32, struct comm_t, 262144);
-BPF_PERCPU_ARRAY(rb_drops, u64, 1);
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 262144);
+    __type(key, u32);
+    __type(value, u64);
+} tid_start_ns SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 262144);
+    __type(key, u32);
+    __type(value, u32);
+} tid_tgid SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 262144);
+    __type(key, u32);
+    __type(value, struct comm_t);
+} tid_comm SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u64);
+} rb_drops SEC(".maps");
 
 static __always_inline void inc_drop(void)
 {
     u32 k = 0;
-    u64 *v = rb_drops.lookup(&k);
+    u64 *v = bpf_map_lookup_elem(&rb_drops, &k);
     if (v) (*v)++;
 }
 
 static __always_inline u64 lookup_start(u32 tid)
 {
-    u64 *p = tid_start_ns.lookup(&tid);
+    u64 *p = bpf_map_lookup_elem(&tid_start_ns, &tid);
     return p ? *p : 0;
 }
 
@@ -74,7 +101,7 @@ static __always_inline void cache_comm(u32 tid, const char *src_comm)
 {
     struct comm_t c = {};
     bpf_probe_read_str(c.comm, sizeof(c.comm), src_comm);
-    tid_comm.update(&tid, &c);
+    bpf_map_update_elem(&tid_comm, &tid, &c, BPF_ANY);
 }
 
 /*
@@ -82,7 +109,8 @@ static __always_inline void cache_comm(u32 tid, const char *src_comm)
  * Fields commonly: pid, comm, clone_flags
  * See kernel trace/events/task.h. :contentReference[oaicite:7]{index=7}
  */
-TRACEPOINT_PROBE(task, task_newtask)
+SEC("tracepoint/task/task_newtask")
+int task_newtask(struct trace_event_raw_task_newtask *args)
 {
     struct task_event_t e = {};
     e.event_type = EVENT_TYPE_NEW;
@@ -124,11 +152,11 @@ TRACEPOINT_PROBE(task, task_newtask)
     e.cgroup_id = bpf_get_current_cgroup_id();
 
     /* update kernel caches */
-    tid_start_ns.update(&e.tid, &e.tid_start_ns);
-    tid_tgid.update(&e.tid, &e.tgid);
+    bpf_map_update_elem(&tid_start_ns, &e.tid, &e.tid_start_ns, BPF_ANY);
+    bpf_map_update_elem(&tid_tgid, &e.tid, &e.tgid, BPF_ANY);
     cache_comm(e.tid, e.comm);
 
-    int ret = events.ringbuf_output(&e, sizeof(e), 0);
+    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
     if (ret) inc_drop();
     return 0;
 }
@@ -137,7 +165,8 @@ TRACEPOINT_PROBE(task, task_newtask)
  * sched:sched_process_exec
  * Tracepoint provides filename (as __data_loc), pid, old_pid
  */
-TRACEPOINT_PROBE(sched, sched_process_exec)
+SEC("tracepoint/sched/sched_process_exec")
+int sched_process_exec(struct trace_event_raw_sched_process_exec *args)
 {
     struct task_event_t e = {};
     e.event_type = EVENT_TYPE_EXEC;
@@ -157,8 +186,8 @@ TRACEPOINT_PROBE(sched, sched_process_exec)
     if (!st && old && old != pid) {
         st = lookup_start(old);
         if (st) {
-            tid_start_ns.update(&pid, &st);
-            tid_start_ns.delete(&old);
+            bpf_map_update_elem(&tid_start_ns, &pid, &st, BPF_ANY);
+            bpf_map_delete_elem(&tid_start_ns, &old);
         }
     }
     e.tid_start_ns = st;
@@ -166,18 +195,18 @@ TRACEPOINT_PROBE(sched, sched_process_exec)
 
     /* migrate comm cache if pid swapped */
     if (old && old != pid) {
-        struct comm_t *oc = tid_comm.lookup(&old);
+        struct comm_t *oc = bpf_map_lookup_elem(&tid_comm, &old);
         if (oc) {
             struct comm_t tmp = {};
             __builtin_memcpy(&tmp, oc, sizeof(tmp));
-            tid_comm.update(&pid, &tmp);
+            bpf_map_update_elem(&tid_comm, &pid, &tmp, BPF_ANY);
         }
-        tid_comm.delete(&old);
-        tid_tgid.delete(&old);
+        bpf_map_delete_elem(&tid_comm, &old);
+        bpf_map_delete_elem(&tid_tgid, &old);
     }
 
     /* update TGID cache */
-    tid_tgid.update(&pid, &e.tgid);
+    bpf_map_update_elem(&tid_tgid, &pid, &e.tgid, BPF_ANY);
 
     /* comm after exec (kernel typically sets comm to basename during exec) */
     bpf_get_current_comm(e.comm, sizeof(e.comm));
@@ -193,7 +222,7 @@ TRACEPOINT_PROBE(sched, sched_process_exec)
     e.gid = (u32)(uid_gid >> 32);
     e.cgroup_id = bpf_get_current_cgroup_id();
 
-    int ret = events.ringbuf_output(&e, sizeof(e), 0);
+    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
     if (ret) inc_drop();
     return 0;
 }
@@ -202,7 +231,8 @@ TRACEPOINT_PROBE(sched, sched_process_exec)
  * task:task_rename
  * Do NOT depend on args->oldcomm/newcomm. Maintain our own comm cache instead.
  */
-TRACEPOINT_PROBE(task, task_rename)
+SEC("tracepoint/task/task_rename")
+int task_rename(struct trace_event_raw_task_rename *args)
 {
     struct task_event_t e = {};
     e.event_type = EVENT_TYPE_RENAME;
@@ -222,7 +252,7 @@ TRACEPOINT_PROBE(task, task_rename)
     read_cmdline_from_task(task, e.cmdline, e.comm);
 
     /* keep tgid cache warm */
-    tid_tgid.update(&e.tid, &e.tgid);
+    bpf_map_update_elem(&tid_tgid, &e.tid, &e.tgid, BPF_ANY);
 
     /* metadata */
     u64 uid_gid = bpf_get_current_uid_gid();
@@ -230,7 +260,7 @@ TRACEPOINT_PROBE(task, task_rename)
     e.gid = (u32)(uid_gid >> 32);
     e.cgroup_id = bpf_get_current_cgroup_id();
 
-    int ret = events.ringbuf_output(&e, sizeof(e), 0);
+    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
     if (ret) inc_drop();
     return 0;
 }
@@ -239,7 +269,8 @@ TRACEPOINT_PROBE(task, task_rename)
  * sched:sched_process_exit
  * Fires when task exits.
  */
-TRACEPOINT_PROBE(sched, sched_process_exit)
+SEC("tracepoint/sched/sched_process_exit")
+int sched_process_exit(struct trace_event_raw_sched_process_exit *args)
 {
     struct task_event_t e = {};
     e.event_type = EVENT_TYPE_EXIT;
@@ -257,11 +288,11 @@ TRACEPOINT_PROBE(sched, sched_process_exit)
     read_cmdline_from_task(task, e.cmdline, e.comm);
 
     /* cleanup caches to avoid map growth */
-    tid_start_ns.delete(&e.tid);
-    tid_tgid.delete(&e.tid);
-    tid_comm.delete(&e.tid);
+    bpf_map_delete_elem(&tid_start_ns, &e.tid);
+    bpf_map_delete_elem(&tid_tgid, &e.tid);
+    bpf_map_delete_elem(&tid_comm, &e.tid);
 
-    int ret = events.ringbuf_output(&e, sizeof(e), 0);
+    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
     if (ret) inc_drop();
     return 0;
 }

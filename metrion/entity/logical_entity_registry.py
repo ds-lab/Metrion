@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes as ct
 import multiprocessing as mp
 import os
 import queue as q
@@ -12,10 +13,10 @@ from typing import Any, override
 
 import polars as pl
 import psutil
-from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
 from metrion.entity.logical_entity import LogicalEntity
+from metrion.metrion_rust import BpfProgram  # ty:ignore[unresolved-import]
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.cpu.utils import (
     get_cgroup_v2_path,
@@ -26,25 +27,41 @@ from metrion.queue_util import drain_remaining, drain_until_sentinel
 from metrion.util import boot_epoch_s, build_cgroup_id_map, read_temp_ipc
 
 
+# struct task_event_t in logical_entity_registry.bpf.c
+class TaskEvent(ct.Structure):
+    _fields_ = [
+        ("event_type", ct.c_uint32),
+        ("tid", ct.c_uint32),
+        ("tgid", ct.c_uint32),
+        ("tid_start_ns", ct.c_uint64),
+        ("tgid_start_ns", ct.c_uint64),
+        ("parent_tid", ct.c_uint32),
+        ("parent_tgid", ct.c_uint32),
+        ("parent_tid_start_ns", ct.c_uint64),
+        ("parent_tgid_start_ns", ct.c_uint64),
+        ("uid", ct.c_uint32),
+        ("gid", ct.c_uint32),
+        ("cgroup_id", ct.c_uint64),
+        ("old_tid", ct.c_uint32),
+        ("__pad", ct.c_uint32),
+        ("comm", ct.c_char * 16),
+        ("cmdline", ct.c_char * 128),
+    ]
+
+
 class LogicalEntityRegistryBpfProcess(EbpfRingBufferProcess):
     @override
     def _create_bpf(self):
-        base_dir = Path(__file__).resolve().parent
-        helpers_dir = base_dir.parent / "monitoring" / "data_source" / "helpers"
-        c_file_path = base_dir / "logical_entity_registry.c"
-
-        bpf = BPF(
-            src_file=str(c_file_path),
-            cflags=[
-                "-I%s" % str(helpers_dir),  # noqa: UP031
-            ],
-        )
-        return bpf
+        return BpfProgram("logical_entity_registry")
 
     @override
     def _attach_ringbuf(self) -> None:
         assert self._bpf is not None
-        self._bpf["events"].open_ring_buffer(self._handle_ring_event)
+        self._bpf.open_ring_buffer("events", self._handle_ring_event)
+
+    @override
+    def _read_ring_event(self, data: bytes) -> TaskEvent:
+        return TaskEvent.from_buffer_copy(data)
 
     @override
     def _event_to_record(self, event: Any) -> dict[str, Any]:

@@ -4,7 +4,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-pytest.importorskip("bcc", reason="metrion.monitoring.data_source.cpu.sched_switch imports bcc")
+pytest.importorskip("metrion.metrion_rust", reason="sched_switch needs the built metrion_rust extension")
 
 from metrion.monitoring.data_source.cpu import sched_switch as ss  # noqa: E402
 

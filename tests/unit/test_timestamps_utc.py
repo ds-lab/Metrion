@@ -83,7 +83,7 @@ def test_the_buffer_takes_measurement_objects():
 
 
 def test_sched_switch_hands_over_naive_utc():
-    pytest.importorskip("bcc", reason="sched_switch imports bcc")
+    pytest.importorskip("metrion.metrion_rust", reason="sched_switch needs the built metrion_rust extension")
     from metrion.monitoring.data_source.cpu.sched_switch import SchedSwitchMonitor
 
     monitor = object.__new__(SchedSwitchMonitor)

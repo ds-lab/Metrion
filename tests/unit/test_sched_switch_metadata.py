@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import polars as pl
 import pytest
 
-pytest.importorskip("bcc", reason="metrion.monitoring.data_source.cpu.sched_switch imports bcc")
+pytest.importorskip("metrion.metrion_rust", reason="sched_switch needs the built metrion_rust extension")
 
 from metrion.monitoring.data_source.cpu.collection_plan import SchedSwitchCollectionPlan  # noqa: E402
 from metrion.monitoring.data_source.cpu.sched_switch import SchedSwitchMonitor  # noqa: E402

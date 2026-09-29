@@ -3,11 +3,7 @@ import pytest
 from metrion.discovery.system_scanner.bare_metal.linux.util import get_nodes_per_package
 from metrion.entity.cpu import CPU
 from metrion.entity.dram import DRAM
-
-# ProcNuma pulls in cpu/utils.py, which imports bcc at module level.
-pytest.importorskip("bcc", reason="metrion.monitoring.data_source.cpu.utils imports bcc")
-
-from metrion.monitoring.data_source.memory.proc_numa import ProcNuma, parse_numa_maps  # noqa: E402
+from metrion.monitoring.data_source.memory.proc_numa import ProcNuma, parse_numa_maps
 
 
 def _sysfs(tmp_path, nodes, cpu_packages):

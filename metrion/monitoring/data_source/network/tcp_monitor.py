@@ -5,16 +5,15 @@ to capture network events at the kernel level, collecting per-process
 traffic data with IPv4 and IPv6 support.
 """
 
+import ctypes as ct
 import ipaddress
 import multiprocessing as mp
 import socket
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, override
 
 import polars as pl
-from bcc import BPF  # ty:ignore[unresolved-import]
 from loguru import logger
 
 from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
@@ -24,6 +23,7 @@ from metrion.entity.entity import Entity
 from metrion.entity.logical_entity_registry import LogicalEntityRegistry
 from metrion.entity.network_interface import NetworkInterface, NetworkInterfaceRegistry
 from metrion.metric import NETWORK_HOST_PID_TOTAL_BYTES_RECEIVED, NETWORK_HOST_PID_TOTAL_BYTES_SENT, Metric
+from metrion.metrion_rust import BpfProgram  # ty:ignore[unresolved-import]
 from metrion.monitoring.data_source.cpu.ring_buff_base import EbpfRingBufferProcess, RingBufferConfig
 from metrion.monitoring.data_source.data_source_base import DataSource
 from metrion.monitoring.data_source.util import _validate_bpf_clock_domain
@@ -82,30 +82,57 @@ TCP_EVENT_SCHEMA = {
 }
 
 
+# struct tcp_event_v2 in tcp_monitor.bpf.c
+class TcpEvent(ct.Structure):
+    _fields_ = [
+        ("cgroup_id", ct.c_uint64),
+        ("pid_start", ct.c_uint64),
+        ("tgid_start", ct.c_uint64),
+        ("time_ns", ct.c_uint64),
+        ("socket_id", ct.c_uint64),
+        ("pid", ct.c_uint32),
+        ("tgid", ct.c_uint32),
+        ("bytes", ct.c_uint32),
+        ("ifindex", ct.c_uint32),
+        ("daddr", ct.c_uint32),
+        ("saddr", ct.c_uint32),
+        ("dport", ct.c_uint16),
+        ("sport", ct.c_uint16),
+        ("family", ct.c_uint16),
+        ("ipv6_daddr", ct.c_uint8 * 16),
+        ("ipv6_rcv_saddr", ct.c_uint8 * 16),
+        ("direction", ct.c_uint8),
+        ("transport_type", ct.c_uint8),
+        ("event_type", ct.c_uint8),
+        ("__pad", ct.c_uint8),
+        ("parent_tid_start", ct.c_uint64),
+        ("parent_tgid_start", ct.c_uint64),
+        ("parent_tid", ct.c_uint32),
+        ("parent_tgid", ct.c_uint32),
+        ("uid", ct.c_uint32),
+        ("gid", ct.c_uint32),
+        ("comm", ct.c_char * 16),
+        ("cmdline", ct.c_char * 128),
+    ]
+
+
 class TCPMonitorBpfProcess(EbpfRingBufferProcess):
     """eBPF ring buffer process for TCP/UDP traffic monitoring with inline metadata."""
 
     @override
-    def _create_bpf(self) -> BPF:
-        """Load and compile the eBPF v2 program with inline metadata support."""
-        base_dir = Path(__file__).resolve().parent
-        # Use v2 BPF program with inline metadata for zero-loss entity matching
-        c_file_path = base_dir / "tcp_monitor.c"
-
-        bpf = BPF(src_file=str(c_file_path))
-
-        bpf.attach_kprobe(event="tcp_cleanup_rbuf", fn_name="trace_tcp_cleanup_rbuf")
-        bpf.attach_kprobe(event="tcp_sendmsg", fn_name="trace_tcp_sendmsg")
-        bpf.attach_kprobe(event="udp_sendmsg", fn_name="trace_udp_sendmsg")
-        bpf.attach_kprobe(event="udp_recvmsg", fn_name="trace_udp_recvmsg")
-
-        return bpf
+    def _create_bpf(self) -> BpfProgram:
+        """Load the eBPF v2 program with inline metadata support; its kprobes attach by section name."""
+        return BpfProgram("tcp_monitor")
 
     @override
     def _attach_ringbuf(self) -> None:
         """Attach ring buffer callback."""
         assert self._bpf is not None
-        self._bpf["events"].open_ring_buffer(self._handle_ring_event)
+        self._bpf.open_ring_buffer("events", self._handle_ring_event)
+
+    @override
+    def _read_ring_event(self, data: bytes) -> TcpEvent:
+        return TcpEvent.from_buffer_copy(data)
 
     @override
     def _event_to_record(self, event: Any) -> dict[str, Any]:

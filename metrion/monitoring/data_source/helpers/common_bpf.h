@@ -1,8 +1,6 @@
 #ifndef COMMON_BPF_H
 #define COMMON_BPF_H
 
-#include <linux/perf_event.h>
-
 #define TASK_COMM_LEN 16
 #define CMDLINE_MAX_LEN 128
 
