@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -32,48 +33,54 @@ def monitor(
 
 @app.command()
 def analyze(
-    db_path: Annotated[
-        Path, typer.Option(exists=True, help="Database file of a run, or the directory of a Parquet run.")
+    path: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            help="Database file of a run, the directory of a Parquet run, or the result directory of the "
+            "live attribution.",
+        ),
     ],
-    start_time: Annotated[
-        datetime, typer.Option(formats=TIME_FORMATS, metavar="DATE", help="Start of the analysis window (UTC).")
-    ],
-    end_time: Annotated[
-        datetime, typer.Option(formats=TIME_FORMATS, metavar="DATE", help="End of the analysis window (UTC).")
-    ],
-    filter_cmdline: Annotated[str, typer.Option(help="Substring of the command line or executable.")] = "",
-    filter_pids: Annotated[str, typer.Option(help="Comma-separated PIDs, e.g. '1234,5678'.")] = "",
-    unit: Annotated[Literal["J", "Wh"], typer.Option(help="Energy unit.")] = "J",
-    force: Annotated[
-        bool, typer.Option("--force", help="Rebuild the tables the analysis keeps in the database.")
-    ] = False,
-    backend: Annotated[Literal["matplotlib", "plotly"], typer.Option(help="Plotting backend.")] = "plotly",
-    export_summary: Annotated[
-        bool, typer.Option("--export-summary", help="Write the summary as CSV and JSON.")
-    ] = False,
-    no_plots: Annotated[bool, typer.Option("--no-plots", help="Skip plots and the HTML report.")] = False,
-    export_raw_data: Annotated[
-        bool, typer.Option("--export-raw-data", help="Write the filtered intervals as one CSV per device.")
-    ] = False,
+    cmdline: Annotated[
+        str | None, typer.Option(help="Processes whose command line or name contains this, with their children.")
+    ] = None,
+    pids: Annotated[str | None, typer.Option(help="Comma-separated PIDs, with their children.")] = None,
+    cgroup: Annotated[str | None, typer.Option(help="cgroups whose path contains this, one row each.")] = None,
+    start: Annotated[
+        datetime | None, typer.Option(formats=TIME_FORMATS, metavar="DATE", help="Start of the analysis (UTC).")
+    ] = None,
+    end: Annotated[
+        datetime | None, typer.Option(formats=TIME_FORMATS, metavar="DATE", help="End of the analysis (UTC).")
+    ] = None,
+    unit: Annotated[Literal["J", "Wh"], typer.Option(help="Unit of the energy shown.")] = "J",
 ):
-    """Attribute the energy of a run to processes and print a summary."""
-    from metrion.energy_attribution.energy_attribution_cli import main
+    """Show how much energy each process of a run used; without a filter, the processes that used the most."""
+    if sum(option is not None for option in (cmdline, pids, cgroup)) > 1:
+        raise typer.BadParameter("give at most one of --cmdline, --pids and --cgroup")
+    try:
+        pid_list = None if pids is None else [int(pid) for pid in pids.split(",")]
+    except ValueError as e:
+        raise typer.BadParameter("--pids takes comma-separated numbers, e.g. 1234,5678") from e
 
-    if not filter_cmdline and not filter_pids:
-        raise typer.BadParameter("give --filter-cmdline or --filter-pids")
-    main(
-        db_path,
-        filter_cmdline,
-        filter_pids,
-        start_time,
-        end_time,
-        unit,
-        force,
-        backend,
-        export_summary,
-        no_plots,
-        export_raw_data,
-    )
+    from loguru import logger
+
+    from metrion.energy_attribution.report import load, print_report, processes, select, summarize
+
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING")
+
+    rows, threads = load(path, start, end)
+    procs = processes(threads)
+    selected = select(rows, procs, cmdline, pid_list, cgroup)
+    if cmdline is not None:
+        label = f'cmdline "{cmdline}"'
+    elif pids is not None:
+        label = f"pids {pids}"
+    elif cgroup is not None:
+        label = f'cgroup "{cgroup}"'
+    else:
+        label = "all processes"
+    print_report(rows, selected, summarize(selected, procs, cgroup is not None), label, unit)
 
 
 if __name__ == "__main__":

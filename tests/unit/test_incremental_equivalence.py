@@ -15,7 +15,7 @@ from metrion.energy_attribution.energy_attribution import (
     DyncamicEnergyAttributionModel,
     GPUEnergyAttributionModel,
 )
-from metrion.energy_attribution.energy_attribution_cli import get_energy_per_thread
+from metrion.energy_attribution.sql_attribution import get_energy_per_thread
 from metrion.energy_attribution.wide_result import ENERGY_COLUMNS, add_up, to_wide
 
 FIXTURE_DIR = Path(__file__).resolve().parent.parent / "data"

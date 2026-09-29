@@ -18,8 +18,6 @@ dependencies = [
     "loguru>=0.7.3",
     "polars>=1.44.1",
     "pyarrow>=20.0.0",
-    "matplotlib>=3.10.3",
-    "plotly>=6.2.0",
     "tqdm>=4.67.1",
     "sqlparse>=0.5.3",
     "rich>=13.0.0",
@@ -45,6 +43,8 @@ dev = [
     "ipykernel>=6.29.5", # notebooks in VS Code
     "nbformat>=5.10.4",
     "pandas>=2.2.3,<3.0.0",
+    "matplotlib>=3.10.3", # evaluation plots
+    "plotly>=6.2.0",
 ]
 docs = [
     "mkdocs>=1.6.1",

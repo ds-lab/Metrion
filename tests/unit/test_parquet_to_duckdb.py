@@ -397,7 +397,7 @@ def test_a_newer_stream_makes_the_conversion_run_again(tmp_path):
 
 def test_the_analysis_accepts_a_run_directory(tmp_path):
     """prepare_data is the one gate every analysis goes through, so the hook sits there."""
-    from metrion.energy_attribution import energy_attribution_cli
+    from metrion.energy_attribution import sql_attribution
 
     storage = ParquetDataStorage(str(tmp_path / "run"))
     storage.save_measurements([_mdf(2)])
@@ -409,14 +409,12 @@ def test_the_analysis_accepts_a_run_directory(tmp_path):
         seen["db_path"] = db_path
         return None
 
-    original = energy_attribution_cli.connect_to_db
-    energy_attribution_cli.connect_to_db = fake_connect
+    original = sql_attribution.connect_to_db
+    sql_attribution.connect_to_db = fake_connect
     try:
-        energy_attribution_cli.prepare_data(
-            tmp_path / "run", "python", datetime(2026, 1, 1), datetime(2026, 1, 2), unit="J"
-        )
+        sql_attribution.prepare_data(tmp_path / "run", "python", datetime(2026, 1, 1), datetime(2026, 1, 2), unit="J")
     finally:
-        energy_attribution_cli.connect_to_db = original
+        sql_attribution.connect_to_db = original
 
     assert seen["db_path"] == tmp_path / "run" / "monitor.db", "the directory has to become a file"
     assert _query(seen["db_path"], "SELECT count(*) FROM measurement")[0][0] == 2

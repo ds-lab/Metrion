@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 import polars as pl
 
-from metrion.energy_attribution import energy_attribution_cli
+from metrion.energy_attribution import sql_attribution
 
 ENERGY_DATA_SCHEMA = pl.Schema(
     {
@@ -162,7 +162,7 @@ def load_energy_data_per_database(
         if cached is not None:
             energy_data_per_database.append(cached)
         else:
-            data = energy_attribution_cli.prepare_data(
+            data = sql_attribution.prepare_data(
                 db_path, workload, time_start, time_end, unit=unit, filter=filter_condition, force=force
             )
             if data:

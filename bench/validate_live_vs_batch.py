@@ -4,7 +4,7 @@ from pathlib import Path
 import duckdb
 import polars as pl
 
-from metrion.energy_attribution.energy_attribution_cli import get_energy_per_thread
+from metrion.energy_attribution.sql_attribution import get_energy_per_thread
 from metrion.energy_attribution.wide_result import ENERGY_COLUMNS, to_wide
 
 WINDOW_KEY = ["window_start", "logical_entity_id"]
