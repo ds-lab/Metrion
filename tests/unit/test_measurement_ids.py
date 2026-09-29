@@ -1,5 +1,7 @@
 import multiprocessing as mp
+import time
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -18,6 +20,31 @@ def test_ids_stay_complete_beyond_one_millisecond():
 
     assert None not in ids
     assert len(set(ids)) == 100_000
+
+
+def test_ids_keep_increasing_across_calls():
+    first = Measurement.next_ids(5_000)
+    second = Measurement.next_ids(5_000)
+
+    assert (np.diff(first) > 0).all()
+    assert second[0] > first[-1]
+
+
+def _slot(snowflake_id):
+    """Millisecond and sequence number as one running number."""
+    return (snowflake_id >> 22) << 12 | (snowflake_id & 0xFFF)
+
+
+def test_ids_have_the_snowflake_layout():
+    """41 bits of Unix milliseconds, 10 bits of instance, 12 bits of sequence."""
+    before_ms = time.time_ns() // 1_000_000
+
+    first, second = (int(i) for i in Measurement.next_ids(2))
+
+    assert first >> 22 >= before_ms
+    assert (first >> 12) & 0b11_1111_1111 == Measurement.get_instance_id()
+    # The next sequence number, or sequence 0 of the next millisecond.
+    assert _slot(second) - _slot(first) == 1
 
 
 def test_generated_column_is_int64_without_nulls():
