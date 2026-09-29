@@ -3,6 +3,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3_polars::PyDataFrame;
 use rayon::prelude::*;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -159,101 +160,109 @@ fn u64_column<'a>(df: &'a DataFrame, name: &str) -> Result<&'a [u64], String> {
     values.cont_slice().map_err(|e| format!("{name}: {e}"))
 }
 
-/// Converts a Polars DataFrame to a Vec<Measurement>
-fn dataframe_to_measurements(mut df: DataFrame) -> Result<Vec<Measurement>, String> {
-    // One chunk per column, so that each column is one slice.
-    df.rechunk_mut();
+/// The input columns as slices, borrowed from the DataFrame they were read from.
+struct InputColumns<'a> {
+    pid: &'a [u32],
+    pid_start: &'a [u64],
+    exec_count: &'a [u64],
+    cpu_core: &'a [u32],
+    time_start: &'a [u64],
+    aperf_start: &'a [u64],
+    mperf_start: &'a [u64],
+    ucc_start: &'a [u64],
+    time_end: &'a [u64],
+    aperf_end: &'a [u64],
+    mperf_end: &'a [u64],
+    ucc_end: &'a [u64],
+}
 
-    let pid_col = u32_column(&df, "pid")?;
-    let pid_start_col = u64_column(&df, "pid_start")?;
-    let exec_count_col = u64_column(&df, "exec_count")?;
-    let cpu_core_col = u32_column(&df, "cpu_core")?;
-    let time_start_col = u64_column(&df, "time_start")?;
-    let aperf_start_col = u64_column(&df, "aperf_start")?;
-    let mperf_start_col = u64_column(&df, "mperf_start")?;
-    let ucc_start_col = u64_column(&df, "unhalted_core_cycles_start")?;
-    let time_end_col = u64_column(&df, "time_end")?;
-    let aperf_end_col = u64_column(&df, "aperf_end")?;
-    let mperf_end_col = u64_column(&df, "mperf_end")?;
-    let ucc_end_col = u64_column(&df, "unhalted_core_cycles_end")?;
+/// The start or the end of one input row: what the sort needs, and the row to read the rest from.
+#[derive(Debug, Clone, Copy)]
+struct Event {
+    time: u64,
+    exec_count: u64,
+    cpu_core: u32,
+    interval_type: u32, // 0 = start, 1 = end
+    row: usize,
+}
 
-    // Two events per row: its start and its end.
-    let mut data = Vec::with_capacity(2 * df.height());
-
-    // remove all values that:
-    // - Case-1: have a time difference of zero between start and end
-    // - Case-2: have zero values in any aperf, mperf, or ucc values
-    // - Case-3: have no end or no start values
-    for i in 0..df.height() {
-        let pid = pid_col[i];
-        let pid_start = pid_start_col[i];
-        let exec_count = exec_count_col[i];
-        let cpu_core = cpu_core_col[i];
-        // start
-        let start_time = time_start_col[i];
-        let aperf_start = aperf_start_col[i];
-        let mperf_start = mperf_start_col[i];
-        let unhalted_core_cycles_start = ucc_start_col[i];
-        // end
-        let end_time = time_end_col[i];
-        let aperf_end = aperf_end_col[i];
-        let mperf_end = mperf_end_col[i];
-        let unhalted_core_cycles_end = ucc_end_col[i];
-
-        // Skip if time difference is zero or any value is zero, handles case-1, case-2, and case-3
-        if end_time == start_time
-            || aperf_start == 0
-            || mperf_start == 0
-            || unhalted_core_cycles_start == 0
-            || aperf_end == 0
-            || mperf_end == 0
-            || unhalted_core_cycles_end == 0
-        {
-            continue;
-        }
-
-        let start_values = MeasurementValues {
-            aperf: aperf_start,
-            mperf: mperf_start,
-            unhalted_core_cycles: unhalted_core_cycles_start,
-            time: start_time,
-        };
-
-        let end_values = MeasurementValues {
-            aperf: aperf_end,
-            mperf: mperf_end,
-            unhalted_core_cycles: unhalted_core_cycles_end,
-            time: end_time,
-        };
-
-        // Create the Measurement struct
-        let measurement_start = Measurement {
-            pid: pid,
-            pid_start: pid_start,
-            exec_count: exec_count,
-            cpu_core: cpu_core,
-            interval_type: 0, // 0 for start
-            time: start_time,
-            start_values: start_values.clone(),
-            end_values: end_values.clone(),
-        };
-
-        let measurement_end = Measurement {
-            pid: pid,
-            pid_start: pid_start,
-            exec_count: exec_count,
-            cpu_core: cpu_core,
-            interval_type: 1, // 1 for end
-            time: end_time,
-            start_values: start_values.clone(),
-            end_values: end_values.clone(),
-        };
-
-        data.push(measurement_start);
-        data.push(measurement_end);
+impl<'a> InputColumns<'a> {
+    /// Expects a rechunked DataFrame, so that every column is one slice.
+    fn new(df: &'a DataFrame) -> Result<Self, String> {
+        Ok(Self {
+            pid: u32_column(df, "pid")?,
+            pid_start: u64_column(df, "pid_start")?,
+            exec_count: u64_column(df, "exec_count")?,
+            cpu_core: u32_column(df, "cpu_core")?,
+            time_start: u64_column(df, "time_start")?,
+            aperf_start: u64_column(df, "aperf_start")?,
+            mperf_start: u64_column(df, "mperf_start")?,
+            ucc_start: u64_column(df, "unhalted_core_cycles_start")?,
+            time_end: u64_column(df, "time_end")?,
+            aperf_end: u64_column(df, "aperf_end")?,
+            mperf_end: u64_column(df, "mperf_end")?,
+            ucc_end: u64_column(df, "unhalted_core_cycles_end")?,
+        })
     }
 
-    Ok(data)
+    // Rows to skip:
+    // - Case-1: have a time difference of zero between start and end
+    // - Case-2: have zero values in any aperf, mperf, or ucc values
+    fn is_usable(&self, row: usize) -> bool {
+        self.time_end[row] != self.time_start[row]
+            && self.aperf_start[row] != 0
+            && self.mperf_start[row] != 0
+            && self.ucc_start[row] != 0
+            && self.aperf_end[row] != 0
+            && self.mperf_end[row] != 0
+            && self.ucc_end[row] != 0
+    }
+
+    /// Two events per usable row: its start and its end.
+    fn events(&self) -> Vec<Event> {
+        let rows = self.pid.len();
+        let mut events = Vec::with_capacity(2 * rows);
+        for row in 0..rows {
+            if !self.is_usable(row) {
+                continue;
+            }
+            for (interval_type, time) in [(0, self.time_start[row]), (1, self.time_end[row])] {
+                events.push(Event {
+                    time,
+                    exec_count: self.exec_count[row],
+                    cpu_core: self.cpu_core[row],
+                    interval_type,
+                    row,
+                });
+            }
+        }
+        events
+    }
+
+    /// The full measurement behind an event, as the processing steps take it.
+    fn measurement(&self, event: &Event) -> Measurement {
+        let row = event.row;
+        Measurement {
+            pid: self.pid[row],
+            pid_start: self.pid_start[row],
+            exec_count: event.exec_count,
+            cpu_core: event.cpu_core,
+            interval_type: event.interval_type,
+            time: event.time,
+            start_values: MeasurementValues {
+                aperf: self.aperf_start[row],
+                mperf: self.mperf_start[row],
+                unhalted_core_cycles: self.ucc_start[row],
+                time: self.time_start[row],
+            },
+            end_values: MeasurementValues {
+                aperf: self.aperf_end[row],
+                mperf: self.mperf_end[row],
+                unhalted_core_cycles: self.ucc_end[row],
+                time: self.time_end[row],
+            },
+        }
+    }
 }
 
 /// Helper function to safely calculate difference with weight
@@ -540,48 +549,47 @@ fn handle_task_end(
 
 /// Main function to process monitoring data
 fn process_monitoring_data(
-    raw_data: Vec<Measurement>,
+    input: &InputColumns,
+    events: &[Event],
     ht_factor: f64,
 ) -> Result<IntervalColumns, String> {
-    if raw_data.is_empty() {
+    if events.is_empty() {
         return Ok(IntervalColumns::default());
     }
 
     // About one output row per event: a slice gives two events and one or two rows.
-    let mut state = ProcessingState::new(raw_data.len());
+    let mut state = ProcessingState::new(events.len());
 
-    for measurement in raw_data.iter() {
+    for event in events {
+        let measurement = input.measurement(event);
         if measurement.interval_type == 0 {
             // A new task starts
-            handle_task_start(&mut state, measurement)?;
+            handle_task_start(&mut state, &measurement)?;
         } else if measurement.interval_type == 1 {
             // An existing task is terminated
-            handle_task_end(&mut state, measurement, ht_factor)?;
+            handle_task_end(&mut state, &measurement, ht_factor)?;
         }
     }
 
     Ok(state.output)
 }
 
-fn prepare_one_df(df: DataFrame, ht_factor: f64) -> Result<DataFrame, String> {
+fn prepare_one_df(mut df: DataFrame, ht_factor: f64) -> Result<DataFrame, String> {
     if df.height() == 0 {
         return Ok(DataFrame::default());
     }
 
-    let mut data = dataframe_to_measurements(df)?;
+    // One chunk per column, so that each column is one slice.
+    df.rechunk_mut();
+    let input = InputColumns::new(&df)?;
+    let mut events = input.events();
 
     // Ends before starts at the same time. The two SMT siblings can switch in the same
     // nanosecond; without the core and the row as the last keys, their order would depend on
     // the input order and so would the split between them.
-    data.sort_unstable_by(|a, b| {
-        a.time
-            .cmp(&b.time)
-            .then(b.interval_type.cmp(&a.interval_type))
-            .then(a.cpu_core.cmp(&b.cpu_core))
-            .then(a.exec_count.cmp(&b.exec_count))
-    });
+    events.sort_unstable_by_key(|e| (e.time, Reverse(e.interval_type), e.cpu_core, e.exec_count));
 
-    let processed = process_monitoring_data(data, ht_factor)?;
+    let processed = process_monitoring_data(&input, &events, ht_factor)?;
     processed.into_dataframe()
 }
 
