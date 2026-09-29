@@ -198,10 +198,25 @@ def split_large_df(df: pl.DataFrame, max_rows: int = 300_000) -> list[pl.DataFra
     return dfs
 
 
+# The IPC files between processes live for seconds; on tmpfs they never reach the disk. Small
+# tmpfs mounts (64 MB in a default Docker container) would fill up, so /tmp stays the fallback.
+_SHM_DIR = Path("/dev/shm")
+_SHM_MIN_FREE_BYTES = 1 << 30
+
+
+def _temp_dir() -> Path:
+    try:
+        stat = os.statvfs(_SHM_DIR)
+    except OSError:
+        return Path(tempfile.gettempdir())
+    if stat.f_bavail * stat.f_frsize >= _SHM_MIN_FREE_BYTES:
+        return _SHM_DIR
+    return Path(tempfile.gettempdir())
+
+
 def write_temp_ipc(df: pl.DataFrame) -> str:
-    tmpdir = Path(tempfile.gettempdir())
     fname = f"batch_{uuid.uuid4().hex}.ipc"
-    path = tmpdir / fname
+    path = _temp_dir() / fname
     df.write_ipc(path, compression="uncompressed")
     return str(path)
 
