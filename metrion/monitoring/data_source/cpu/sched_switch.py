@@ -331,11 +331,9 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         ucc_cpus: list[int] = []
         memory_cpus: list[int] = []
         fds_ucc: list[int] = []
-        fds_load_local_dram: list[int] = []
-        fds_load_remote_dram: list[int] = []
-        fds_store: list[int] = []
+        hybrid = len(atom_cpus) != 0 and len(core_cpus) != 0
 
-        if self._collection_plan.needs_cpu_perf and len(atom_cpus) != 0 and len(core_cpus) != 0:
+        if self._collection_plan.needs_cpu_perf and hybrid:
             # hybrid system detected
             # select only cores in topology
             # Unhalted Core Cycles for Atom cores, read from /sys/bus/event_source/devices/cpu_atom/events/cpu-cycles
@@ -578,6 +576,44 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             len(fds_load_remote_dram),
             len(fds_store),
         )
+
+    def _open_memory_events(self, hybrid: bool) -> tuple[list[int], list[int], list[int]]:
+        """File descriptors of the L3 local, L3 remote and store counters the config asks for."""
+        plan = self._collection_plan
+        if not (plan.needs_l3_local or plan.needs_l3_remote or plan.needs_stores):
+            return [], [], []
+        if hybrid:
+            logger.warning(
+                "sched_switch BPF: memory counters are not collected on hybrid CPUs (P- and E-cores), "
+                "so DRAM dynamic energy is not attributed to processes"
+            )
+            return [], [], []
+
+        # Event names from https://perfmon-events.intel.com/skylake_server.html
+        return (
+            self._open_memory_event("mem_load_l3_miss_retired.local_dram") if plan.needs_l3_local else [],
+            self._open_memory_event("mem_load_l3_miss_retired.remote_dram") if plan.needs_l3_remote else [],
+            self._open_memory_event("mem_inst_retired.all_stores") if plan.needs_stores else [],
+        )
+
+    def _open_memory_event(self, event: str) -> list[int]:
+        """Open a counter by its perf name on every CPU; an empty list where this CPU lacks it."""
+        try:
+            config = resolve_with_strace(event, cpu=0)
+            # Every field left out stays zero: counting, not sampling, enabled, user and kernel.
+            attr = CustomPerf.perf_event_attr()
+            attr.type = config["type"]
+            attr.config = config["config"]
+            attr.config1 = config.get("config1", 0)
+            attr.size = ct.sizeof(CustomPerf.perf_event_attr)
+            return CustomPerf.perf_custom_event_open_with_results(attr=attr, pid=-1)
+        except (RuntimeError, OSError) as e:
+            # Without the counter only DRAM loses its per-process split; CPU attribution carries on.
+            logger.warning(
+                f"sched_switch BPF: memory counter {event} is not available on this machine ({e}), "
+                "so DRAM dynamic energy is attributed without it"
+            )
+            return []
 
     @override
     def _attach_ringbuf(self) -> None:
