@@ -60,6 +60,10 @@ _BAND_MIDDLE = 1
 _BAND_TAIL = 2
 _BAND_STRADDLING = 3
 
+# Header bits of a ring buffer record, from include/uapi/linux/bpf.h.
+_RINGBUF_BUSY_BIT = 1 << 31
+_RINGBUF_DISCARD_BIT = 1 << 30
+
 
 def _band_expr(interval_ns: int, threshold_ns: int) -> pl.Expr:
     """Band of each event, from group_id, end_group, pos_start and pos_end."""
@@ -120,6 +124,9 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         align=True,
     )
 
+    # One ring buffer record: the kernel's 8-byte header, then the event.
+    RING_RECORD_DTYPE = np.dtype([("len", "<u4"), ("pg_off", "<u4"), ("event", SCHED_EVENT_DTYPE)])
+
     @classmethod
     def start_singleton(
         cls,
@@ -159,16 +166,15 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         self._use_raw_bytes = True
         self._collection_plan = collection_plan or SchedSwitchCollectionPlan.all_enabled()
         self._ringbuf_mib = ringbuf_mib or EbpfConfig().ringbuf_mib
+        self._pending_events = 0
 
     @override
-    def _parse_raw_events(self, raw_events: list[bytes]) -> pl.DataFrame:
-        """Batch-parse raw bytes into a Polars DataFrame using NumPy."""
+    def _parse_raw_events(self, raw_events: list[np.ndarray]) -> pl.DataFrame:
+        """Turn the events collected by _consume_ring into a DataFrame."""
         if not raw_events:
             return pl.DataFrame(schema=self._df_schema)
 
-        # Concatenate all raw bytes and parse with NumPy
-        raw_data = b"".join(raw_events)
-        arr = np.frombuffer(raw_data, dtype=self.SCHED_EVENT_DTYPE)
+        arr = np.concatenate(raw_events)
 
         # Convert to Polars DataFrame
         # Handle numeric fields directly
@@ -205,20 +211,21 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             }
         )
 
-        # Decode string fields (comm and cmdline) - vectorized
-        comm_bytes = arr["comm"]
-        cmdline_bytes = arr["cmdline"]
-
-        # Decode bytes to strings, handling null termination
-        comm_list = [b.rstrip(b"\x00").decode("utf-8", errors="replace") for b in comm_bytes]
-        cmdline_list = [b.rstrip(b"\x00").decode("utf-8", errors="replace").strip() for b in cmdline_bytes]
-
-        df = df.with_columns(
-            [
-                pl.Series("comm", comm_list, dtype=pl.String),
-                pl.Series("cmdline", cmdline_list, dtype=pl.String),
-            ]
-        )
+        # Only the first event of a thread carries its name and command line, so only those rows
+        # are decoded; all others stay None.
+        with_metadata = np.flatnonzero(arr["event_type"] == 1)
+        comm = pl.repeat(None, len(arr), dtype=pl.String, eager=True).alias("comm")
+        cmdline = pl.repeat(None, len(arr), dtype=pl.String, eager=True).alias("cmdline")
+        if len(with_metadata):
+            comm = comm.scatter(
+                with_metadata,
+                [b.rstrip(b"\x00").decode("utf-8", errors="replace") for b in arr["comm"][with_metadata]],
+            )
+            cmdline = cmdline.scatter(
+                with_metadata,
+                [b.rstrip(b"\x00").decode("utf-8", errors="replace").strip() for b in arr["cmdline"][with_metadata]],
+            )
+        df = df.with_columns(comm, cmdline)
 
         # Set metadata fields to None for data-only events (event_type == 0)
         df = df.with_columns(
@@ -237,8 +244,6 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 pl.when(pl.col("event_type") == 0).then(None).otherwise(pl.col("cgroup_id")).alias("cgroup_id"),
                 pl.when(pl.col("event_type") == 0).then(None).otherwise(pl.col("uid")).alias("uid"),
                 pl.when(pl.col("event_type") == 0).then(None).otherwise(pl.col("gid")).alias("gid"),
-                pl.when(pl.col("event_type") == 0).then(None).otherwise(pl.col("comm")).alias("comm"),
-                pl.when(pl.col("event_type") == 0).then(None).otherwise(pl.col("cmdline")).alias("cmdline"),
             ]
         )
 
@@ -586,7 +591,54 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
     @override
     def _attach_ringbuf(self) -> None:
         assert self._bpf is not None
-        self._bpf["events"].open_ring_buffer(self._handle_ring_event)
+        fd = self._bpf["events"].map_fd
+        page = mmap.PAGESIZE
+        size = self._ringbuf_mib * 1024 * 1024
+        self._rb_mask = size - 1
+
+        # Page 1: the consumer position, the only part the reader writes.
+        self._rb_cons_map = mmap.mmap(fd, page, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0)
+        # Page 2: the producer position, followed by the data area, which the kernel maps twice
+        # in a row so that a record running past the end can be read in one piece.
+        self._rb_data_map = mmap.mmap(fd, page + 2 * size, mmap.MAP_SHARED, mmap.PROT_READ, offset=page)
+
+        self._rb_cons = np.frombuffer(self._rb_cons_map, np.uint64, 1)
+        self._rb_prod = np.frombuffer(self._rb_data_map, np.uint64, 1)
+        self._rb_data = np.frombuffer(self._rb_data_map, np.uint8, offset=page)
+
+    def _consume_ring(self) -> None:
+        record_size = self.RING_RECORD_DTYPE.itemsize
+        cons = int(self._rb_cons[0])
+        prod = int(self._rb_prod[0])
+        n = (prod - cons) // record_size
+        if n == 0:
+            return
+
+        start = cons & self._rb_mask
+        records = self._rb_data[start : start + n * record_size].view(self.RING_RECORD_DTYPE)
+
+        # Records are handed out in order: stop at the first one the kernel is still filling.
+        busy = (records["len"] & _RINGBUF_BUSY_BIT) != 0
+        taken = int(np.argmax(busy)) if busy.any() else n
+        if taken == 0:
+            return
+
+        ready = records[:taken]
+        keep = (ready["len"] & _RINGBUF_DISCARD_BIT) == 0
+        self._raw_buffer.append(ready["event"][keep])
+        self._pending_events += int(keep.sum())
+        self._rb_cons[0] = cons + taken * record_size
+
+    @override
+    def _consume(self) -> None:
+        self._consume_ring()
+        if self._pending_events >= self._buffer_flush_threshold or self._time_flush_due():
+            self._pending_events = 0
+            self._flush_requested = True
+
+    @override
+    def _buffered_events(self) -> int:
+        return self._pending_events
 
     @override
     def _event_to_record(self, event: Any) -> dict[str, Any]:

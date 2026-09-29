@@ -66,7 +66,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         # ring events buffer (dict mode - legacy)
         self._buffer: list[dict[str, Any]] = []
         # raw bytes buffer (fast mode - subclasses can enable)
-        self._raw_buffer: list[bytes] = []
+        self._raw_buffer: list[Any] = []
         self._use_raw_bytes: bool = False  # subclasses set to True for fast path
 
         self._buffer_flush_threshold = int(config.buffer_flush_threshold)
@@ -155,7 +155,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         assert self._bpf is not None
         wait_s = _POLL_INTERVAL_S
         while not self._stop_event.wait(wait_s):
-            self._bpf.ring_buffer_consume()
+            self._consume()
             # A pass that ended on a full buffer (see _handle_ring_event) left events behind, so
             # the next one starts right after the flush instead of one interval later.
             wait_s = 0 if self._flush_requested else _POLL_INTERVAL_S
@@ -164,6 +164,13 @@ class EbpfRingBufferProcess(mp.Process, ABC):
                 self._flush_to_queue()
 
             self._check_missing_events()
+
+    def _consume(self) -> None:
+        assert self._bpf is not None
+        self._bpf.ring_buffer_consume()
+
+    def _buffered_events(self) -> int:
+        return len(self._buffer) + len(self._raw_buffer)
 
     # -----------------------------
     # Hooks subclasses must provide
@@ -278,7 +285,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
         self._total_events += df.height
         self._ipc_writer.enqueue(df)
 
-    def _parse_raw_events(self, raw_events: list[bytes]) -> pl.DataFrame:
+    def _parse_raw_events(self, raw_events: list[Any]) -> pl.DataFrame:
         """Convert raw bytes to DataFrame. Override in subclass for raw bytes mode."""
         raise NotImplementedError("Subclasses using raw bytes mode must implement _parse_raw_events")
 
@@ -301,7 +308,7 @@ class EbpfRingBufferProcess(mp.Process, ABC):
 
         # _total_events only advances on flush, so the events still sitting in the buffer have to
         # be counted here as well - otherwise an early drop reads as a 100 % loss rate.
-        buffered = len(self._buffer) + len(self._raw_buffer)
+        buffered = self._buffered_events()
         seen = self._total_events + buffered + missing_events
         logger.warning(
             f"[{self.name}] Ring buffer overflow: {missing_events} of {seen} events dropped by the "
