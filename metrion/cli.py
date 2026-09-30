@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import shutil
 import sys
@@ -109,6 +110,9 @@ def monitor(
     from metrion.calibration import CalibrationError
     from metrion.orchestrator import Orchestrator
 
+    # Every helper process starts as a fresh interpreter. A forked one inherits the parent's
+    # memory but not its threads, so a thread pool the parent started (polars has one) hangs in it.
+    multiprocessing.set_start_method("spawn", force=True)
     try:
         Orchestrator(str(config_path)).start(timeout_minutes=timeout_minutes)
     except CalibrationError as e:

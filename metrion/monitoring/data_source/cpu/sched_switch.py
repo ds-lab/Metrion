@@ -753,7 +753,6 @@ class SchedSwitchMonitor(DataSource):
                 skipping,
             )
 
-            mp.set_start_method("spawn", force=True)
             self._queue_monitoring_data = mp.Queue()
             self._stop_event = mp.Event()
 
