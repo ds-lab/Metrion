@@ -102,25 +102,29 @@ def make_measurement_df(rows: int, *, n_logical: int = 4000, n_physical: int = 1
     start_ns = base_ns + np.sort(rng.integers(0, 60_000_000_000, size=rows))
     end_ns = start_ns + rng.integers(1_000, 5_000_000, size=rows)
 
-    return pl.DataFrame(
-        {
-            "id": np.arange(rows, dtype=np.int64) + 1_000_000_000,
-            "value": rng.random(rows) * 1e6,
-            "metric_id": pl.Series(
-                rng.integers(0, len(MEASUREMENT_METRICS), size=rows), dtype=pl.UInt8
-            ).cast(pl.Int64),
-            "physical_entity_id": pl.Series(rng.integers(0, n_physical, size=rows)),
-            "logical_entity_id": pl.Series(rng.integers(0, n_logical, size=rows)),
-            "start_ts": pl.Series(start_ns).cast(pl.Datetime("ns")).dt.cast_time_unit("us"),
-            "end_ts": pl.Series(end_ns).cast(pl.Datetime("ns")).dt.cast_time_unit("us"),
-        }
-    ).with_columns(
-        pl.col("metric_id").replace_strict(
-            list(range(len(MEASUREMENT_METRICS))), list(MEASUREMENT_METRICS), return_dtype=pl.String
-        ),
-        ("core_" + pl.col("physical_entity_id").cast(pl.String)).alias("physical_entity_id"),
-        ("le_" + pl.col("logical_entity_id").cast(pl.String)).alias("logical_entity_id"),
-    ).select("id", "value", "metric_id", "physical_entity_id", "logical_entity_id", "start_ts", "end_ts")
+    return (
+        pl.DataFrame(
+            {
+                "id": np.arange(rows, dtype=np.int64) + 1_000_000_000,
+                "value": rng.random(rows) * 1e6,
+                "metric_id": pl.Series(rng.integers(0, len(MEASUREMENT_METRICS), size=rows), dtype=pl.UInt8).cast(
+                    pl.Int64
+                ),
+                "physical_entity_id": pl.Series(rng.integers(0, n_physical, size=rows)),
+                "logical_entity_id": pl.Series(rng.integers(0, n_logical, size=rows)),
+                "start_ts": pl.Series(start_ns).cast(pl.Datetime("ns")).dt.cast_time_unit("us"),
+                "end_ts": pl.Series(end_ns).cast(pl.Datetime("ns")).dt.cast_time_unit("us"),
+            }
+        )
+        .with_columns(
+            pl.col("metric_id").replace_strict(
+                list(range(len(MEASUREMENT_METRICS))), list(MEASUREMENT_METRICS), return_dtype=pl.String
+            ),
+            ("core_" + pl.col("physical_entity_id").cast(pl.String)).alias("physical_entity_id"),
+            ("le_" + pl.col("logical_entity_id").cast(pl.String)).alias("logical_entity_id"),
+        )
+        .select("id", "value", "metric_id", "physical_entity_id", "logical_entity_id", "start_ts", "end_ts")
+    )
 
 
 MEASUREMENT_DDL_WITH_PK = """

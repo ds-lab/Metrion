@@ -68,6 +68,9 @@ lint.select = ["E", "W", "F", "N", "I", "UP", "B"]
 target-version = "py312"
 line-length = 120
 format.line-ending = "lf"
+# metrion_rust is a compiled module and bench/_common is imported from inside bench/, so ruff
+# cannot find either as a source file and would sort them among the third-party imports.
+lint.isort.known-first-party = ["metrion", "_common"]
 
 [tool.pyright]
 venvPath = "."
