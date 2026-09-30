@@ -168,6 +168,10 @@ run_energat_measurements() {
 # --- flow ------------------------------------------------------------------------
 echo "===== $(date '+%Y-%m-%d %H:%M:%S') | starting benchmark run ====="
 
+# Metrion needs the idle power of this machine; measuring it freezes user.slice and the container
+# runtimes for about a minute. Without it, metrion monitor stops at once.
+sudo "$PYTHON_ENV" -m metrion.cli calibrate --yes
+
 #governor_set_all "performance"
 #turbo_disable
 

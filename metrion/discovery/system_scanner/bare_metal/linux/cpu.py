@@ -4,11 +4,12 @@ import pathlib
 import polars as pl
 from loguru import logger
 
+from metrion import calibration
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
     collect_rapl_caps,
     read_energy_range_j,
 )
-from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, parse_cpu_list
+from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
 
 
 def parse_cpuinfo() -> dict[int, dict]:
@@ -240,22 +241,9 @@ def _resolve_power_data(
 
 
 def _auto_idle_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:
-    """Auto-detect idle package power using RAPL."""
-    try:
-        rapl_data = get_cpu_idle_power_data()
-    except Exception as exc:
-        logger.opt(exception=True).warning(
-            f"Could not measure idle power via RAPL "
-            f"(type={type(exc).__name__}, errno={getattr(exc, 'errno', None)}): {exc}. "
-            "Defaulting to 0.0 W for all CPU packages."
-        )
-        return {pkg_id: 0.0 for pkg_id in cpus_by_socket.keys()}
-    idle_power: dict[int, float] = {}
-    for pkg_id in cpus_by_socket.keys():
-        socket_data = rapl_data.get(pkg_id, {})
-        idle_val = socket_data.get("package", 0.0)
-        idle_power[pkg_id] = _safe_float(idle_val, 0.0)
-    return idle_power
+    """Idle package power per socket, from the calibration."""
+    measured = calibration.idle_power("cpu", [str(pkg_id) for pkg_id in cpus_by_socket])
+    return {pkg_id: measured[str(pkg_id)] or 0.0 for pkg_id in cpus_by_socket}
 
 
 def _auto_max_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:

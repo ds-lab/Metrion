@@ -3,11 +3,13 @@ import re
 
 from loguru import logger
 
+from metrion import calibration
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
     collect_rapl_caps,
     read_energy_range_j,
+    scan_rapl_packages,
 )
-from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, get_nodes_per_package
+from metrion.discovery.system_scanner.bare_metal.linux.util import get_nodes_per_package
 
 
 def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int, dict[str, float]]]:
@@ -61,15 +63,10 @@ def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int,
 
 
 def _auto_idle_power_data() -> dict[int, float]:
-    """Auto-detect idle DRAM power using RAPL."""
-    rapl_data = get_cpu_idle_power_data()
-    idle_power: dict[int, float] = {}
-    for pkg_id, socket_data in rapl_data.items():
-        dram_val = 0.0
-        if isinstance(socket_data, dict):
-            dram_val = socket_data.get("dram", 0.0) or 0.0
-        idle_power[pkg_id] = _safe_float(dram_val, 0.0)
-    return idle_power
+    """Idle DRAM power per package, from the calibration; 0.0 where RAPL has no DRAM domain."""
+    packages = [(package / "name").read_text().strip().removeprefix("package-") for package in scan_rapl_packages()]
+    measured = calibration.idle_power("dram", packages)
+    return {int(package): watts or 0.0 for package, watts in measured.items()}
 
 
 def _auto_max_power_data() -> dict[int, float]:

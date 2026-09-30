@@ -1,12 +1,10 @@
-import re
 import shutil
 import subprocess
-from pathlib import Path
 
 from loguru import logger
 
+from metrion import calibration
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_gpu_caps
-from metrion.discovery.system_scanner.bare_metal.linux.util import cache_dir
 
 
 def get_info(config: dict) -> list[dict]:
@@ -186,36 +184,9 @@ def _normalize_manual_power_entries(power_config) -> dict[str, dict[str, float |
 
 
 def _auto_idle_power_data(gpus: list[dict]) -> dict[str, float]:
-    """Measure idle GPU power using the idle_gpu.sh script if available."""
-    script_path = Path(__file__).parent / "idle_gpu.sh"
-    log_dir = cache_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "gpu-idle.log"
-
-    if not log_path.exists() and script_path.exists():
-        cmd = ["sudo", str(script_path), "60", "60", str(log_dir)]
-        try:
-            logger.debug(f"Running GPU idle measurement script: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as exc:
-            logger.warning(f"Unable to execute GPU idle measurement script: {exc}")
-
-    measurements: dict[str, float] = {str(gpu["id"]): 0.0 for gpu in gpus}
-    if not log_path.exists():
-        return measurements
-
-    pattern = re.compile(r"GPU\[(\d+)\].*:\s*([0-9.]+)\s+W")
-    try:
-        with log_path.open() as f:
-            for line in f:
-                match = pattern.search(line)
-                if match:
-                    gpu_id = match.group(1)
-                    measurements[gpu_id] = _safe_float(match.group(2), 0.0)
-    except (OSError, ValueError):
-        return measurements
-
-    return measurements
+    """Idle power per GPU index, from the calibration, which knows the GPUs by UUID."""
+    measured = calibration.idle_power("gpu", [gpu["uuid"] for gpu in gpus])
+    return {str(gpu["id"]): measured[gpu["uuid"]] or 0.0 for gpu in gpus}
 
 
 def _auto_max_power_data() -> dict[str, float]:

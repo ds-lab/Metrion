@@ -1,3 +1,4 @@
+import os
 import shutil
 import sys
 from datetime import datetime
@@ -27,7 +28,68 @@ def init():
     shutil.copyfile(DEFAULT_CONFIG, CONFIG)
     # sudo only searches its own PATH, so name the program by its full path.
     program = shutil.which("metrion") or "metrion"
-    typer.echo(f"Wrote {CONFIG.absolute()}. Adjust it, then start a run here with: sudo {program} monitor")
+    typer.echo(f"Wrote {CONFIG.absolute()}. Adjust it, then")
+    typer.echo(f"  measure the idle power once per machine: sudo {program} calibrate")
+    typer.echo(f"  start a run in this directory:           sudo {program} monitor")
+
+
+@app.command()
+def calibrate(
+    freeze: Annotated[
+        list[str] | None, typer.Option(help="Also freeze active units matching this pattern, e.g. machine.slice.")
+    ] = None,
+    skip: Annotated[
+        list[str] | None, typer.Option(help="Leave units matching this pattern running, e.g. 'docker-*.scope'.")
+    ] = None,
+    seconds: Annotated[int, typer.Option(help="Length of the measurement.")] = 60,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Freeze without asking.")] = False,
+):
+    """Measure the idle power of CPU, DRAM and GPUs while the rest of the machine is frozen."""
+    from metrion import calibration
+
+    if os.geteuid() != 0:
+        typer.echo("Freezing units and reading RAPL needs root: sudo metrion calibrate", err=True)
+        raise typer.Exit(1)
+    try:
+        active = calibration.active_units()
+        units = calibration.select_units(active, freeze or [], skip or [])
+        info = calibration.describe(units) if units else {}
+    except calibration.CalibrationError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+
+    left_running = [unit for unit in units if info[unit].get("CanFreeze") == "no"]
+    units = [unit for unit in units if unit not in left_running]
+    typer.echo("Frozen during the measurement:")
+    width = max(len(unit) for unit in units)
+    for unit in units:
+        tasks = info[unit].get("TasksCurrent", "")
+        note = "  logins and desktop, including this terminal" if unit == "user.slice" else ""
+        typer.echo(f"  {unit:<{width}} {tasks if tasks.isdigit() else '-':>6} tasks{note}")
+    if left_running:
+        typer.echo(f"Cannot be frozen, left running: {', '.join(left_running)}")
+    for unit in active:
+        if unit in calibration.OPT_IN and unit not in units:
+            typer.echo(f"Left running: {unit} (virtual machines); add --freeze {unit} to include it")
+    holding = calibration.gpu_processes()
+    if holding:
+        typer.echo("Holding a GPU, they keep their GPU context: " + ", ".join(holding))
+
+    duration = seconds + calibration.SETTLE_S
+    if not yes and not typer.confirm(f"Freeze these {len(units)} units for about {duration} s?"):
+        raise typer.Exit(1)
+    try:
+        result = calibration.run(units, seconds)
+    except calibration.CalibrationError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+
+    for unit, error in result["not_frozen"].items():
+        typer.echo(f"Not frozen, measured anyway: {unit} ({error})", err=True)
+    for component in ("cpu", "dram", "gpu"):
+        for device, watts in result[component].items():
+            typer.echo(f"{component.upper():<5} {device:<44} {'no counter' if watts is None else f'{watts:.2f} W'}")
+    typer.echo(f"Saved to {calibration.cache_file()}")
 
 
 @app.command()
@@ -44,9 +106,14 @@ def monitor(
         typer.echo(f"No configuration at {config_path.absolute()}; create one with `metrion init`.", err=True)
         raise typer.Exit(1)
 
+    from metrion.calibration import CalibrationError
     from metrion.orchestrator import Orchestrator
 
-    Orchestrator(str(config_path)).start(timeout_minutes=timeout_minutes)
+    try:
+        Orchestrator(str(config_path)).start(timeout_minutes=timeout_minutes)
+    except CalibrationError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
 
 
 @app.command()

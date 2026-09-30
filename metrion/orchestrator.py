@@ -6,6 +6,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from metrion import calibration
+from metrion.calibration import CalibrationError
 from metrion.config_reader.config_reader import ConfigReader
 from metrion.config_reader.config_schema import AgentConfig
 from metrion.data_collector import DataCollector
@@ -75,6 +77,7 @@ class Orchestrator:
             Optional timeout in minutes. If None, monitoring runs indefinitely until interrupted.
         """
         self.read_config(self._config_path)
+        self.check_calibration()
         self.start_logical_entity_registry()
         # The data collector hands the hardware to the attribution model, so it is detected first.
         self.create_physical_entities()
@@ -155,6 +158,20 @@ class Orchestrator:
             Path to the configuration YAML file.
         """
         self._config = ConfigReader.read_config(path)
+
+    def check_calibration(self) -> None:
+        """Stop before any probe starts if the config needs an idle power that was never measured."""
+        assert self._config is not None, "Config must be loaded before checking the calibration."
+        model = self._config.energy_model
+        for name in ("cpu", "dram", "gpu"):
+            component = model.get_component_config(name)
+            auto = (
+                component is None
+                or component.power == "auto"
+                or any(entry.idle_power == "auto" for entry in component.power)
+            )
+            if model.is_component_included(name) and auto and calibration.load() is None:
+                raise CalibrationError("The idle power is not measured yet; run: sudo metrion calibrate")
 
     def start_logical_entity_registry(
         self,
