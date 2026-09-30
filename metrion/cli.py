@@ -27,8 +27,8 @@ def init():
         typer.echo(f"{CONFIG.absolute()} exists already; delete it to start from the default again.", err=True)
         raise typer.Exit(1)
     shutil.copyfile(DEFAULT_CONFIG, CONFIG)
-    # sudo only searches its own PATH, so name the program by its full path.
-    program = shutil.which("metrion") or "metrion"
+    # sudo only searches its own PATH, so name this program by its full path.
+    program = os.path.abspath(sys.argv[0]) if Path(sys.argv[0]).name == "metrion" else "metrion"
     typer.echo(f"Wrote {CONFIG.absolute()}. Adjust it, then")
     typer.echo(f"  measure the idle power once per machine: sudo {program} calibrate")
     typer.echo(f"  start a run in this directory:           sudo {program} monitor")
@@ -62,7 +62,7 @@ def calibrate(
     left_running = [unit for unit in units if info[unit].get("CanFreeze") == "no"]
     units = [unit for unit in units if unit not in left_running]
     typer.echo("Frozen during the measurement:")
-    width = max(len(unit) for unit in units)
+    width = max((len(unit) for unit in units), default=0)
     for unit in units:
         tasks = info[unit].get("TasksCurrent", "")
         note = "  logins and desktop, including this terminal" if unit == "user.slice" else ""
