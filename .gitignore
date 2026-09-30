@@ -51,6 +51,9 @@ mypy-report.xml
 rust_ext/target/
 target/
 
+# Wheels from scripts/build_wheel.sh
+dist/
+
 # Ruff
 .ruff_cache/
 
