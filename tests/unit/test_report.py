@@ -203,3 +203,14 @@ def test_monitor_without_a_config_points_to_init(monkeypatch, tmp_path):
 
     assert result.exit_code == 1
     assert "metrion init" in result.output
+
+
+def test_the_summary_names_the_unit_and_the_share_of_the_run():
+    rows, procs = _rows(ENERGY), report.processes(_threads())
+    selected = report.select(rows, procs, None, None, "nginx")
+
+    text = _printed(rows, selected, report.summarize(selected, procs, True), 'cgroup "nginx"', 120)
+
+    assert "idle [J]" in text and "total [J]" in text
+    assert "of the run" in text
+    assert "6.7%" in text, "2 J of 30 J"
