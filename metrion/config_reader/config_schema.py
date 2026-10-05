@@ -383,6 +383,8 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     debug: bool = False
+    # Written by `metrion calibrate`; relative to the directory metrion runs in.
+    calibration: str = "./calibration.json"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     ebpf: EbpfConfig = Field(default_factory=EbpfConfig)

@@ -54,6 +54,9 @@ target/
 # Wheels from scripts/build_wheel.sh
 dist/
 
+# Written by metrion calibrate, holds the idle power of one machine
+calibration.json
+
 # Ruff
 .ruff_cache/
 

@@ -1,5 +1,7 @@
+import importlib
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from metrion import calibration
 from metrion.calibration import CalibrationError
 from metrion.config_reader.config_schema import AgentConfig
+from metrion.discovery.tree_builder import HardwareTreeBuilder
 from metrion.orchestrator import Orchestrator
 
 ACTIVE = [
@@ -149,46 +152,66 @@ def _no_gpu():
     return SimpleNamespace(NVMLError=NVMLError, nvmlInit=init)
 
 
-def _calibrated(tmp_path, monkeypatch, data):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+def _calibrated(tmp_path, monkeypatch, data) -> Path:
+    """The calibration file in tmp_path, holding data measured on this machine."""
+    monkeypatch.setattr(calibration, "MACHINE_ID", tmp_path / "machine-id")
+    (tmp_path / "machine-id").write_text("abc\n")
+    path = tmp_path / "calibration.json"
     if data is not None:
-        (tmp_path / "metrion").mkdir()
-        (tmp_path / "metrion" / "calibration.json").write_text(json.dumps(data))
+        path.write_text(json.dumps({"machine_id": "abc", **data}))
+    return path
 
 
 def test_idle_power_needs_a_calibration(tmp_path, monkeypatch):
-    _calibrated(tmp_path, monkeypatch, None)
+    path = _calibrated(tmp_path, monkeypatch, None)
 
     with pytest.raises(CalibrationError, match="sudo metrion calibrate"):
-        calibration.idle_power("cpu", ["0"])
+        calibration.idle_power("cpu", ["0"], path)
 
 
 def test_idle_power_refuses_a_device_it_has_not_measured(tmp_path, monkeypatch):
-    _calibrated(tmp_path, monkeypatch, {"measured_at": "2026-09-29", "cpu": {"0": 1.3}, "dram": {"0": None}})
+    path = _calibrated(tmp_path, monkeypatch, {"cpu": {"0": 1.3}, "dram": {"0": None}})
 
-    assert calibration.idle_power("dram", ["0"]) == {"0": None}
+    assert calibration.idle_power("dram", ["0"], path) == {"0": None}
     with pytest.raises(CalibrationError, match="cpu 1"):
-        calibration.idle_power("cpu", ["0", "1"])
+        calibration.idle_power("cpu", ["0", "1"], path)
 
 
-def _orchestrator(components):
+def test_a_calibration_from_another_machine_is_refused(tmp_path, monkeypatch):
+    path = _calibrated(tmp_path, monkeypatch, {"cpu": {"0": 1.3}})
+    (tmp_path / "machine-id").write_text("xyz\n")
+
+    with pytest.raises(CalibrationError, match="another machine"):
+        calibration.idle_power("cpu", ["0"], path)
+
+
+def _orchestrator(components, path):
     orchestrator = Orchestrator.__new__(Orchestrator)
-    orchestrator._config = AgentConfig.model_validate({"energy_model": {"components": components}})
+    orchestrator._config = AgentConfig.model_validate(
+        {"calibration": str(path), "energy_model": {"components": components}}
+    )
     return orchestrator
 
 
 def test_monitor_stops_before_anything_starts_without_a_calibration(tmp_path, monkeypatch):
-    _calibrated(tmp_path, monkeypatch, None)
+    path = _calibrated(tmp_path, monkeypatch, None)
 
-    with pytest.raises(CalibrationError):
-        _orchestrator({}).check_calibration()
+    with pytest.raises(CalibrationError, match=str(path)):
+        _orchestrator({}, path).check_calibration()
 
 
 def test_monitor_needs_no_calibration_when_every_idle_power_is_given(tmp_path, monkeypatch):
-    _calibrated(tmp_path, monkeypatch, None)
+    path = _calibrated(tmp_path, monkeypatch, None)
     manual = {"power": [{"id": 0, "idle_power": 5, "max_power": 50}]}
 
-    _orchestrator({"cpu": manual, "dram": manual, "gpu": {"mode": "exclude"}}).check_calibration()
+    _orchestrator({"cpu": manual, "dram": manual, "gpu": {"mode": "exclude"}}, path).check_calibration()
+
+
+def test_the_calibration_path_starts_in_the_working_directory(tmp_path, monkeypatch):
+    _calibrated(tmp_path, monkeypatch, {"cpu": {"0": 1.3}, "dram": {"0": None}, "gpu": {}})
+    monkeypatch.chdir(tmp_path)
+
+    _orchestrator({}, "./calibration.json").check_calibration()
 
 
 @pytest.mark.parametrize(
@@ -203,3 +226,13 @@ def test_a_failed_measurement_says_why(monkeypatch, stderr, shown):
 
     with pytest.raises(CalibrationError, match=shown):
         calibration.run(["user.slice"], 10)
+
+
+def test_a_device_the_calibration_does_not_know_stops_the_discovery(monkeypatch):
+    def get_info(params):
+        raise CalibrationError("does not know cpu 1")
+
+    monkeypatch.setattr(importlib, "import_module", lambda path: SimpleNamespace(get_info=get_info))
+
+    with pytest.raises(CalibrationError):
+        HardwareTreeBuilder().import_hardware_module("bare_metal", "linux", "cpu", {})

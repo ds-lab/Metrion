@@ -158,7 +158,7 @@ def get_info(config: dict) -> list[dict]:
     create_core_entities = True
 
     power_config = config.get("power", "auto")
-    power_mode, power_data = _resolve_power_data(power_config, cpus_by_socket)
+    power_mode, power_data = _resolve_power_data(power_config, cpus_by_socket, config["calibration"])
     # Deliberately not part of power_data: the wrap value is hardware, not a setting, so it
     # must not travel through the auto/manual branch that may replace the power values.
     energy_ranges = _rapl_energy_ranges()
@@ -181,14 +181,16 @@ def get_info(config: dict) -> list[dict]:
 
 
 def _resolve_power_data(
-    power_config: dict | list | str, cpus_by_socket: dict[int, dict]
+    power_config: dict | list | str, cpus_by_socket: dict[int, dict], calibration_file: pathlib.Path
 ) -> tuple[str, dict[int, dict[str, float]]]:
     """Return (mode, per-socket power data) using manual or auto sources."""
     if isinstance(power_config, str):
         power_config = power_config.lower()
 
     if power_config == "auto":
-        return "auto", _combine_power_data(_auto_idle_power_data(cpus_by_socket), _auto_max_power_data(cpus_by_socket))
+        return "auto", _combine_power_data(
+            _auto_idle_power_data(cpus_by_socket, calibration_file), _auto_max_power_data(cpus_by_socket)
+        )
 
     manual_entries: dict[int, dict[str, float | str | None]] = {}
 
@@ -201,7 +203,9 @@ def _resolve_power_data(
             }
     else:
         logger.warning(f"Unknown power config '{power_config}', falling back to auto")
-        return "auto", _combine_power_data(_auto_idle_power_data(cpus_by_socket), _auto_max_power_data(cpus_by_socket))
+        return "auto", _combine_power_data(
+            _auto_idle_power_data(cpus_by_socket, calibration_file), _auto_max_power_data(cpus_by_socket)
+        )
 
     idle_auto: dict[int, float] | None = None
     max_auto: dict[int, float] | None = None
@@ -222,7 +226,7 @@ def _resolve_power_data(
         idle_val = manual.get("idle", "auto")
         if idle_val == "auto" or idle_val is None:
             if idle_auto is None:
-                idle_auto = _auto_idle_power_data(cpus_by_socket)
+                idle_auto = _auto_idle_power_data(cpus_by_socket, calibration_file)
             idle_val = idle_auto.get(pkg_id, 0.0)
         else:
             idle_val = _safe_float(idle_val, 0.0)
@@ -240,9 +244,9 @@ def _resolve_power_data(
     return "manual", resolved
 
 
-def _auto_idle_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:
+def _auto_idle_power_data(cpus_by_socket: dict[int, dict], calibration_file: pathlib.Path) -> dict[int, float]:
     """Idle package power per socket, from the calibration."""
-    measured = calibration.idle_power("cpu", [str(pkg_id) for pkg_id in cpus_by_socket])
+    measured = calibration.idle_power("cpu", [str(pkg_id) for pkg_id in cpus_by_socket], calibration_file)
     return {pkg_id: measured[str(pkg_id)] or 0.0 for pkg_id in cpus_by_socket}
 
 

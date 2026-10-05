@@ -170,8 +170,12 @@ class Orchestrator:
                 or component.power == "auto"
                 or any(entry.idle_power == "auto" for entry in component.power)
             )
-            if model.is_component_included(name) and auto and calibration.load() is None:
-                raise CalibrationError("The idle power is not measured yet; run: sudo metrion calibrate")
+            path = Path(self._config.calibration).absolute()
+            if model.is_component_included(name) and auto and calibration.load(path) is None:
+                raise CalibrationError(
+                    f"No calibration at {path}. Measure the idle power here with `sudo metrion calibrate`, "
+                    "or set calibration in the config to the file of an earlier one."
+                )
 
     def start_logical_entity_registry(
         self,

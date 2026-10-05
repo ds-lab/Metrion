@@ -1,6 +1,5 @@
 import fnmatch
 import json
-import os
 import shutil
 import signal
 import subprocess
@@ -20,29 +19,32 @@ OPT_IN = ["machine.slice"]
 NEVER = ["-.slice", "system.slice", "init.scope", "dbus*.service", "systemd-*.service", f"{UNIT}.service"]
 # Time for the frozen machine to settle into idle before the first reading.
 SETTLE_S = 60
+# Identifies this installation of the OS, so a calibration copied to another machine is noticed.
+MACHINE_ID = Path("/etc/machine-id")
 
 
 class CalibrationError(RuntimeError):
     pass
 
 
-def cache_dir() -> Path:
-    """Where measurements that hold per machine are kept; under sudo that is root's cache."""
-    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "metrion"
+def load(path: Path) -> dict | None:
+    """The calibration at path, None if there is none.
 
-
-def cache_file() -> Path:
-    return cache_dir() / "calibration.json"
-
-
-def load() -> dict | None:
+    Raises
+    ------
+    CalibrationError
+        If it was measured on another machine.
+    """
     try:
-        return json.loads(cache_file().read_text())
+        calibration = json.loads(path.read_text())
     except FileNotFoundError:
         return None
+    if calibration.get("machine_id") != _read(MACHINE_ID):
+        raise CalibrationError(f"{path} was measured on another machine; run here: sudo metrion calibrate")
+    return calibration
 
 
-def idle_power(component: str, devices: list[str]) -> dict[str, float | None]:
+def idle_power(component: str, devices: list[str], path: Path) -> dict[str, float | None]:
     """Idle power in watts per device, None where the machine has no counter for it.
 
     Parameters
@@ -51,21 +53,22 @@ def idle_power(component: str, devices: list[str]) -> dict[str, float | None]:
         cpu, dram or gpu.
     devices : list[str]
         RAPL package numbers, or GPU UUIDs.
+    path : Path
+        The calibration file.
 
     Raises
     ------
     CalibrationError
-        If there is no calibration, or it does not know one of the devices.
+        If there is no calibration, it is from another machine, or it does not know one of the devices.
     """
-    calibration = load()
+    calibration = load(path)
     if calibration is None:
-        raise CalibrationError("The idle power is not measured yet; run: sudo metrion calibrate")
+        raise CalibrationError(f"No calibration at {path}; run: sudo metrion calibrate")
     measured = calibration[component]
     missing = [device for device in devices if device not in measured]
     if missing:
         raise CalibrationError(
-            f"The calibration from {calibration['measured_at']} does not know {component} {', '.join(missing)}; "
-            "run: sudo metrion calibrate"
+            f"The calibration in {path} does not know {component} {', '.join(missing)}; run: sudo metrion calibrate"
         )
     return {device: measured[device] for device in devices}
 
@@ -172,10 +175,7 @@ def run(units: list[str], seconds: int) -> dict:
         raise CalibrationError(
             f"The measurement failed with exit code {result.returncode}, the units are thawed again: {reason}"
         )
-    calibration = json.loads(result.stdout)
-    cache_dir().mkdir(parents=True, exist_ok=True)
-    cache_file().write_text(json.dumps(calibration, indent=2) + "\n")
-    return calibration
+    return json.loads(result.stdout)
 
 
 def measure(units: list[str], seconds: int) -> dict:
@@ -208,6 +208,7 @@ def measure(units: list[str], seconds: int) -> dict:
         power[component][device] = (delta % wraps_at if wraps_at else delta) / per_joule / elapsed_s
     return {
         "measured_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "machine_id": _read(MACHINE_ID),
         "seconds": round(elapsed_s, 3),
         "frozen": frozen,
         "not_frozen": not_frozen,

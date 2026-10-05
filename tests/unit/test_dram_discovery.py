@@ -167,9 +167,11 @@ def test_unavailable_scanner_output_does_not_iterate_a_string(host):
 def test_scanner_output_feeds_entity_creation_unchanged(host, monkeypatch):
     """The seam that broke: what get_info emits must be what _create_dram_entities can consume."""
     monkeypatch.setattr(dram_scanner, "get_memory_per_package", lambda: {0: 32000.0, 1: 16000.0})
-    monkeypatch.setattr(dram_scanner, "_resolve_power_data", lambda power: ("auto", {0: {"idle": 3.0, "max": 12.0}}))
+    monkeypatch.setattr(
+        dram_scanner, "_resolve_power_data", lambda power, calibration_file: ("auto", {0: {"idle": 3.0, "max": 12.0}})
+    )
 
-    sockets = dram_scanner.get_info({})
+    sockets = dram_scanner.get_info({"calibration": None})
     entities = _detector(sockets)._create_dram_entities(host, [_cpu(0), _cpu(1)])
 
     assert [e.cpu.package_id for e in entities] == [0, 1]

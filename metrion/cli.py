@@ -1,3 +1,4 @@
+import json
 import multiprocessing
 import os
 import shutil
@@ -18,6 +19,7 @@ TIME_FORMATS = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]
 DEFAULT_CONFIG = Path(__file__).parent / "config.yaml"
 # Relative, so every command looks in the directory it runs in.
 CONFIG = Path("metrion.yaml")
+CALIBRATION = Path("calibration.json")
 
 
 @app.command()
@@ -30,7 +32,7 @@ def init():
     # sudo only searches its own PATH, so name this program by its full path.
     program = os.path.abspath(sys.argv[0]) if Path(sys.argv[0]).name == "metrion" else "metrion"
     typer.echo(f"Wrote {CONFIG.absolute()}. Adjust it, then")
-    typer.echo(f"  measure the idle power once per machine: sudo {program} calibrate")
+    typer.echo(f"  measure the idle power of this machine:  sudo {program} calibrate")
     typer.echo(f"  start a run in this directory:           sudo {program} monitor")
 
 
@@ -45,7 +47,7 @@ def calibrate(
     seconds: Annotated[int, typer.Option(help="Length of the measurement.")] = 60,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Freeze without asking.")] = False,
 ):
-    """Measure the idle power of CPU, DRAM and GPUs while the rest of the machine is frozen."""
+    """Measure the idle power of CPU, DRAM and GPUs into ./calibration.json, with the rest of the machine frozen."""
     from metrion import calibration
 
     if os.geteuid() != 0:
@@ -85,12 +87,13 @@ def calibrate(
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from e
 
+    CALIBRATION.write_text(json.dumps(result, indent=2) + "\n")
     for unit, error in result["not_frozen"].items():
         typer.echo(f"Not frozen, measured anyway: {unit} ({error})", err=True)
     for component in ("cpu", "dram", "gpu"):
         for device, watts in result[component].items():
             typer.echo(f"{component.upper():<5} {device:<44} {'no counter' if watts is None else f'{watts:.2f} W'}")
-    typer.echo(f"Saved to {calibration.cache_file()}")
+    typer.echo(f"Saved to {CALIBRATION.absolute()}")
 
 
 @app.command()
