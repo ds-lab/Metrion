@@ -33,6 +33,8 @@ ENERGY_COLUMNS: list[str] = list(METRIC_TO_COLUMN.values())
 _IDENTITY_SCHEMA: dict[str, pl.DataType] = {
     "native_pid": pl.Int64,
     "native_thread_id": pl.Int64,
+    # The creator: the parent process for a main thread, the own process for any other thread.
+    "native_parent_pid": pl.Int64,
     "executable_name": pl.String,
     "cmdline": pl.String,
     "cgroup_name": pl.String,
@@ -93,6 +95,7 @@ def identity_of(entity: LogicalEntity) -> dict:
         "logical_entity_id": entity.id,
         "native_pid": entity.native_pid,
         "native_thread_id": entity.native_thread_id,
+        "native_parent_pid": entity.native_parent_pid,
         # LogicalEntity keeps an unknown name as "", the result shows it as null like an unknown thread.
         "executable_name": entity.executable_name or None,
         "cmdline": entity.cmdline or None,

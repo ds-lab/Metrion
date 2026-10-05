@@ -45,10 +45,16 @@ FROM tmp_df
 def _stringify_timestamps(df: pl.DataFrame) -> pl.DataFrame:
     """Exactly what db_data_storage._save_measurement_df does today."""
     return df.with_columns(
-        pl.col("start_ts").dt.replace_time_zone("UTC").dt.convert_time_zone("UTC")
-        .dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("start_ts"),
-        pl.col("end_ts").dt.replace_time_zone("UTC").dt.convert_time_zone("UTC")
-        .dt.strftime("%Y-%m-%d %H:%M:%S%.6f").alias("end_ts"),
+        pl.col("start_ts")
+        .dt.replace_time_zone("UTC")
+        .dt.convert_time_zone("UTC")
+        .dt.strftime("%Y-%m-%d %H:%M:%S%.6f")
+        .alias("start_ts"),
+        pl.col("end_ts")
+        .dt.replace_time_zone("UTC")
+        .dt.convert_time_zone("UTC")
+        .dt.strftime("%Y-%m-%d %H:%M:%S%.6f")
+        .alias("end_ts"),
     )
 
 
@@ -138,9 +144,7 @@ def main() -> None:
     prefill_df = None
     if args.prefill:
         print(f"generating {args.prefill:,} prefill rows ...")
-        prefill_df = make_measurement_df(args.prefill, seed=99).with_columns(
-            pl.col("id") + 10_000_000_000
-        )
+        prefill_df = make_measurement_df(args.prefill, seed=99).with_columns(pl.col("id") + 10_000_000_000)
     print()
 
     bench = Bench("DuckDB measurement write path", rows=args.rows, repeats=args.repeats)

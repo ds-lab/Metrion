@@ -6,14 +6,19 @@
 # Log at DEBUG level.
 debug: true
 
+# The idle power of this machine, which `sudo metrion calibrate` measures into the directory it
+# runs in. A relative path starts in the directory metrion runs in; point it to an existing file
+# to reuse a calibration of this machine instead of measuring again.
+calibration: ./calibration.json
+
 # Where the collected data is written.
 storage:
   # duckdb, sqlite or parquet.
   #   duckdb  - what the SQL analyses under metrion/energy_attribution/ expect. path is a file.
   #   parquet - append-only files, cheapest during the run. path is a directory, and
-  #             `metrion analyze --db-path <that directory>` builds the database it needs.
+  #             `metrion analyze <that directory>` builds the database it needs.
   type: duckdb
-  # A relative path is resolved against the repository root. Every run gets a timestamp
+  # A relative path starts in the directory metrion runs in. Every run gets a timestamp
   # appended, so ./monitor.db becomes ./monitor_2026_09_08_10_15_00.db and no run can
   # overwrite another. The path in use is logged at startup.
   path: ./monitor.db
@@ -87,7 +92,7 @@ live_attribution:
   # Length of one row of the result stream. At least the slowest energy source (rapl, nvml);
   # longer windows split fewer energy intervals and are more exact.
   window: 10
-  # A relative path is resolved against the repository root and gets the run's timestamp, like
+  # A relative path starts in the directory metrion runs in and gets the run's timestamp, like
   # storage.path.
   path: ./energy
 
@@ -100,8 +105,9 @@ energy_model:
     cpu:
       # include or exclude - exclude skips the component entirely.
       mode: include
-      # auto detects idle and maximum power from the hardware. Alternatively a list of
-      # subcomponents with explicit idle_power and max_power values.
+      # auto takes the idle power from `sudo metrion calibrate` and the maximum power from the
+      # hardware's power limits. Alternatively a list of subcomponents with explicit idle_power
+      # and max_power values, in watts.
       power: auto
       # The metrics to collect, or "*" for every metric this component has.
       metrics:

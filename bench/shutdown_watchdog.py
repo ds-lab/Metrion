@@ -19,7 +19,7 @@ Usage (as root, because METRION needs eBPF/RAPL):
 
     # or against a config with everything enabled
     sudo $(which python) bench/shutdown_watchdog.py \
-        --cmd "$(which metrion) monitor -c configs/config.yaml" \
+        --cmd "$(which metrion) monitor -c metrion/config.yaml" \
         --run-seconds 300 --deadline 30 --dump-dir ./shutdown-dumps
 
 The output is a timeline plus, on timeout, one stack dump file per process. The
@@ -38,7 +38,7 @@ import tempfile
 import time
 from pathlib import Path
 
-SITECUSTOMIZE = '''\
+SITECUSTOMIZE = """\
 import faulthandler, os, signal, sys
 
 _dump_dir = os.environ.get("METRION_WATCHDOG_DUMP_DIR")
@@ -54,7 +54,7 @@ if _dump_dir:
         faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
 else:
     faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
-'''
+"""
 
 
 def descendants(pid: int) -> list[int]:
@@ -185,8 +185,10 @@ def main() -> int:
     leftovers = list(Path(tempfile.gettempdir()).glob("batch_*.ipc"))
     if leftovers:
         size = sum(p.stat().st_size for p in leftovers)
-        print(f"WARNING: {len(leftovers)} orphaned IPC batch files left in {tempfile.gettempdir()} "
-              f"({size / 1e6:.1f} MB) — these are measurements that never reached the database")
+        print(
+            f"WARNING: {len(leftovers)} orphaned IPC batch files left in {tempfile.gettempdir()} "
+            f"({size / 1e6:.1f} MB) — these are measurements that never reached the database"
+        )
     return 1 if hung else 0
 
 

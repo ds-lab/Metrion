@@ -329,7 +329,6 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         # CPUs it was opened on, in the same order.
         online_cpus = get_online_cpus()
         ucc_cpus: list[int] = []
-        memory_cpus: list[int] = []
         fds_ucc: list[int] = []
         hybrid = len(atom_cpus) != 0 and len(core_cpus) != 0
 
@@ -441,69 +440,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             )
             ucc_cpus = online_cpus
 
-        needs_memory_perf = (
-            self._collection_plan.needs_l3_local
-            or self._collection_plan.needs_l3_remote
-            or self._collection_plan.needs_stores
-        )
-        if needs_memory_perf and not (len(atom_cpus) != 0 and len(core_cpus) != 0):
-            # Events for DRAM Energy Consumption (non-hybrid systems only)
-            # https://perfmon-events.intel.com/skylake_server.html
-            memory_cpus = online_cpus
-            if self._collection_plan.needs_l3_local:
-                event_load_local_dram = "mem_load_l3_miss_retired.local_dram"
-                config_load_local_dram = resolve_with_strace(event_load_local_dram, cpu=0)
-                attr_load_local_dram = CustomPerf.perf_event_attr()
-                attr_load_local_dram.type = config_load_local_dram["type"]
-                attr_load_local_dram.config = config_load_local_dram["config"]
-                attr_load_local_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
-                attr_load_local_dram.sample_period = 0
-                attr_load_local_dram.sample_type = 0
-                attr_load_local_dram.disabled = 0
-                attr_load_local_dram.exclude_kernel = 0
-                attr_load_local_dram.exclude_user = 0
-                attr_load_local_dram.freq = 0
-                attr_load_local_dram.exclude_guest = 0
-                attr_load_local_dram.config1 = config_load_local_dram.get("config1", 0)
-                fds_load_local_dram = CustomPerf.perf_custom_event_open_with_results(
-                    attr=attr_load_local_dram, pid=-1, cpus=memory_cpus
-                )
-
-            if self._collection_plan.needs_l3_remote:
-                event_load_remote_dram = "mem_load_l3_miss_retired.remote_dram"
-                config_load_remote_dram = resolve_with_strace(event_load_remote_dram, cpu=0)
-                attr_load_remote_dram = CustomPerf.perf_event_attr()
-                attr_load_remote_dram.type = config_load_remote_dram["type"]
-                attr_load_remote_dram.config = config_load_remote_dram["config"]
-                attr_load_remote_dram.size = ct.sizeof(CustomPerf.perf_event_attr)
-                attr_load_remote_dram.sample_period = 0
-                attr_load_remote_dram.sample_type = 0
-                attr_load_remote_dram.disabled = 0
-                attr_load_remote_dram.exclude_kernel = 0
-                attr_load_remote_dram.exclude_user = 0
-                attr_load_remote_dram.freq = 0
-                attr_load_remote_dram.exclude_guest = 0
-                attr_load_remote_dram.config1 = config_load_remote_dram.get("config1", 0)
-                fds_load_remote_dram = CustomPerf.perf_custom_event_open_with_results(
-                    attr=attr_load_remote_dram, pid=-1, cpus=memory_cpus
-                )
-
-            if self._collection_plan.needs_stores:
-                event_store = "mem_inst_retired.all_stores"
-                config_store = resolve_with_strace(event_store, cpu=0)
-                attr_store = CustomPerf.perf_event_attr()
-                attr_store.type = config_store["type"]
-                attr_store.config = config_store["config"]
-                attr_store.size = ct.sizeof(CustomPerf.perf_event_attr)
-                attr_store.sample_period = 0
-                attr_store.sample_type = 0
-                attr_store.disabled = 0
-                attr_store.exclude_kernel = 0
-                attr_store.exclude_user = 0
-                attr_store.freq = 0
-                attr_store.exclude_guest = 0
-                attr_store.config1 = config_store.get("config1", 0)
-                fds_store = CustomPerf.perf_custom_event_open_with_results(attr=attr_store, pid=-1, cpus=memory_cpus)
+        fds_load_local_dram, fds_load_remote_dram, fds_store = self._open_memory_events(hybrid, online_cpus)
 
         fds_aperf: list[int] = []
         fds_mperf: list[int] = []
@@ -555,17 +492,17 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             for cpu, mpfd in zip(ucc_cpus, fds_mperf, strict=True):
                 self._bpf.set_perf_fd("mperf_core", cpu, mpfd)
 
-        if self._collection_plan.needs_l3_local and self._bpf is not None:
-            for cpu, fd in zip(memory_cpus, fds_load_local_dram, strict=True):
-                self._bpf.set_perf_fd("load_local_perf", cpu, fd)
-
-        if self._collection_plan.needs_l3_remote and self._bpf is not None:
-            for cpu, fd in zip(memory_cpus, fds_load_remote_dram, strict=True):
-                self._bpf.set_perf_fd("load_remote_perf", cpu, fd)
-
-        if self._collection_plan.needs_stores and self._bpf is not None:
-            for cpu, fd in zip(memory_cpus, fds_store, strict=True):
-                self._bpf.set_perf_fd("store_perf", cpu, fd)
+        # A memory counter is open on every online CPU or on none (hybrid, not configured, not available).
+        memory_fds = {
+            "load_local_perf": fds_load_local_dram,
+            "load_remote_perf": fds_load_remote_dram,
+            "store_perf": fds_store,
+        }
+        if self._bpf is not None:
+            for name, fds in memory_fds.items():
+                if fds:
+                    for cpu, fd in zip(online_cpus, fds, strict=True):
+                        self._bpf.set_perf_fd(name, cpu, fd)
 
         logger.info(
             "sched_switch BPF: attached perf fds (ucc={}, aperf={}, mperf={}, l3_local={}, l3_remote={}, stores={})",
@@ -577,8 +514,11 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             len(fds_store),
         )
 
-    def _open_memory_events(self, hybrid: bool) -> tuple[list[int], list[int], list[int]]:
-        """File descriptors of the L3 local, L3 remote and store counters the config asks for."""
+    def _open_memory_events(self, hybrid: bool, cpus: list[int]) -> tuple[list[int], list[int], list[int]]:
+        """File descriptors of the L3 local, L3 remote and store counters the config asks for.
+
+        Each list is either empty or holds one fd per entry of cpus, in that order.
+        """
         plan = self._collection_plan
         if not (plan.needs_l3_local or plan.needs_l3_remote or plan.needs_stores):
             return [], [], []
@@ -591,12 +531,12 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
 
         # Event names from https://perfmon-events.intel.com/skylake_server.html
         return (
-            self._open_memory_event("mem_load_l3_miss_retired.local_dram") if plan.needs_l3_local else [],
-            self._open_memory_event("mem_load_l3_miss_retired.remote_dram") if plan.needs_l3_remote else [],
-            self._open_memory_event("mem_inst_retired.all_stores") if plan.needs_stores else [],
+            self._open_memory_event("mem_load_l3_miss_retired.local_dram", cpus) if plan.needs_l3_local else [],
+            self._open_memory_event("mem_load_l3_miss_retired.remote_dram", cpus) if plan.needs_l3_remote else [],
+            self._open_memory_event("mem_inst_retired.all_stores", cpus) if plan.needs_stores else [],
         )
 
-    def _open_memory_event(self, event: str) -> list[int]:
+    def _open_memory_event(self, event: str, cpus: list[int]) -> list[int]:
         """Open a counter by its perf name on every CPU; an empty list where this CPU lacks it."""
         try:
             config = resolve_with_strace(event, cpu=0)
@@ -606,7 +546,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             attr.config = config["config"]
             attr.config1 = config.get("config1", 0)
             attr.size = ct.sizeof(CustomPerf.perf_event_attr)
-            return CustomPerf.perf_custom_event_open_with_results(attr=attr, pid=-1)
+            return CustomPerf.perf_custom_event_open_with_results(attr=attr, pid=-1, cpus=cpus)
         except (RuntimeError, OSError) as e:
             # Without the counter only DRAM loses its per-process split; CPU attribution carries on.
             logger.warning(
@@ -813,7 +753,6 @@ class SchedSwitchMonitor(DataSource):
                 skipping,
             )
 
-            mp.set_start_method("spawn", force=True)
             self._queue_monitoring_data = mp.Queue()
             self._stop_event = mp.Event()
 

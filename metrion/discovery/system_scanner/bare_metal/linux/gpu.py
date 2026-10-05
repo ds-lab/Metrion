@@ -1,10 +1,10 @@
-import re
+import pathlib
 import shutil
 import subprocess
-from pathlib import Path
 
 from loguru import logger
 
+from metrion import calibration
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import collect_gpu_caps
 
 
@@ -16,7 +16,7 @@ def get_info(config: dict) -> list[dict]:
         return [{"gpu": "No GPU detected"}]
 
     power_config = config.get("power", "auto")
-    power_mode, power_data = _resolve_power_data(power_config, gpus)
+    power_mode, power_data = _resolve_power_data(power_config, gpus, config["calibration"])
 
     result = []
     for gpu in gpus:
@@ -116,15 +116,17 @@ def _parse_compute_capability(compute_cap: str) -> tuple[int, int]:
     return 0, 0
 
 
-def _resolve_power_data(power_config: dict | str, gpus: list[dict]) -> tuple[str, dict[str, dict[str, float]]]:
+def _resolve_power_data(
+    power_config: dict | str, gpus: list[dict], calibration_file: pathlib.Path
+) -> tuple[str, dict[str, dict[str, float]]]:
     """Return (mode, per-GPU power data) using manual or auto sources."""
     if isinstance(power_config, str) and power_config.lower() == "auto":
-        return "auto", _combine_power_data(_auto_idle_power_data(gpus), _auto_max_power_data())
+        return "auto", _combine_power_data(_auto_idle_power_data(gpus, calibration_file), _auto_max_power_data())
 
     manual_entries = _normalize_manual_power_entries(power_config)
     if not manual_entries:
         logger.warning(f"Unknown GPU power config '{power_config}', falling back to auto")
-        return "auto", _combine_power_data(_auto_idle_power_data(gpus), _auto_max_power_data())
+        return "auto", _combine_power_data(_auto_idle_power_data(gpus, calibration_file), _auto_max_power_data())
 
     idle_auto: dict[str, float] | None = None
     max_auto: dict[str, float] | None = None
@@ -137,7 +139,7 @@ def _resolve_power_data(power_config: dict | str, gpus: list[dict]) -> tuple[str
         idle_val = manual.get("idle", "auto")
         if idle_val == "auto" or idle_val is None:
             if idle_auto is None:
-                idle_auto = _auto_idle_power_data(gpus)
+                idle_auto = _auto_idle_power_data(gpus, calibration_file)
             idle_val = idle_auto.get(gpu_id, 0.0)
         else:
             idle_val = _safe_float(idle_val, 0.0)
@@ -184,37 +186,10 @@ def _normalize_manual_power_entries(power_config) -> dict[str, dict[str, float |
     return entries
 
 
-def _auto_idle_power_data(gpus: list[dict]) -> dict[str, float]:
-    """Measure idle GPU power using the idle_gpu.sh script if available."""
-    script_path = Path(__file__).parent / "idle_gpu.sh"
-    log_dir = Path(__file__).parent / "log"
-    log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / "gpu-idle.log"
-
-    if not log_path.exists() and script_path.exists():
-        cmd = ["sudo", str(script_path), "60", "60", str(log_dir)]
-        try:
-            logger.debug(f"Running GPU idle measurement script: {' '.join(cmd)}")
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as exc:
-            logger.warning(f"Unable to execute GPU idle measurement script: {exc}")
-
-    measurements: dict[str, float] = {str(gpu["id"]): 0.0 for gpu in gpus}
-    if not log_path.exists():
-        return measurements
-
-    pattern = re.compile(r"GPU\[(\d+)\].*:\s*([0-9.]+)\s+W")
-    try:
-        with log_path.open() as f:
-            for line in f:
-                match = pattern.search(line)
-                if match:
-                    gpu_id = match.group(1)
-                    measurements[gpu_id] = _safe_float(match.group(2), 0.0)
-    except (OSError, ValueError):
-        return measurements
-
-    return measurements
+def _auto_idle_power_data(gpus: list[dict], calibration_file: pathlib.Path) -> dict[str, float]:
+    """Idle power per GPU index, from the calibration, which knows the GPUs by UUID."""
+    measured = calibration.idle_power("gpu", [gpu["uuid"] for gpu in gpus], calibration_file)
+    return {str(gpu["id"]): measured[gpu["uuid"]] or 0.0 for gpu in gpus}
 
 
 def _auto_max_power_data() -> dict[str, float]:

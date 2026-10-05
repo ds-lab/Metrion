@@ -56,27 +56,17 @@ class StorageConfig(BaseModel):
             )
         return value
 
-    def get_target(self, base_path: Path | None = None) -> str:
+    def get_target(self) -> str:
         """
         Build the target that the storage backend is opened with.
-
-        Parameters
-        ----------
-        base_path : Path, optional
-            Root for a relative path. Defaults to the repository root.
 
         Returns
         -------
         str
             Connection string 'type:///path' for the database backends, the output directory
-            for parquet.
+            for parquet. A relative path is taken from the directory metrion runs in.
         """
-        if base_path is None:
-            base_path = Path(__file__).parents[2]
-
-        target = Path(self.path)
-        if not target.is_absolute():
-            target = base_path / target
+        target = Path(self.path).absolute()
 
         if self.type == "parquet":
             return str(target)
@@ -393,6 +383,8 @@ class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     debug: bool = False
+    # Written by `metrion calibrate`; relative to the directory metrion runs in.
+    calibration: str = "./calibration.json"
     storage: StorageConfig = Field(default_factory=StorageConfig)
     timing: TimingConfig = Field(default_factory=TimingConfig)
     ebpf: EbpfConfig = Field(default_factory=EbpfConfig)

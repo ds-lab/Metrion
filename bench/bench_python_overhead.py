@@ -31,10 +31,25 @@ import polars as pl
 from _common import Bench
 
 RAW_SCHEMA_NUMERIC = [
-    "pid_start", "time_start", "time_end", "aperf_start", "aperf_end", "mperf_start", "mperf_end",
-    "unhalted_core_cycles_start", "unhalted_core_cycles_end", "loads_local_start", "loads_local_end",
-    "loads_remote_start", "loads_remote_end", "stores_start", "stores_end", "tgid_start",
-    "parent_tid_start", "parent_tgid_start", "cgroup_id",
+    "pid_start",
+    "time_start",
+    "time_end",
+    "aperf_start",
+    "aperf_end",
+    "mperf_start",
+    "mperf_end",
+    "unhalted_core_cycles_start",
+    "unhalted_core_cycles_end",
+    "loads_local_start",
+    "loads_local_end",
+    "loads_remote_start",
+    "loads_remote_end",
+    "stores_start",
+    "stores_end",
+    "tgid_start",
+    "parent_tid_start",
+    "parent_tgid_start",
+    "cgroup_id",
 ]
 
 
@@ -91,13 +106,41 @@ def section_a(rows: int, repeats: int) -> None:
 def section_b(df: pl.DataFrame, repeats: int) -> None:
     bench = Bench("B: duplicate .unique() passes over the raw batch", rows=df.height, repeats=repeats)
 
-    meta_cols = ["pid", "pid_start", "tgid", "tgid_start", "parent_tid", "parent_tgid",
-                 "parent_tid_start", "parent_tgid_start", "cgroup_id", "uid", "gid",
-                 "comm", "cmdline", "event_type"]
-    data_cols = ["pid", "pid_start", "cpu_core", "time_start", "time_end", "aperf_start", "aperf_end",
-                 "mperf_start", "mperf_end", "unhalted_core_cycles_start", "unhalted_core_cycles_end",
-                 "loads_local_start", "loads_local_end", "loads_remote_start", "loads_remote_end",
-                 "stores_start", "stores_end"]
+    meta_cols = [
+        "pid",
+        "pid_start",
+        "tgid",
+        "tgid_start",
+        "parent_tid",
+        "parent_tgid",
+        "parent_tid_start",
+        "parent_tgid_start",
+        "cgroup_id",
+        "uid",
+        "gid",
+        "comm",
+        "cmdline",
+        "event_type",
+    ]
+    data_cols = [
+        "pid",
+        "pid_start",
+        "cpu_core",
+        "time_start",
+        "time_end",
+        "aperf_start",
+        "aperf_end",
+        "mperf_start",
+        "mperf_end",
+        "unhalted_core_cycles_start",
+        "unhalted_core_cycles_end",
+        "loads_local_start",
+        "loads_local_end",
+        "loads_remote_start",
+        "loads_remote_end",
+        "stores_start",
+        "stores_end",
+    ]
 
     def current() -> None:
         # 1) full-frame unique in _get_raw_monitoring_data
@@ -128,8 +171,14 @@ def section_c(df: pl.DataFrame, repeats: int, enabled: int = 2) -> None:
     the multiplier lands on the two things the user reports as slow. This section
     measures the *serialise + hand over* cost, which is what actually scales.
     """
-    metrics = ["CPU_CORE_PID_TIME", "CPU_CORE_PID_APERF", "CPU_CORE_PID_MPERF",
-               "CPU_CORE_PID_UNHALTED_CYCLES", "CPU_CORE_PID_EXECUTION_TYPE", "CPU_CORE_PID_WORK"]
+    metrics = [
+        "CPU_CORE_PID_TIME",
+        "CPU_CORE_PID_APERF",
+        "CPU_CORE_PID_MPERF",
+        "CPU_CORE_PID_UNHALTED_CYCLES",
+        "CPU_CORE_PID_EXECUTION_TYPE",
+        "CPU_CORE_PID_WORK",
+    ]
     base = df.select(
         pl.col("pid").cast(pl.String).alias("physical_entity_id"),
         pl.col("tgid").cast(pl.String).alias("logical_entity_id"),
@@ -146,8 +195,10 @@ def section_c(df: pl.DataFrame, repeats: int, enabled: int = 2) -> None:
         for name in names:
             frame = base.select(
                 pl.lit(name).alias("metric_id"),
-                pl.col("physical_entity_id"), pl.col("logical_entity_id"),
-                pl.col("start_ts"), pl.col("end_ts"),
+                pl.col("physical_entity_id"),
+                pl.col("logical_entity_id"),
+                pl.col("start_ts"),
+                pl.col("end_ts"),
                 pl.col("v").alias("value"),
             )
             buf = io.BytesIO()
@@ -206,9 +257,11 @@ def section_d(repeats: int) -> None:
 
 def section_e(df: pl.DataFrame, repeats: int) -> None:
     bench = Bench("E: per-row registry loop", rows=df.height, repeats=repeats)
-    meta = df.filter(pl.col("event_type") == 1).select(
-        ["pid", "pid_start", "tgid", "comm", "cmdline", "uid", "gid"]
-    ).unique(subset=["pid", "pid_start"])
+    meta = (
+        df.filter(pl.col("event_type") == 1)
+        .select(["pid", "pid_start", "tgid", "comm", "cmdline", "uid", "gid"])
+        .unique(subset=["pid", "pid_start"])
+    )
     registry: dict[tuple[int, int], dict] = {}
 
     def current() -> None:
@@ -218,8 +271,11 @@ def section_e(df: pl.DataFrame, repeats: int) -> None:
             if key in registry:
                 continue
             registry[key] = {
-                "tgid": row["tgid"], "comm": row["comm"], "cmdline": row["cmdline"],
-                "uid": row["uid"], "gid": row["gid"],
+                "tgid": row["tgid"],
+                "comm": row["comm"],
+                "cmdline": row["cmdline"],
+                "uid": row["uid"],
+                "gid": row["gid"],
             }
 
     def proposed() -> None:
@@ -232,9 +288,12 @@ def section_e(df: pl.DataFrame, repeats: int) -> None:
         else:
             new = meta
         for key, tgid, comm, cmdline, uid, gid in zip(
-            zip(new["pid"].to_list(), new["pid_start"].to_list()),
-            new["tgid"].to_list(), new["comm"].to_list(), new["cmdline"].to_list(),
-            new["uid"].to_list(), new["gid"].to_list(),
+            zip(new["pid"].to_list(), new["pid_start"].to_list(), strict=True),
+            new["tgid"].to_list(),
+            new["comm"].to_list(),
+            new["cmdline"].to_list(),
+            new["uid"].to_list(),
+            new["gid"].to_list(),
             strict=True,
         ):
             registry[key] = {"tgid": tgid, "comm": comm, "cmdline": cmdline, "uid": uid, "gid": gid}

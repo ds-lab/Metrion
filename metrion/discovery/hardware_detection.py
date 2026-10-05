@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -116,7 +117,10 @@ class HardwareDetection:
 
         for component_name, tree_name in component_mapping.items():
             if self._config.energy_model.is_component_included(component_name):
-                component_config: dict[str, Any] = {"NAME": tree_name}
+                component_config: dict[str, Any] = {
+                    "NAME": tree_name,
+                    "calibration": Path(self._config.calibration).absolute(),
+                }
 
                 # Add idle/max power settings from energy config if specified
                 comp_config = self._config.energy_model.get_component_config(component_name)

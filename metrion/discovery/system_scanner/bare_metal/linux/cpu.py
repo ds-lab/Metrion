@@ -4,11 +4,12 @@ import pathlib
 import polars as pl
 from loguru import logger
 
+from metrion import calibration
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
     collect_rapl_caps,
     read_energy_range_j,
 )
-from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, parse_cpu_list
+from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
 
 
 def parse_cpuinfo() -> dict[int, dict]:
@@ -157,7 +158,7 @@ def get_info(config: dict) -> list[dict]:
     create_core_entities = True
 
     power_config = config.get("power", "auto")
-    power_mode, power_data = _resolve_power_data(power_config, cpus_by_socket)
+    power_mode, power_data = _resolve_power_data(power_config, cpus_by_socket, config["calibration"])
     # Deliberately not part of power_data: the wrap value is hardware, not a setting, so it
     # must not travel through the auto/manual branch that may replace the power values.
     energy_ranges = _rapl_energy_ranges()
@@ -180,14 +181,16 @@ def get_info(config: dict) -> list[dict]:
 
 
 def _resolve_power_data(
-    power_config: dict | list | str, cpus_by_socket: dict[int, dict]
+    power_config: dict | list | str, cpus_by_socket: dict[int, dict], calibration_file: pathlib.Path
 ) -> tuple[str, dict[int, dict[str, float]]]:
     """Return (mode, per-socket power data) using manual or auto sources."""
     if isinstance(power_config, str):
         power_config = power_config.lower()
 
     if power_config == "auto":
-        return "auto", _combine_power_data(_auto_idle_power_data(cpus_by_socket), _auto_max_power_data(cpus_by_socket))
+        return "auto", _combine_power_data(
+            _auto_idle_power_data(cpus_by_socket, calibration_file), _auto_max_power_data(cpus_by_socket)
+        )
 
     manual_entries: dict[int, dict[str, float | str | None]] = {}
 
@@ -200,7 +203,9 @@ def _resolve_power_data(
             }
     else:
         logger.warning(f"Unknown power config '{power_config}', falling back to auto")
-        return "auto", _combine_power_data(_auto_idle_power_data(cpus_by_socket), _auto_max_power_data(cpus_by_socket))
+        return "auto", _combine_power_data(
+            _auto_idle_power_data(cpus_by_socket, calibration_file), _auto_max_power_data(cpus_by_socket)
+        )
 
     idle_auto: dict[int, float] | None = None
     max_auto: dict[int, float] | None = None
@@ -221,7 +226,7 @@ def _resolve_power_data(
         idle_val = manual.get("idle", "auto")
         if idle_val == "auto" or idle_val is None:
             if idle_auto is None:
-                idle_auto = _auto_idle_power_data(cpus_by_socket)
+                idle_auto = _auto_idle_power_data(cpus_by_socket, calibration_file)
             idle_val = idle_auto.get(pkg_id, 0.0)
         else:
             idle_val = _safe_float(idle_val, 0.0)
@@ -239,23 +244,10 @@ def _resolve_power_data(
     return "manual", resolved
 
 
-def _auto_idle_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:
-    """Auto-detect idle package power using RAPL."""
-    try:
-        rapl_data = get_cpu_idle_power_data()
-    except Exception as exc:
-        logger.opt(exception=True).warning(
-            f"Could not measure idle power via RAPL "
-            f"(type={type(exc).__name__}, errno={getattr(exc, 'errno', None)}): {exc}. "
-            "Defaulting to 0.0 W for all CPU packages."
-        )
-        return {pkg_id: 0.0 for pkg_id in cpus_by_socket.keys()}
-    idle_power: dict[int, float] = {}
-    for pkg_id in cpus_by_socket.keys():
-        socket_data = rapl_data.get(pkg_id, {})
-        idle_val = socket_data.get("package", 0.0)
-        idle_power[pkg_id] = _safe_float(idle_val, 0.0)
-    return idle_power
+def _auto_idle_power_data(cpus_by_socket: dict[int, dict], calibration_file: pathlib.Path) -> dict[int, float]:
+    """Idle package power per socket, from the calibration."""
+    measured = calibration.idle_power("cpu", [str(pkg_id) for pkg_id in cpus_by_socket], calibration_file)
+    return {pkg_id: measured[str(pkg_id)] or 0.0 for pkg_id in cpus_by_socket}
 
 
 def _auto_max_power_data(cpus_by_socket: dict[int, dict]) -> dict[int, float]:

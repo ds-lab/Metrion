@@ -1,295 +1,285 @@
 # METRION
 
-METRION is a research-grade framework for attributing energy consumption. This repository provides the core framework, the energy attribution model described in the METRION paper, and the accompanying data sources and system scanning components.
+METRION measures how much energy each process, thread and cgroup on a Linux machine uses. It
+reads the hardware energy counters of CPU, DRAM and GPU, follows every context switch with eBPF,
+and splits the measured energy among the threads that caused it. The attribution model is
+described in the [METRION paper](https://doi.org/10.1145/3786148.3788635) (GREENS '26).
 
-## Platform Support
-METRION currently targets **Linux** only. Hardware support is limited to the platforms implemented and evaluated in this repository:
+<!-- Demo video: in GitHub's web editor, drag an MP4 (at most 10 MB) onto this line. -->
 
-| Component | Supported hardware | Notes |
-|-----------|-------------------|-------|
-| CPU & DRAM energy attribution | **Intel** CPUs | Uses Intel RAPL, perf, and eBPF counters (including hybrid P/E-core support). AMD and other vendors are not supported yet. |
-| GPU energy monitoring | **NVIDIA** GPUs | Uses NVML via `pynvml`. AMD, Intel Arc, and other GPUs are not supported yet. |
+## Requirements
 
-The framework is designed to be extensible: the data model and attribution logic are vendor-agnostic, but the current data sources and discovery modules are implemented for Intel CPUs and NVIDIA GPUs only.
+| | |
+|---|---|
+| CPU | **Intel**, for CPU and DRAM energy (RAPL). Hybrid P/E-core CPUs are supported. |
+| GPU | **NVIDIA** with a working driver, optional. |
+| Kernel | Linux with BTF, i.e. `/sys/kernel/btf/vmlinux` exists (Ubuntu 20.10+, Debian 11+, RHEL 8.2+). |
+| System | x86-64, glibc 2.28 or newer, systemd with cgroup v2. |
+| Python | 3.12 |
+| Optional | `perf` for the running kernel (Ubuntu: `linux-tools-$(uname -r)`) and `strace`, only for the memory counter metrics `CPU_CORE_PID_MEM_*`. They are off by default and not available on hybrid CPUs. |
 
-## Why METRION?
-- Implements the paper’s energy attribution model, accounting for frequency scaling, simultaneous multithreading, multi-socket topologies, and NUMA effects.
-- Ships with reusable system discovery and data source modules that translate platform-specific counters into the platform-independent data model.
-- Provides a platform-independent data model and modular architecture so new data sources, storages, or host operating systems can be added without touching the attribution logic.
+Measuring needs root: eBPF, perf counters and RAPL are not open to normal users. Analyzing a run
+does not.
 
-## Repository Layout
-- `configs/` default collection settings consumed by the orchestrator.
-- `metrion/` Python package with the orchestrator, discovery, monitoring, storage, and energy attribution modules.
-- `src/` Rust crates compiled into the Python package via `maturin`.
-- `evaluation/` evaluation automation to determine the accuracy of METRION and compare against other tools (Scaphandre, EnergAt).
-- `tests/` unit and integration tests for the Python and Rust components.
-- `target/`, `wheels/` build artifacts produced by Cargo and maturin (ignored by version control in normal workflows).
+## Installation
 
-## Prerequisites
-- A Linux system, e.g., Ubuntu 22.04 or newer with systemd (the evaluation scripts rely on `systemd-run`).
-- An **Intel** CPU for CPU and DRAM energy attribution (RAPL and perf-based counters).
-- An **NVIDIA** GPU with a working NVML driver for GPU energy monitoring (optional; disable the `gpu` section in `configs/config.yaml` if no GPU is present).
-- Python 3.12 and optionally a package manager like [uv](https://docs.astral.sh/uv/getting-started/installation/).
-- Rust toolchain (2024 edition) with `cargo` available in `PATH`.
-- [BCC (BPF Compiler Collection)](https://github.com/iovisor/bcc/blob/master/INSTALL.md) 0.35 or newer for the eBPF monitors.
-- Root privileges to access eBPF, perf, and RAPL counters (`sudo` is required for most workflows).
-- Linux Headers, for Ubuntu: `sudo apt-get update && sudo apt-get install linux-headers-$(uname -r)`
+Download the wheel from the [releases page](../../releases) and install it as a tool, which puts
+`metrion` on your PATH in an environment of its own. [uv](https://docs.astral.sh/uv/) fetches
+Python 3.12 if the machine lacks it:
 
-## Usage Setup
-1. Clone the project
-	```bash
-	git clone <repository-url>
-	````
-2. Install it via pip: 
-	```bash
-	pip install -e .
-	```
+```bash
+uv tool install ./metrion-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl
+```
 
-## Development Setup with uv
-1. Clone the project and create a Python 3.12 virtual environment with uv:
-	```bash
-	git clone <repository-url>
-	cd metrion
-	uv venv --python 3.12 --system-site-packages
-	source .venv/bin/activate
-	```
-2. Install the Python dependencies (core, extras, and notebooks used in the evaluation):
-	```bash
-	uv sync --all-extras
-	```
-3. Build and install the Rust extensions into the environment:
-	```bash
-	maturin develop
-	```
-4. Enable developer tooling:
-	```bash
-	pre-commit install
-	```
+Or with pip, in a Python 3.12 environment:
 
-## Running the Framework
-1. Review `configs/config.yaml` and adjust which components to monitor (see [Configuration Examples](#configuration-examples) below).
-2. Launch the orchestrator with elevated privileges using the CLI. Since `sudo` typically resets the environment, locate the executable first:
-	```bash
-	# Identify where metrion is installed
-	METRION_BIN=$(which metrion)
+```bash
+pip install ./metrion-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl
+```
 
-	# Run indefinitely (stop with Ctrl+C)
-	sudo "$METRION_BIN" monitor
+The wheel brings everything it needs. BCC, kernel headers or a compiler are not required.
 
-	# Run for a specific duration (e.g., 5 minutes)
-	sudo "$METRION_BIN" monitor --timeout 5
+## Quick start
 
-	# Use a custom config file
-	sudo "$METRION_BIN" monitor --config /path/to/config.yaml
+```bash
+mkdir my-measurement && cd my-measurement
+metrion init                              # writes ./metrion.yaml
+sudo $(which metrion) calibrate           # measures the idle power into ./calibration.json
+sudo $(which metrion) monitor             # measure until Ctrl+C, or add --timeout <minutes>
+metrion analyze monitor_<timestamp>.db    # which processes used the energy
+```
 
-	# Combine options
-	sudo "$METRION_BIN" monitor -t 10 -c /path/to/config.yaml
-	```
-	Alternatively, run the orchestrator directly via Python (adjust paths as needed):
-	```bash
-	PYTHON_BIN=$(which python)
-	sudo "$PYTHON_BIN" metrion/orchestrator.py monitor
-	sudo "$PYTHON_BIN" metrion/orchestrator.py monitor --timeout 5
-	```
-3. METRION writes measurements to a timestamped DuckDB database in the project root (e.g., `monitor_2025_12_04_08_18_42.db`) and streams logs to stdout. Use `Ctrl+C` to stop the process gracefully.
+`sudo` searches only its own PATH, so name `metrion` by its full path; `metrion init` prints it
+for your installation. Every command works in the current directory: `monitor` reads
+`./metrion.yaml` and `./calibration.json` and writes its data next to them, stamped with the
+start time, so no run overwrites another.
 
-### CLI Options
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--config` | `-c` | Path to the configuration file (default: `configs/config.yaml`) |
-| `--timeout` | `-t` | Timeout in minutes. If not specified, runs indefinitely until Ctrl+C |
-| `--help` | | Show help message and exit |
+## What to measure
 
-### Configuration Examples
-Monitoring is controlled under `energy_model.components` in `configs/config.yaml`. Set `mode: include` to enable a component and `mode: exclude` to disable it. Components not listed default to `include`.
+`metrion analyze` selects what it reports with at most one filter. Processes always count
+together with all their children, so the energy of a shell script includes every program it
+starts.
 
-Omit components you do not need and pass a custom config with `--config /path/to/config.yaml`.
+| You want the energy of | Filter | One row per |
+|---|---|---|
+| everything on the machine | *(none)* | process, the 20 largest |
+| a program by name | `--cmdline train.py` | process |
+| processes you know the PIDs of | `--pids 1234,5678` | process |
+| a Docker container | `--cgroup $(docker inspect -f '{{.Id}}' web)` | cgroup |
+| all Docker containers | `--cgroup docker-` | cgroup |
+| a Kubernetes pod | `--cgroup pod$(kubectl get pod web -o jsonpath='{.metadata.uid}' \| tr - _)` | cgroup |
+| a systemd service | `--cgroup nginx.service` | cgroup |
 
-#### CPU only
-Intel CPU energy attribution without DRAM, GPU, or network monitoring.
+`--cmdline` and `--cgroup` match any part of the command line (or process name) and of the
+cgroup path. The pod example is for the systemd cgroup driver, which writes the pod UID with
+underscores; with the cgroupfs driver, leave out `| tr - _`. Further options:
+
+- `--start` and `--end` narrow the analysis to a time range, in UTC (`"2026-09-30 08:18:35"`).
+- `--unit Wh` shows watt-hours instead of joules.
+- `--csv DIR` also writes the whole table (`table.csv`) and every selected row per time window
+  and thread (`rows.csv`), in joules.
+
+`metrion <command> --help` lists all options.
+
+### After the run or live
+
+Both ways give the same numbers; they differ in when and in what they keep.
+
+**After the run** (the default). `monitor` stores the raw measurements, and `analyze` attributes
+them when you ask. You can analyze a run as often as you like, with any filter.
+
+```bash
+metrion analyze monitor_2026_09_30_08_18_28.db --cmdline train.py
+```
+
+**Live.** With `live_attribution.enabled: true`, `monitor` attributes the energy while it runs and
+writes one row per time window and thread to `energy_<timestamp>/`, about 40 s behind real time.
+Set `storage.store_raw_measurements: false` as well to keep only this result, which is smaller by
+orders of magnitude, for long runs. `analyze` reads the directory like a database:
+
+```bash
+metrion analyze energy_2026_09_30_08_18_28 --cgroup docker-
+```
+
+A live result only knows the threads that used energy. A parent process that only waits, such as
+a shell running a script, is not in it, so `--pids <that shell>` does not find its children
+there. Select the children by name instead, or analyze after the run.
+
+## Reading the report
+
+A busy loop started from a shell, selected by the shell's PID:
+
+```text
+╭─ Metrion energy report ────────────────────────────────────────────────────────────────────╮
+│ Run        2026-09-30 08:18:28 → 2026-09-30 08:18:59 UTC  (31 s)                           │
+│ Selection  pids 2071864  (3 processes, 3 threads)                                          │
+│ Active     2026-09-30 08:18:35 → 2026-09-30 08:18:47 UTC  (when the selection used energy) │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+
+Energy by component
+╭───────────┬──────────┬─────────┬───────────┬────────────╮
+│ component │ idle [J] │ dyn [J] │ total [J] │ of the run │
+├───────────┼──────────┼─────────┼───────────┼────────────┤
+│ CPU       │     15.2 │   144.3 │     159.5 │      69.7% │
+├───────────┼──────────┼─────────┼───────────┼────────────┤
+│ total     │     15.2 │   144.3 │     159.5 │      69.7% │
+╰───────────┴──────────┴─────────┴───────────┴────────────╯
+idle  the selection's share of what the machine draws doing nothing
+dyn   what its work added on top
+
+Energy by process, largest first
+
+  pid       ppid      name      threads   cgroup               cpu idle [J]   cpu dyn [J]   total [J]
+ ─────────────────────────────────────────────────────────────────────────────────────────────────────
+  2072093   2071864   python3   1         session-4022.scope           15.2         144.3       159.5
+  2071864   2071862   bash      1         session-4022.scope           <0.1          <0.1        <0.1
+  2071865   2071864   sleep     1         session-4022.scope           <0.1          <0.1        <0.1
+ ─────────────────────────────────────────────────────────────────────────────────────────────────────
+  sum                                                                  15.2         144.3       159.5
+```
+
+- **idle** is the selection's share of the power the machine draws when nothing runs, as
+  measured by `calibrate`. **dyn** is what its work added on top.
+- **of the run** is the selection's share of all energy measured during the run.
+- Components without energy (here DRAM, as this CPU has no DRAM counter, and the GPU) are left
+  out. Columns that do not fit the terminal are dropped; `--csv` always has all of them.
+
+## Calibration
+
+The idle power is the part of the energy that is drawn whether anything runs or not. METRION
+splits it among the running processes, so it has to know how large it is. `calibrate` measures
+it once per machine:
+
+```bash
+sudo $(which metrion) calibrate
+```
+
+It lists what it will freeze and asks before it starts. For about two minutes it freezes the
+logins and the desktop (`user.slice`, including the terminal it runs in), Kubernetes pods and
+container runtimes, lets the machine settle, and reads the energy counters. Afterwards
+everything continues where it stopped; if the measurement is killed, systemd thaws the units
+anyway.
+
+- `--skip PATTERN` leaves matching units running, `--freeze PATTERN` freezes more,
+  e.g. `--freeze machine.slice` for virtual machines, which are left running by default.
+- `--yes` skips the question, for scripts.
+- Processes that hold a GPU are listed, not stopped. The GPU idle power includes whatever they
+  keep running.
+
+The result goes to `./calibration.json`, next to `metrion.yaml`. For a measurement in another
+directory, calibrate there, or set `calibration` in its `metrion.yaml` to the existing file:
+
+```yaml
+calibration: /home/me/metrion/calibration.json
+```
+
+Calibrate again after changing the hardware. `monitor` refuses to start if the calibration does
+not know a device it measures, or was measured on another machine. To skip calibration, give
+the idle power in the configuration (see below).
+
+## Configuration
+
+`metrion init` writes the default configuration to `./metrion.yaml`, with a comment on every
+setting. `monitor --config <file>` uses another file. Relative paths in it start in the directory
+`metrion` runs in. Unknown keys are rejected, so a typo stops `monitor` at startup instead of
+being ignored.
+
+| Section | What it controls |
+|---|---|
+| `calibration` | The file with the idle power, see [Calibration](#calibration). |
+| `storage` | Where the data goes: `duckdb` (one file) or `parquet` (a directory, cheapest during the run), and whether raw measurements are kept. |
+| `energy_model.components` | Which components are measured (`cpu`, `dram`, `gpu`, `network`), with which metrics and idle and maximum power. |
+| `live_attribution` | Attribution during the run, see [above](#after-the-run-or-live). |
+| `timing` | How often sources are read and data is written; the defaults suit most runs. |
+| `ebpf.ringbuf_mib` | Buffer for context switches. Raise it if the log warns about lost events. |
+
+To leave out a component, e.g. on a machine without an NVIDIA GPU:
 
 ```yaml
 energy_model:
-  granularity: detailed
   components:
-    cpu:
-      mode: include
-      power: auto
-      metrics:
-        - CPU_SOCKET_PKG_ENERGY
-        - CPU_CORE_PID_WORK
-        - CPU_CORE_PID_TIME
-    dram:
-      mode: exclude
     gpu:
-      mode: exclude
-    network:
       mode: exclude
 ```
 
-#### CPU and memory (DRAM)
-CPU and DRAM energy attribution. DRAM monitoring requires CPU to be enabled.
+To give the power yourself instead of calibrating, list it per device (CPU and DRAM: RAPL
+package number; GPU: index), in watts:
 
 ```yaml
 energy_model:
-  granularity: detailed
   components:
     cpu:
       mode: include
-      power: auto
-      metrics:
-        - CPU_SOCKET_PKG_ENERGY
-        - CPU_CORE_PID_WORK
-        - CPU_CORE_PID_TIME
-    dram:
-      mode: include
-      power: auto
-      metrics:
-        - DRAM_SOCKET_TOTAL_ENERGY
-        - DRAM_SOCKET_PID_MEMORY
-    gpu:
-      mode: exclude
-    network:
-      mode: exclude
+      power:
+        - id: 0
+          idle_power: 12.5
+          max_power: 65
 ```
 
-#### CPU and GPU
-CPU and NVIDIA GPU energy monitoring without DRAM attribution.
+## Troubleshooting
 
-```yaml
-energy_model:
-  granularity: detailed
-  components:
-    cpu:
-      mode: include
-      power: auto
-      metrics:
-        - CPU_SOCKET_PKG_ENERGY
-        - CPU_CORE_PID_WORK
-        - CPU_CORE_PID_TIME
-    dram:
-      mode: exclude
-    gpu:
-      mode: include
-      power: auto
-      metrics:
-        - GPU_DEVICE_TOTAL_ENERGY
-        - GPU_DEVICE_PID_COMPUTE_UTILIZATION
-    network:
-      mode: exclude
-```
+- **`sudo: metrion: command not found`**: use the full path, `sudo $(which metrion) ...`.
+- **"No calibration at ..."**: run `sudo $(which metrion) calibrate` in this directory, or
+  point `calibration` in `metrion.yaml` to an existing one.
+- **The log warns about a ring buffer overflow**: raise `ebpf.ringbuf_mib`.
+- **Analyzing a Parquet run fails with a permission error**: the first `analyze` of a Parquet
+  run writes a database into its directory, which belongs to root. Run it once with `sudo`.
+- **`monitor` does not stop on Ctrl+C**: `sudo pkill -9 -f "metrion monitor"`.
 
-#### CPU, memory (DRAM), and GPU
-Full hardware coverage as used in the paper evaluation (CPU, DRAM, and GPU).
+## Development
 
-```yaml
-energy_model:
-  granularity: detailed
-  components:
-    cpu:
-      mode: include
-      power: auto
-      metrics:
-        - CPU_SOCKET_PKG_ENERGY
-        - CPU_CORE_PID_WORK
-        - CPU_CORE_PID_TIME
-    dram:
-      mode: include
-      power: auto
-      metrics:
-        - DRAM_SOCKET_TOTAL_ENERGY
-        - DRAM_SOCKET_PID_MEMORY
-    gpu:
-      mode: include
-      power: auto
-      metrics:
-        - GPU_DEVICE_TOTAL_ENERGY
-        - GPU_DEVICE_PID_COMPUTE_UTILIZATION
-    network:
-      mode: exclude
-```
-
-The default `configs/config.yaml` additionally enables network monitoring (`network: mode: include`). Set `metrics: "*"` instead of a metric list to collect all metrics supported for a component.
-
-## Energy Attribution Workflow
-The analysis CLI reconstructs CPU, DRAM, and GPU energy per process from a monitoring session.
+Building from source needs a current Rust toolchain, `clang`, `libelf-dev` and
+`zlib1g-dev` (Ubuntu names), and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-METRION_BIN=$(which metrion)
-sudo "$METRION_BIN" analyze \
-  --db-path monitor_2025_12_04_08_18_42.db \
-  --filter-cmdline "python" \
-  --start-time "2025-01-01 00:00:00" \
-  --end-time "2028-01-01 00:00:00"
+git clone <repository-url> && cd metrion
+uv sync --all-extras     # Python dependencies, including the development tools
+uv run maturin develop   # compiles the Rust extension and the eBPF programs into the package
+uv run pre-commit install
+uv run pytest tests/unit
 ```
 
-Alternatively, you can run the CLI directly:
-```bash
-PYTHON_BIN=$(which python)
-sudo "$PYTHON_BIN" metrion/energy_attribution/energy_attribution_cli.py \
-  --db-path monitor_2025_12_04_08_18_42.db \
-  --filter-cmdline "python" \
-  --start-time "2025-01-01 00:00:00" \
-  --end-time "2026-01-01 00:00:00"
-```
+`sudo scripts/build_wheel.sh` builds the release wheel in a manylinux container (Docker) and
+writes it to `dist/`.
 
-### Analysis CLI Options
-| Option | Description |
-|--------|-------------|
-| `--db-path` | Path to the database file (required) |
-| `--filter-cmdline` | Filter processes by command line substring |
-| `--filter-pids` | Filter by comma-separated PIDs (e.g. `1234,5678`) |
-| `--start-time` | Analysis window start (`YYYY-MM-DD HH:MM:SS`) |
-| `--end-time` | Analysis window end (`YYYY-MM-DD HH:MM:SS`) |
-| `--unit` | Energy unit: `J` (default) or `Wh` |
-| `--backend` | Plotting backend: `plotly` (default) or `matplotlib` |
-| `--no-plots` | Skip plot and HTML report generation (summary still printed) |
-| `--export-summary` | Export per-process summary to CSV and JSON |
-| `--export-raw-data` | Export raw filtered interval data to CSV per device (`raw_cpu_*.csv`, `raw_dram_*.csv`, `raw_gpu_*.csv`) |
-| `--force` | Force recreation of materialised tables when queries change |
+| Directory | Content |
+|---|---|
+| `metrion/` | The Python package: CLI, orchestrator, discovery, data sources, storage, attribution. |
+| `src/` | The Rust extension, which loads the eBPF programs. |
+| `evaluation/` | The experiments of the paper, comparing METRION with Scaphandre and EnergAt. |
+| `bench/` | Benchmarks and checks of the agent's internals. |
+| `tests/` | Unit and integration tests. |
 
-- The script expects timestamps in UTC as stored in the database.
-- Generated HTML reports and exported files are written to `metrion/energy_attribution/output/` by default.
+### Evaluation
 
-## Evaluation
-The evaluation workflow reproduces the experiments from the paper and compares METRION with Scaphandre and EnergAt.
-
-```bash
-sudo evaluation/run_evaluation.sh
-```
-
-- Run the script from the repository root; it resolves workload scripts relative to the current directory.
-- Each profiler run is executed inside its own transient systemd service to isolate cgroups and captures logs in `evaluation/data/logs/`.
-- Energy measurements are saved in `evaluation/data/measurements/<tool>/` corresponding to the tool that produced them.
-
-## Tips and Tricks 
-Delete pycache files:
-```bash
-find . \( -type d -name "__pycache__" -o -type f \( -name "*.pyc" -o -name "*.pyo" \) \) -exec rm -rf {} +
-```
-
-In case metrion can not shutdown gracefully, you can force it to shutdown by killing the process with: 
-```bash
-sudo ps | grep metrion
-sudo kill -9 <pid> <pid> ...
-```
-
+`sudo evaluation/run_evaluation.sh`, from the repository root, calibrates the machine and
+reproduces the experiments of the paper. Each profiler runs in its own transient systemd service;
+logs go to `evaluation/data/logs/`, measurements to `evaluation/data/measurements/<tool>/`.
 
 ## Citation
-If you use METRION in academic work, please cite our paper ([arXiv:2512.06806](https://arxiv.org/abs/2512.06806)):
+
+If you use METRION in academic work, please cite our paper
+([doi:10.1145/3786148.3788635](https://doi.org/10.1145/3786148.3788635)):
 
 ```bibtex
-@misc{weigell2025metrion,
-  author        = {Weigell, Benjamin and Hornung, Simon and Bauer, Bernhard},
-  title         = {{METRION}: A Framework for Accurate Software Energy Measurement},
-  year          = {2025},
-  eprint        = {2512.06806},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.SE},
-  doi           = {10.48550/arXiv.2512.06806},
-  note          = {Accepted at the 10th IEEE/ACM International Workshop on Green and Sustainable Software (GREENS'26), ICSE 2026}
+@inproceedings{10.1145/3786148.3788635,
+  author    = {Weigell, Benjamin and Hornung, Simon and Bauer, Bernhard},
+  title     = {{METRION}: A Framework for Accurate Software Energy Measurement},
+  year      = {2026},
+  isbn      = {9798400723810},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  url       = {https://doi.org/10.1145/3786148.3788635},
+  doi       = {10.1145/3786148.3788635},
+  booktitle = {Proceedings of the IEEE/ACM 10th International Workshop on Green and Sustainable Software},
+  pages     = {131--138},
+  numpages  = {8},
+  series    = {GREENS '26}
 }
 ```
 
+A preprint is on [arXiv:2512.06806](https://arxiv.org/abs/2512.06806).
+
 ## License
-This project is released under the terms of the license contained in `LICENSE`.
+
+Released under the terms in [LICENSE](LICENSE).

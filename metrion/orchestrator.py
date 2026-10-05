@@ -4,15 +4,15 @@ import threading
 import time
 from pathlib import Path
 
-import click
 from loguru import logger
 
+from metrion import calibration
+from metrion.calibration import CalibrationError
 from metrion.config_reader.config_reader import ConfigReader
 from metrion.config_reader.config_schema import AgentConfig
 from metrion.data_collector import DataCollector
 from metrion.data_record import DataRecord
 from metrion.discovery.hardware_detection import HardwareDetection
-from metrion.energy_attribution.energy_attribution_cli import main as analyze_command
 from metrion.entity.cpu import CPU
 from metrion.entity.dram import DRAM
 from metrion.entity.gpu import GPU
@@ -77,6 +77,7 @@ class Orchestrator:
             Optional timeout in minutes. If None, monitoring runs indefinitely until interrupted.
         """
         self.read_config(self._config_path)
+        self.check_calibration()
         self.start_logical_entity_registry()
         # The data collector hands the hardware to the attribution model, so it is detected first.
         self.create_physical_entities()
@@ -158,6 +159,24 @@ class Orchestrator:
         """
         self._config = ConfigReader.read_config(path)
 
+    def check_calibration(self) -> None:
+        """Stop before any probe starts if the config needs an idle power that was never measured."""
+        assert self._config is not None, "Config must be loaded before checking the calibration."
+        model = self._config.energy_model
+        for name in ("cpu", "dram", "gpu"):
+            component = model.get_component_config(name)
+            auto = (
+                component is None
+                or component.power == "auto"
+                or any(entry.idle_power == "auto" for entry in component.power)
+            )
+            path = Path(self._config.calibration).absolute()
+            if model.is_component_included(name) and auto and calibration.load(path) is None:
+                raise CalibrationError(
+                    f"No calibration at {path}. Measure the idle power here with `sudo metrion calibrate`, "
+                    "or set calibration in the config to the file of an earlier one."
+                )
+
     def start_logical_entity_registry(
         self,
     ) -> None:
@@ -172,17 +191,15 @@ class Orchestrator:
         assert self._entities, "Physical entities must be created before the data collector."
         storage = self._config.storage
         live = self._config.live_attribution
-        base_path = Path(__file__).parent.parent
 
         if not storage.store_raw_measurements:
             logger.warning("Raw measurements are NOT stored. This run cannot be attributed differently afterwards.")
 
         self._data_collector = DataCollector(
             storage_type=storage.type,
-            storage_path=storage.get_target(base_path),
+            storage_path=storage.get_target(),
             flush_interval=self._config.timing.storage_flush,
-            # A relative path is resolved against the repository root, like storage.path.
-            live_config=live.model_copy(update={"path": str(base_path / live.path)}),
+            live_config=live.model_copy(update={"path": str(Path(live.path).absolute())}),
             hardware=[entity for entities in self._entities.values() for entity in entities],
             store_raw=storage.store_raw_measurements,
         )
@@ -375,72 +392,3 @@ class Orchestrator:
         """Tell the data collector which threads the registry has let go of."""
         assert self._data_collector is not None, "Data collector must be initialized before forgetting."
         self._data_collector.forget(ids)
-
-
-@click.group(invoke_without_command=True)
-@click.pass_context
-def cli(ctx):
-    """Metrion - A Linux agent for monitoring process-level resource usage metrics.
-
-    Use 'metrion monitor' to start the monitoring agent, or 'metrion analyze' to
-    run energy attribution analysis on collected data.
-
-    Examples:
-
-        metrion monitor                   # Run monitoring indefinitely
-
-        metrion monitor --timeout 5       # Run monitoring for 5 minutes
-
-        metrion analyze --db-path db.db --start-time "2025-01-01" --end-time "2025-12-31" --filter-cmdline "python"
-    """
-    # If no subcommand given, show help
-    if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
-
-
-@cli.command("monitor")
-@click.option(
-    "--config",
-    "-c",
-    "config_path",
-    default=str(Path(__file__).parent.parent / "configs" / "config.yaml"),
-    help="Path to the configuration file.",
-)
-@click.option(
-    "--timeout",
-    "-t",
-    "timeout_minutes",
-    type=float,
-    default=None,
-    help="Timeout in minutes. If not specified, monitoring runs indefinitely until interrupted with Ctrl+C.",
-)
-def monitor_command(config_path: str, timeout_minutes: float | None):
-    """Start the monitoring agent to collect energy and resource usage data.
-
-    The agent will run until interrupted with Ctrl+C or until the optional timeout is reached.
-
-    Examples:
-
-        metrion monitor                           # Run indefinitely with default config
-
-        metrion monitor --timeout 5               # Run for 5 minutes
-
-        metrion monitor -c /path/to/config.yaml   # Use custom config file
-
-        metrion monitor -t 10 -c custom.yaml      # Run for 10 minutes with custom config
-    """
-    orchestrator = Orchestrator(config_path)
-    orchestrator.start(timeout_minutes=timeout_minutes)
-
-
-# Add the analyze subcommand from energy_attribution_cli
-cli.add_command(analyze_command, name="analyze")
-
-
-def main():
-    """Entry point for the metrion CLI."""
-    cli()
-
-
-if __name__ == "__main__":
-    main()

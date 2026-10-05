@@ -3,20 +3,24 @@ import re
 
 from loguru import logger
 
+from metrion import calibration
 from metrion.discovery.system_scanner.bare_metal.linux.max_power_gpu_dram_cpu import (
     collect_rapl_caps,
     read_energy_range_j,
+    scan_rapl_packages,
 )
-from metrion.discovery.system_scanner.bare_metal.linux.util import get_cpu_idle_power_data, get_nodes_per_package
+from metrion.discovery.system_scanner.bare_metal.linux.util import get_nodes_per_package
 
 
-def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int, dict[str, float]]]:
+def _resolve_power_data(
+    power_config: dict | list | str, calibration_file: pathlib.Path
+) -> tuple[str, dict[int, dict[str, float]]]:
     """Return (mode, per-socket power data) using manual or auto sources."""
     if isinstance(power_config, str):
         power_config = power_config.lower()
 
     if power_config == "auto":
-        return "auto", _combine_power_data(_auto_idle_power_data(), _auto_max_power_data())
+        return "auto", _combine_power_data(_auto_idle_power_data(calibration_file), _auto_max_power_data())
 
     manual_entries: dict[int, dict[str, float | str | None]] = {}
 
@@ -29,10 +33,10 @@ def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int,
             }
     else:
         logger.warning(f"Unknown DRAM power config '{power_config}', falling back to auto")
-        return "auto", _combine_power_data(_auto_idle_power_data(), _auto_max_power_data())
+        return "auto", _combine_power_data(_auto_idle_power_data(calibration_file), _auto_max_power_data())
 
     if not manual_entries:
-        return "auto", _combine_power_data(_auto_idle_power_data(), _auto_max_power_data())
+        return "auto", _combine_power_data(_auto_idle_power_data(calibration_file), _auto_max_power_data())
 
     idle_auto: dict[int, float] | None = None
     max_auto: dict[int, float] | None = None
@@ -42,7 +46,7 @@ def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int,
         idle_val = manual.get("idle", "auto")
         if idle_val == "auto" or idle_val is None:
             if idle_auto is None:
-                idle_auto = _auto_idle_power_data()
+                idle_auto = _auto_idle_power_data(calibration_file)
             idle_val = idle_auto.get(pkg_id, 0.0)
         else:
             idle_val = _safe_float(idle_val, 0.0)
@@ -60,16 +64,11 @@ def _resolve_power_data(power_config: dict | list | str) -> tuple[str, dict[int,
     return "manual", resolved
 
 
-def _auto_idle_power_data() -> dict[int, float]:
-    """Auto-detect idle DRAM power using RAPL."""
-    rapl_data = get_cpu_idle_power_data()
-    idle_power: dict[int, float] = {}
-    for pkg_id, socket_data in rapl_data.items():
-        dram_val = 0.0
-        if isinstance(socket_data, dict):
-            dram_val = socket_data.get("dram", 0.0) or 0.0
-        idle_power[pkg_id] = _safe_float(dram_val, 0.0)
-    return idle_power
+def _auto_idle_power_data(calibration_file: pathlib.Path) -> dict[int, float]:
+    """Idle DRAM power per package, from the calibration; 0.0 where RAPL has no DRAM domain."""
+    packages = [(package / "name").read_text().strip().removeprefix("package-") for package in scan_rapl_packages()]
+    measured = calibration.idle_power("dram", packages, calibration_file)
+    return {int(package): watts or 0.0 for package, watts in measured.items()}
 
 
 def _auto_max_power_data() -> dict[int, float]:
@@ -192,7 +191,7 @@ def get_info(config: dict) -> list[dict]:
         - max_power (float): Max DRAM power cap in watts for the package.
         - max_energy_range_j (float | None): Value the energy counter wraps at, in joules.
     """
-    power_mode, power_data = _resolve_power_data(config.get("power", "auto"))
+    power_mode, power_data = _resolve_power_data(config.get("power", "auto"), config["calibration"])
     # Deliberately not part of power_data: the wrap value is hardware, not a setting, so it
     # must not travel through the auto/manual branch that may replace the power values.
     energy_ranges = _rapl_energy_ranges()

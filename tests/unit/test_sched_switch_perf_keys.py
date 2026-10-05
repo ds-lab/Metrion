@@ -11,7 +11,7 @@ from metrion.monitoring.data_source.cpu.collection_plan import SchedSwitchCollec
 PERF_ARRAYS = {"cycles_core", "aperf_core", "mperf_core", "load_local_perf", "load_remote_perf", "store_perf"}
 
 
-def attached_counters(monkeypatch, tmp_path, online, cpu_lists):
+def attached_counters(monkeypatch, tmp_path, online, cpu_lists, resolve=None):
     """Run _setup_perf_events on a fake sysfs.
 
     Returns (map, key, CPU the counter was opened on) for every map entry it set.
@@ -25,7 +25,7 @@ def attached_counters(monkeypatch, tmp_path, online, cpu_lists):
     monkeypatch.setattr(ss, "get_online_cpus", lambda: online)
     monkeypatch.setattr(ss, "read_perf_type", lambda path: 4)
     monkeypatch.setattr(ss, "read_perf_event", lambda path: 0x3C)
-    monkeypatch.setattr(ss, "resolve_with_strace", lambda event, cpu: {"type": 4, "config": 0x1D3})
+    monkeypatch.setattr(ss, "resolve_with_strace", resolve or (lambda event, cpu: {"type": 4, "config": 0x1D3}))
 
     cpu_of_fd = {}
 
@@ -64,3 +64,15 @@ def test_counters_are_keyed_by_cpu_id_when_a_cpu_is_offline(monkeypatch, tmp_pat
     assert {name for name, _, _ in entries} == PERF_ARRAYS
     assert all(key == cpu for _, key, cpu in entries)
     assert {key for name, key, _ in entries if name == "store_perf"} == {0, 1, 3}
+
+
+def test_a_missing_memory_counter_leaves_its_map_empty(monkeypatch, tmp_path):
+    def resolve(event, cpu):
+        if event == "mem_load_l3_miss_retired.remote_dram":
+            raise RuntimeError("event syntax error")
+        return {"type": 4, "config": 0x1D3}
+
+    entries = attached_counters(monkeypatch, tmp_path, [0, 1, 3], {}, resolve)
+
+    assert {name for name, _, _ in entries} == PERF_ARRAYS - {"load_remote_perf"}
+    assert all(key == cpu for _, key, cpu in entries)

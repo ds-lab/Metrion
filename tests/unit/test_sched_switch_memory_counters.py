@@ -5,7 +5,7 @@ import pytest
 from loguru import logger
 
 ss = pytest.importorskip(
-    "metrion.monitoring.data_source.cpu.sched_switch", reason="needs bcc and the built metrion_rust extension"
+    "metrion.monitoring.data_source.cpu.sched_switch", reason="needs the built metrion_rust extension"
 )
 
 REMOTE = "mem_load_l3_miss_retired.remote_dram"
@@ -35,7 +35,7 @@ def monitor(monkeypatch):
     monkeypatch.setattr(
         ss,
         "CustomPerf",
-        SimpleNamespace(perf_event_attr=_Attr, perf_custom_event_open_with_results=lambda attr, pid: [7, 8]),
+        SimpleNamespace(perf_event_attr=_Attr, perf_custom_event_open_with_results=lambda attr, pid, cpus: [7, 8]),
     )
     m = ss.SchedSwitchBpfMonitor.__new__(ss.SchedSwitchBpfMonitor)
     m._collection_plan = SimpleNamespace(needs_l3_local=True, needs_l3_remote=True, needs_stores=True)
@@ -55,7 +55,7 @@ def _warnings(action):
 
 def test_a_missing_counter_is_warned_about_and_the_others_still_open(monitor):
     """A missing counter must not end the probe process and take the CPU data with it."""
-    (local, remote, stores), warnings = _warnings(lambda: monitor._open_memory_events(False))
+    (local, remote, stores), warnings = _warnings(lambda: monitor._open_memory_events(False, [0, 1]))
 
     assert (local, remote, stores) == ([7, 8], [], [7, 8])
     assert len(warnings) == 1
@@ -63,7 +63,7 @@ def test_a_missing_counter_is_warned_about_and_the_others_still_open(monitor):
 
 
 def test_hybrid_cpus_say_that_memory_counters_are_skipped(monitor):
-    fds, warnings = _warnings(lambda: monitor._open_memory_events(True))
+    fds, warnings = _warnings(lambda: monitor._open_memory_events(True, [0, 1]))
 
     assert fds == ([], [], [])
     assert len(warnings) == 1
@@ -74,7 +74,7 @@ def test_hybrid_cpus_say_that_memory_counters_are_skipped(monitor):
 def test_without_memory_metrics_nothing_is_opened_or_warned(monitor):
     monitor._collection_plan = SimpleNamespace(needs_l3_local=False, needs_l3_remote=False, needs_stores=False)
 
-    fds, warnings = _warnings(lambda: monitor._open_memory_events(True))
+    fds, warnings = _warnings(lambda: monitor._open_memory_events(True, [0, 1]))
 
     assert fds == ([], [], [])
     assert warnings == []

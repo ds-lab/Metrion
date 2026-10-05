@@ -130,8 +130,7 @@ def main() -> None:
     seed_rows = make_rows(args.entities, seed=0)
     existing_ids = [r["id"] for r in seed_rows]
     cycles = [seed_rows] + [
-        make_rows(args.entities, seed=c, overlap_ids=existing_ids, overlap=0.7)
-        for c in range(1, args.cycles)
+        make_rows(args.entities, seed=c, overlap_ids=existing_ids, overlap=0.7) for c in range(1, args.cycles)
     ]
     total_rows = sum(len(c) for c in cycles)
     print(f"{args.cycles} cycles x {args.entities:,} entities = {total_rows:,} upserts (70% updates)")
@@ -159,17 +158,16 @@ def main() -> None:
         from duckdb_engine import insert as ddb_insert
 
         table = state["table"]
-        Session = state["Session"]
+        make_session = state["Session"]
         for cycle in cycles:
             stmt = ddb_insert(table)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["id"],
                 set_={
-                    name: func.coalesce(getattr(stmt.excluded, name), table.c[name])
-                    for name in LOGICAL_ENTITY_COLUMNS
+                    name: func.coalesce(getattr(stmt.excluded, name), table.c[name]) for name in LOGICAL_ENTITY_COLUMNS
                 },
             )
-            session = Session()
+            session = make_session()
             try:
                 session.execute(stmt, cycle)
                 session.commit()
@@ -182,14 +180,14 @@ def main() -> None:
     def sa_plain_insert() -> None:
         """Isolates ON CONFLICT from plain SQLAlchemy/duckdb-engine executemany overhead."""
         table = state["table"]
-        Session = state["Session"]
+        make_session = state["Session"]
         seen: set[str] = set()
         for cycle in cycles:
             fresh = [r for r in cycle if r["id"] not in seen]
             seen.update(r["id"] for r in fresh)
             if not fresh:
                 continue
-            session = Session()
+            session = make_session()
             try:
                 session.execute(table.insert(), fresh)
                 session.commit()
@@ -211,9 +209,7 @@ def main() -> None:
 
         return _setup
 
-    set_clause = ", ".join(
-        f"{c} = coalesce(excluded.{c}, logical_entity.{c})" for c in LOGICAL_ENTITY_COLUMNS
-    )
+    set_clause = ", ".join(f"{c} = coalesce(excluded.{c}, logical_entity.{c})" for c in LOGICAL_ENTITY_COLUMNS)
     all_cols = ", ".join(["id", *LOGICAL_ENTITY_COLUMNS])
 
     def staging_upsert() -> None:
@@ -246,7 +242,7 @@ def main() -> None:
                     "(SELECT *, row_number() OVER (PARTITION BY id) rn FROM stage) WHERE rn = 1"
                 )
                 con.execute(
-                    f"UPDATE logical_entity SET "
+                    "UPDATE logical_entity SET "
                     + ", ".join(f"{c} = coalesce(s.{c}, logical_entity.{c})" for c in LOGICAL_ENTITY_COLUMNS)
                     + " FROM stage_dedup s WHERE s.id = logical_entity.id"
                 )

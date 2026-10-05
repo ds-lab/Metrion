@@ -1,6 +1,6 @@
 [project]
 name = "metrion"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Linux agent for monitoring process-level resource usage metrics to estimate per-process energy consumption."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -18,9 +18,6 @@ dependencies = [
     "loguru>=0.7.3",
     "polars>=1.44.1",
     "pyarrow>=20.0.0",
-    "matplotlib>=3.10.3",
-    "plotly>=6.2.0",
-    "click>=8.1.7",
     "tqdm>=4.67.1",
     "sqlparse>=0.5.3",
     "rich>=13.0.0",
@@ -29,6 +26,7 @@ dependencies = [
     "numpy>=2.3.4",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
+    "typer>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +43,8 @@ dev = [
     "ipykernel>=6.29.5", # notebooks in VS Code
     "nbformat>=5.10.4",
     "pandas>=2.2.3,<3.0.0",
+    "matplotlib>=3.10.3", # evaluation plots
+    "plotly>=6.2.0",
 ]
 docs = [
     "mkdocs>=1.6.1",
@@ -53,7 +53,7 @@ docs = [
 ]
 
 [project.scripts]
-metrion = "metrion.orchestrator:main"
+metrion = "metrion.cli:app"
 
 [build-system]
 requires = ["maturin>=1,<2"]
@@ -68,6 +68,9 @@ lint.select = ["E", "W", "F", "N", "I", "UP", "B"]
 target-version = "py312"
 line-length = 120
 format.line-ending = "lf"
+# metrion_rust is a compiled module and bench/_common is imported from inside bench/, so ruff
+# cannot find either as a source file and would sort them among the third-party imports.
+lint.isort.known-first-party = ["metrion", "_common"]
 
 [tool.pyright]
 venvPath = "."

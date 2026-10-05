@@ -1,11 +1,11 @@
-"""Unit tests for GPU energy attribution SQL queries and CLI integration."""
+"""Unit tests for the GPU energy attribution SQL queries."""
 
 import datetime
 
 import polars as pl
 import pytest
 
-from metrion.energy_attribution.energy_attribution_cli import (
+from metrion.energy_attribution.sql_attribution import (
     collapse_time_stamps,
     filter_data_by_cmdline_and_comm,
     load_sql_queries,
