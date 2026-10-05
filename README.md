@@ -3,7 +3,7 @@
 METRION measures how much energy each process, thread and cgroup on a Linux machine uses. It
 reads the hardware energy counters of CPU, DRAM and GPU, follows every context switch with eBPF,
 and splits the measured energy among the threads that caused it. The attribution model is
-described in the [METRION paper](https://arxiv.org/abs/2512.06806).
+described in the [METRION paper](https://doi.org/10.1145/3786148.3788635) (GREENS '26).
 
 <!-- Demo video: in GitHub's web editor, drag an MP4 (at most 10 MB) onto this line. -->
 
@@ -259,20 +259,26 @@ logs go to `evaluation/data/logs/`, measurements to `evaluation/data/measurement
 ## Citation
 
 If you use METRION in academic work, please cite our paper
-([arXiv:2512.06806](https://arxiv.org/abs/2512.06806)):
+([doi:10.1145/3786148.3788635](https://doi.org/10.1145/3786148.3788635)):
 
 ```bibtex
-@misc{weigell2025metrion,
-  author        = {Weigell, Benjamin and Hornung, Simon and Bauer, Bernhard},
-  title         = {{METRION}: A Framework for Accurate Software Energy Measurement},
-  year          = {2025},
-  eprint        = {2512.06806},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.SE},
-  doi           = {10.48550/arXiv.2512.06806},
-  note          = {Accepted at the 10th IEEE/ACM International Workshop on Green and Sustainable Software (GREENS'26), ICSE 2026}
+@inproceedings{10.1145/3786148.3788635,
+  author    = {Weigell, Benjamin and Hornung, Simon and Bauer, Bernhard},
+  title     = {{METRION}: A Framework for Accurate Software Energy Measurement},
+  year      = {2026},
+  isbn      = {9798400723810},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  url       = {https://doi.org/10.1145/3786148.3788635},
+  doi       = {10.1145/3786148.3788635},
+  booktitle = {Proceedings of the IEEE/ACM 10th International Workshop on Green and Sustainable Software},
+  pages     = {131--138},
+  numpages  = {8},
+  series    = {GREENS '26}
 }
 ```
+
+A preprint is on [arXiv:2512.06806](https://arxiv.org/abs/2512.06806).
 
 ## License
 
