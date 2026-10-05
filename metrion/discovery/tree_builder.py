@@ -5,6 +5,7 @@ import sys
 
 from loguru import logger
 
+from metrion.calibration import CalibrationError
 from metrion.discovery.system_info import detect_environment, detect_os
 
 
@@ -58,6 +59,9 @@ class HardwareTreeBuilder:
         except ModuleNotFoundError as e:
             logger.debug(f"Module not found: {module_path}: {e}")
             return "Not available"
+        except CalibrationError:
+            # Measuring with a wrong idle power is worse than not measuring.
+            raise
         except Exception as e:
             logger.opt(exception=True).warning(f"Error loading {module_path}: {e}")
             return "Error"
