@@ -4,7 +4,7 @@ Pydantic configuration schema for the Metrion agent.
 This module defines the configuration structure for:
 - Storage settings (type, path)
 - Timing: the collection cycle and the interval of every data source
-- eBPF: size of the sched_switch ring buffer
+- eBPF: size of the sched_switch ring buffer and the perf events behind the memory counters
 - Energy model configuration (granularity, components)
 - Component configuration (CPU, GPU, DRAM, Network) with include/exclude modes
 - Live attribution while the agent runs
@@ -124,12 +124,43 @@ class TimingConfig(BaseModel):
     sources: SourceIntervals = Field(default_factory=SourceIntervals)
 
 
+# One perf event: a name (mem_inst_retired.all_stores), a raw code (r01d3) or a PMU form
+# (cpu/event=0xd3,umask=0x01/). No modifiers, groups or lists: only type/config/config1 are used.
+_PERF_EVENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*|[A-Za-z0-9_]+/[A-Za-z0-9_=,.-]*/")
+
+
+class MemoryEventsConfig(BaseModel):
+    """Perf events behind the CPU_CORE_PID_MEM_* metrics; the defaults are Skylake-SP and newer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    l3_miss_local_dram: str = Field(
+        default="mem_load_l3_miss_retired.local_dram", description="Loads served by local DRAM"
+    )
+    l3_miss_remote_dram: str = Field(
+        default="mem_load_l3_miss_retired.remote_dram", description="Loads served by remote DRAM"
+    )
+    all_stores: str = Field(default="mem_inst_retired.all_stores", description="Retired stores")
+
+    @field_validator("l3_miss_local_dram", "l3_miss_remote_dram", "all_stores")
+    @classmethod
+    def check_single_event(cls, value: str, info: ValidationInfo) -> str:
+        # Only the first perf_event_open of `perf stat` is read, and modifiers would be dropped silently.
+        if not _PERF_EVENT.fullmatch(value):
+            raise ValueError(
+                f"ebpf.memory_events.{info.field_name} must be a single perf event without modifiers, "
+                f"such as mem_load_l3_miss_retired.local_dram, r01d3 or cpu/event=0xd3,umask=0x01/, got {value!r}"
+            )
+        return value
+
+
 class EbpfConfig(BaseModel):
     """Settings of the eBPF probes."""
 
     model_config = ConfigDict(extra="forbid")
 
     ringbuf_mib: int = Field(default=256, gt=0, description="Size of the sched_switch ring buffer in MiB")
+    memory_events: MemoryEventsConfig = Field(default_factory=MemoryEventsConfig)
 
     @field_validator("ringbuf_mib")
     @classmethod

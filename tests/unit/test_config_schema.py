@@ -2,6 +2,7 @@
 Unit tests for the new configuration schema.
 """
 
+import pickle
 import re
 import tempfile
 from pathlib import Path
@@ -15,6 +16,7 @@ from metrion.config_reader import (
     ConfigReader,
     EbpfConfig,
     EnergyModelConfig,
+    MemoryEventsConfig,
     SourceIntervals,
     StorageConfig,
     SubcomponentPowerConfig,
@@ -223,6 +225,7 @@ class TestSourceIntervals:
         assert config.timing.sources.rapl == 1.0
         assert config.timing.sources.tcp_monitor == 5.0
         assert config.ebpf.ringbuf_mib == 256
+        assert config.ebpf.memory_events == MemoryEventsConfig()
 
 
 class TestEbpfConfig:
@@ -240,6 +243,76 @@ class TestEbpfConfig:
         path.write_text("ebpf:\n  ringbuf_mib: 256\nenergy_model:\n  components: {}\n")
 
         assert AgentConfig.from_yaml_file(path).ebpf.ringbuf_mib == 256
+
+
+class TestMemoryEventsConfig:
+    def test_defaults_are_the_previously_hardcoded_names(self):
+        events = EbpfConfig().memory_events
+
+        assert (events.l3_miss_local_dram, events.l3_miss_remote_dram, events.all_stores) == (
+            "mem_load_l3_miss_retired.local_dram",
+            "mem_load_l3_miss_retired.remote_dram",
+            "mem_inst_retired.all_stores",
+        )
+
+    def test_haswell_names_are_read_from_yaml(self, tmp_path):
+        path = tmp_path / "c.yaml"
+        path.write_text(
+            "ebpf:\n  memory_events:\n"
+            "    l3_miss_local_dram: mem_load_uops_l3_miss_retired.local_dram\n"
+            "    l3_miss_remote_dram: mem_load_uops_l3_miss_retired.remote_dram\n"
+            "    all_stores: mem_uops_retired.all_stores\n"
+            "energy_model:\n  components: {}\n"
+        )
+
+        events = AgentConfig.from_yaml_file(path).ebpf.memory_events
+
+        assert events.l3_miss_local_dram == "mem_load_uops_l3_miss_retired.local_dram"
+        assert events.l3_miss_remote_dram == "mem_load_uops_l3_miss_retired.remote_dram"
+        assert events.all_stores == "mem_uops_retired.all_stores"
+
+    def test_a_left_out_entry_keeps_its_default(self):
+        events = MemoryEventsConfig(all_stores="mem_uops_retired.all_stores")
+
+        assert events.l3_miss_local_dram == "mem_load_l3_miss_retired.local_dram"
+
+    @pytest.mark.parametrize(
+        "event",
+        [
+            "r01d3",
+            "cpu/event=0xd3,umask=0x01/",
+            "cpu_core/event=0xd1,umask=0x20/",
+            "mem_load_uops_l3_miss_retired.local_dram",
+            "cycles",
+        ],
+    )
+    def test_accepts_one_event(self, event):
+        assert MemoryEventsConfig(all_stores=event).all_stores == event
+
+    @pytest.mark.parametrize(
+        "event", ["", " ", "a b", "x:u", "mem_inst_retired.all_stores:u", "a,b", "{a,b}", "cpu/event=0xd3/u"]
+    )
+    def test_rejects_anything_but_one_plain_event(self, event):
+        """Only the first event perf opens is read, and a modifier would be dropped without a word."""
+        with pytest.raises(ValidationError):
+            MemoryEventsConfig(all_stores=event)
+
+    def test_error_names_the_key_and_an_example(self):
+        with pytest.raises(ValidationError) as exc:
+            MemoryEventsConfig(all_stores="x:u")
+
+        assert "ebpf.memory_events.all_stores" in str(exc.value)
+        assert "cpu/event=0xd3,umask=0x01/" in str(exc.value)
+
+    def test_unknown_key_is_rejected(self):
+        with pytest.raises(ValidationError):
+            EbpfConfig.model_validate({"memory_events": {"l3_local": "a.b"}})
+
+    def test_survives_pickling(self):
+        """The config travels into the probe process."""
+        events = MemoryEventsConfig(l3_miss_local_dram="mem_load_uops_l3_miss_retired.local_dram")
+
+        assert pickle.loads(pickle.dumps(events)) == events
 
 
 class TestTimingConfig:

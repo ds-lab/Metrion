@@ -192,6 +192,7 @@ being ignored.
 | `live_attribution` | Attribution during the run, see [above](#after-the-run-or-live). |
 | `timing` | How often sources are read and data is written; the defaults suit most runs. |
 | `ebpf.ringbuf_mib` | Buffer for context switches. Raise it if the log warns about lost events. |
+| `ebpf.memory_events` | Perf events behind `CPU_CORE_PID_MEM_*`, for CPUs older than Skylake-SP; see the comment in the config. |
 
 To leave out a component, e.g. on a machine without an NVIDIA GPU:
 
@@ -222,6 +223,8 @@ energy_model:
 - **"No calibration at ..."**: run `sudo $(which metrion) calibrate` in this directory, or
   point `calibration` in `metrion.yaml` to an existing one.
 - **The log warns about a ring buffer overflow**: raise `ebpf.ringbuf_mib`.
+- **The log warns that a memory counter is not available**: look up this CPU's name for it with
+  `perf list mem_load` and set it in `ebpf.memory_events`.
 - **Analyzing a Parquet run fails with a permission error**: the first `analyze` of a Parquet
   run writes a database into its directory, which belongs to root. Run it once with `sudo`.
 - **`monitor` does not stop on Ctrl+C**: `sudo pkill -9 -f "metrion monitor"`.

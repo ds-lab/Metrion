@@ -13,7 +13,7 @@ import psutil
 from loguru import logger
 
 import metrion.metrion_rust as mar  # ty:ignore[unresolved-import]
-from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
+from metrion.config_reader.config_schema import EbpfConfig, MemoryEventsConfig, TimingConfig
 from metrion.data_record import DataRecord
 from metrion.discovery.system_scanner.bare_metal.linux.util import parse_cpu_list
 from metrion.entity.cpu import CPU
@@ -132,6 +132,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         config: RingBufferConfig,
         collection_plan: SchedSwitchCollectionPlan | None = None,
         ringbuf_mib: int | None = None,
+        memory_events: MemoryEventsConfig | None = None,
         daemon: bool = True,
     ):
         with cls._singletons_lock:
@@ -147,7 +148,13 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
                 enabled_groups,
                 disabled_groups,
             )
-            inst = cls(config=config, collection_plan=collection_plan, ringbuf_mib=ringbuf_mib, daemon=daemon)
+            inst = cls(
+                config=config,
+                collection_plan=collection_plan,
+                ringbuf_mib=ringbuf_mib,
+                memory_events=memory_events,
+                daemon=daemon,
+            )
             inst.start()
             cls._singletons[cls] = inst
             return inst
@@ -157,6 +164,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         config: RingBufferConfig,
         collection_plan: SchedSwitchCollectionPlan | None = None,
         ringbuf_mib: int | None = None,
+        memory_events: MemoryEventsConfig | None = None,
         name: str | None = None,
         daemon: bool = True,
     ) -> None:
@@ -165,6 +173,7 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
         self._use_raw_bytes = True
         self._collection_plan = collection_plan or SchedSwitchCollectionPlan.all_enabled()
         self._ringbuf_mib = ringbuf_mib or EbpfConfig().ringbuf_mib
+        self._memory_events = memory_events or MemoryEventsConfig()
         self._pending_events = 0
 
     @override
@@ -529,15 +538,18 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             )
             return [], [], []
 
-        # Event names from https://perfmon-events.intel.com/skylake_server.html
-        return (
-            self._open_memory_event("mem_load_l3_miss_retired.local_dram", cpus) if plan.needs_l3_local else [],
-            self._open_memory_event("mem_load_l3_miss_retired.remote_dram", cpus) if plan.needs_l3_remote else [],
-            self._open_memory_event("mem_inst_retired.all_stores", cpus) if plan.needs_stores else [],
-        )
+        events = self._memory_events
+        local, remote, stores = [], [], []
+        if plan.needs_l3_local:
+            local = self._open_memory_event("l3_miss_local_dram", events.l3_miss_local_dram, cpus)
+        if plan.needs_l3_remote:
+            remote = self._open_memory_event("l3_miss_remote_dram", events.l3_miss_remote_dram, cpus)
+        if plan.needs_stores:
+            stores = self._open_memory_event("all_stores", events.all_stores, cpus)
+        return local, remote, stores
 
-    def _open_memory_event(self, event: str, cpus: list[int]) -> list[int]:
-        """Open a counter by its perf name on every CPU; an empty list where this CPU lacks it."""
+    def _open_memory_event(self, key: str, event: str, cpus: list[int]) -> list[int]:
+        """Open the counter set in ebpf.memory_events.<key> on every CPU; an empty list where this CPU lacks it."""
         try:
             config = resolve_with_strace(event, cpu=0)
             # Every field left out stays zero: counting, not sampling, enabled, user and kernel.
@@ -546,14 +558,24 @@ class SchedSwitchBpfMonitor(EbpfRingBufferProcess):
             attr.config = config["config"]
             attr.config1 = config.get("config1", 0)
             attr.size = ct.sizeof(CustomPerf.perf_event_attr)
-            return CustomPerf.perf_custom_event_open_with_results(attr=attr, pid=-1, cpus=cpus)
+            fds = CustomPerf.perf_custom_event_open_with_results(attr=attr, pid=-1, cpus=cpus)
         except (RuntimeError, OSError) as e:
             # Without the counter only DRAM loses its per-process split; CPU attribution carries on.
             logger.warning(
-                f"sched_switch BPF: memory counter {event} is not available on this machine ({e}), "
-                "so DRAM dynamic energy is attributed without it"
+                f"sched_switch BPF: memory counter {event} (ebpf.memory_events.{key}) is not available on this "
+                f"machine ({e}), so DRAM dynamic energy is attributed without it. "
+                "`perf list mem_load` lists the events of this CPU."
             )
             return []
+        logger.info(
+            "sched_switch BPF: memory counter ebpf.memory_events.{} = {} opened as type={} config={:#x} config1={:#x}",
+            key,
+            event,
+            attr.type,
+            attr.config,
+            attr.config1,
+        )
+        return fds
 
     @override
     def _attach_ringbuf(self) -> None:
@@ -817,6 +839,7 @@ class SchedSwitchMonitor(DataSource):
                 self._ring_buffer_config,
                 collection_plan=self._collection_plan,
                 ringbuf_mib=self._ebpf.ringbuf_mib,
+                memory_events=self._ebpf.memory_events,
             )
 
             # timing data

@@ -6,6 +6,7 @@ ss = pytest.importorskip(
     "metrion.monitoring.data_source.cpu.sched_switch", reason="needs the built metrion_rust extension"
 )
 
+from metrion.config_reader.config_schema import MemoryEventsConfig  # noqa: E402
 from metrion.monitoring.data_source.cpu.collection_plan import SchedSwitchCollectionPlan  # noqa: E402
 
 PERF_ARRAYS = {"cycles_core", "aperf_core", "mperf_core", "load_local_perf", "load_remote_perf", "store_perf"}
@@ -44,6 +45,7 @@ def attached_counters(monkeypatch, tmp_path, online, cpu_lists, resolve=None):
     entries = []
     monitor = ss.SchedSwitchBpfMonitor.__new__(ss.SchedSwitchBpfMonitor)
     monitor._collection_plan = SchedSwitchCollectionPlan.all_enabled()
+    monitor._memory_events = MemoryEventsConfig()
     monitor._bpf = SimpleNamespace(set_perf_fd=lambda name, key, fd: entries.append((name, key, cpu_of_fd[fd])))
     monitor._setup_perf_events()
     return entries

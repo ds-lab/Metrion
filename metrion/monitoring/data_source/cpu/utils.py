@@ -6,6 +6,8 @@ import sys
 from glob import glob
 from pathlib import Path
 
+from loguru import logger
+
 _ppid_start_cache: dict[int, float] = {}
 _CLK_TCK = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
 
@@ -468,7 +470,7 @@ def parse_attr_kvlist(kvblob):
 
 
 def resolve_with_strace(event, cpu=None, perf="perf"):
-    print(f"Resolving event {event} with CPU {cpu} and perf {perf}")
+    logger.debug("Resolving perf event {} on CPU {} with {}", event, cpu, perf)
     kvblob = run_strace(event, cpu=cpu, perf=perf)
     d = parse_attr_kvlist(kvblob)
     # Validate presence

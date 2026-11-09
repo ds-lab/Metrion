@@ -79,6 +79,16 @@ ebpf:
   # seconds of 200 000 switches per second; 32 MiB already lost events on a busy 32-thread server.
   # Raise it when the log warns about a ring buffer overflow, lower it on a small machine.
   ringbuf_mib: 256
+  # The perf events behind the CPU_CORE_PID_MEM_* metrics, one event per entry without
+  # modifiers such as :u. They take effect only for the CPU_CORE_PID_MEM_* metrics enabled
+  # under energy_model.components.cpu.metrics. Left out, they are those of Skylake-SP and newer
+  # Intel servers; `perf list mem_load` shows what this CPU has. On Haswell-EP and Broadwell-EP:
+  # memory_events:
+  #   l3_miss_local_dram: mem_load_uops_l3_miss_retired.local_dram
+  #   l3_miss_remote_dram: mem_load_uops_l3_miss_retired.remote_dram
+  #   all_stores: mem_uops_retired.all_stores
+  # On a single-socket client CPU, l3_miss_local_dram: mem_load_retired.l3_miss works too; on two
+  # sockets it would count remote misses as well.
 
 # Attribute energy while the agent runs and write one row per time window and thread, with the
 # thread's name, cmdline and cgroup, into its own Parquet directory. Off, the attribution runs
@@ -115,6 +125,7 @@ energy_model:
         - CPU_CORE_PID_WORK
         - CPU_CORE_PID_TIME
         # - CPU_CORE_PID_UNHALTED_CYCLES
+        # The perf events behind these are set in ebpf.memory_events.
         # - CPU_CORE_PID_MEM_LOAD_L3_MISS_LOCAL_DRAM
         # - CPU_CORE_PID_MEM_LOAD_L3_MISS_REMOTE_DRAM
     dram:
