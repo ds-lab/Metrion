@@ -105,59 +105,75 @@ static __always_inline void cache_comm(u32 tid, const char *src_comm)
 }
 
 /*
+ * The caches are updated from stack locals, the event is built in the ring buffer:
+ * the verifier does not track ring-buffer memory, so the cmdline loop in
+ * read_cmdline_from_task() cannot split the stack state into exponentially many paths.
+ */
+
+/*
  * task:task_newtask
  * Fields commonly: pid, comm, clone_flags
- * See kernel trace/events/task.h. :contentReference[oaicite:7]{index=7}
+ * See kernel trace/events/task.h.
  */
 SEC("tracepoint/task/task_newtask")
 int task_newtask(struct trace_event_raw_task_newtask *args)
 {
-    struct task_event_t e = {};
-    e.event_type = EVENT_TYPE_NEW;
-
-    e.tid = (u32)args->pid;
-
-    e.tid_start_ns = bpf_ktime_get_boot_ns();
+    u32 tid = (u32)args->pid;
+    u64 tid_start = bpf_ktime_get_boot_ns();
 
     /* creator is current */
     u64 pt = bpf_get_current_pid_tgid();
-    e.parent_tid  = (u32)(pt & 0xFFFFFFFF);
-    e.parent_tgid = (u32)(pt >> 32);
+    u32 parent_tid  = (u32)(pt & 0xFFFFFFFF);
+    u32 parent_tgid = (u32)(pt >> 32);
 
     /* parent start times (if available in map) */
-    e.parent_tid_start_ns  = lookup_start(e.parent_tid);
-    e.parent_tgid_start_ns = lookup_start(e.parent_tgid);
+    u64 parent_tid_start  = lookup_start(parent_tid);
+    u64 parent_tgid_start = lookup_start(parent_tgid);
 
     /* derive child tgid */
-    if (args->clone_flags & CLONE_THREAD){
-        e.tgid = e.parent_tgid;
-        e.tgid_start_ns = e.parent_tgid_start_ns;
-    }
-    else{
-        e.tgid = e.tid;
-        e.tgid_start_ns = e.tid_start_ns;
+    u32 tgid = tid;
+    u64 tgid_start = tid_start;
+    if (args->clone_flags & CLONE_THREAD) {
+        tgid = parent_tgid;
+        tgid_start = parent_tgid_start;
     }
 
+    /* update kernel caches */
+    bpf_map_update_elem(&tid_start_ns, &tid, &tid_start, BPF_ANY);
+    bpf_map_update_elem(&tid_tgid, &tid, &tgid, BPF_ANY);
+    cache_comm(tid, args->comm);
+
+    struct task_event_t *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_drop();
+        return 0;
+    }
+    __builtin_memset(e, 0, sizeof(*e));
+
+    e->event_type = EVENT_TYPE_NEW;
+    e->tid = tid;
+    e->tgid = tgid;
+    e->tid_start_ns = tid_start;
+    e->tgid_start_ns = tgid_start;
+    e->parent_tid = parent_tid;
+    e->parent_tgid = parent_tgid;
+    e->parent_tid_start_ns = parent_tid_start;
+    e->parent_tgid_start_ns = parent_tgid_start;
+
     /* comm at fork/clone time */
-    bpf_probe_read_str(e.comm, sizeof(e.comm), args->comm);
+    bpf_probe_read_str(e->comm, sizeof(e->comm), args->comm);
 
     /* Read cmdline from parent (current task during fork) */
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    read_cmdline_from_task(task, e.cmdline, e.comm);
+    read_cmdline_from_task(task, e->cmdline, e->comm);
 
     /* metadata */
     u64 uid_gid = bpf_get_current_uid_gid();
-    e.uid = (u32)uid_gid;
-    e.gid = (u32)(uid_gid >> 32);
-    e.cgroup_id = bpf_get_current_cgroup_id();
+    e->uid = (u32)uid_gid;
+    e->gid = (u32)(uid_gid >> 32);
+    e->cgroup_id = bpf_get_current_cgroup_id();
 
-    /* update kernel caches */
-    bpf_map_update_elem(&tid_start_ns, &e.tid, &e.tid_start_ns, BPF_ANY);
-    bpf_map_update_elem(&tid_tgid, &e.tid, &e.tgid, BPF_ANY);
-    cache_comm(e.tid, e.comm);
-
-    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
-    if (ret) inc_drop();
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 
@@ -168,18 +184,12 @@ int task_newtask(struct trace_event_raw_task_newtask *args)
 SEC("tracepoint/sched/sched_process_exec")
 int sched_process_exec(struct trace_event_raw_sched_process_exec *args)
 {
-    struct task_event_t e = {};
-    e.event_type = EVENT_TYPE_EXEC;
-
     u32 pid = (u32)args->pid;
     u32 old = (u32)args->old_pid;
 
-    e.tid = pid;
-    e.old_tid = old;  // Capture old PID for migration tracking
-
     /* TGID after exec: read from current */
     u64 pt = bpf_get_current_pid_tgid();
-    e.tgid = (u32)(pt >> 32);
+    u32 tgid = (u32)(pt >> 32);
 
     /* start time: prefer pid; else migrate from old pid */
     u64 st = lookup_start(pid);
@@ -190,8 +200,7 @@ int sched_process_exec(struct trace_event_raw_sched_process_exec *args)
             bpf_map_delete_elem(&tid_start_ns, &old);
         }
     }
-    e.tid_start_ns = st;
-    e.tgid_start_ns = lookup_start(e.tgid);
+    u64 tgid_start = lookup_start(tgid);
 
     /* migrate comm cache if pid swapped */
     if (old && old != pid) {
@@ -206,24 +215,39 @@ int sched_process_exec(struct trace_event_raw_sched_process_exec *args)
     }
 
     /* update TGID cache */
-    bpf_map_update_elem(&tid_tgid, &pid, &e.tgid, BPF_ANY);
+    bpf_map_update_elem(&tid_tgid, &pid, &tgid, BPF_ANY);
 
     /* comm after exec (kernel typically sets comm to basename during exec) */
-    bpf_get_current_comm(e.comm, sizeof(e.comm));
-    cache_comm(e.tid, e.comm);
+    struct comm_t c = {};
+    bpf_get_current_comm(c.comm, sizeof(c.comm));
+    bpf_map_update_elem(&tid_comm, &pid, &c, BPF_ANY);
+
+    struct task_event_t *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_drop();
+        return 0;
+    }
+    __builtin_memset(e, 0, sizeof(*e));
+
+    e->event_type = EVENT_TYPE_EXEC;
+    e->tid = pid;
+    e->old_tid = old;  // Capture old PID for migration tracking
+    e->tgid = tgid;
+    e->tid_start_ns = st;
+    e->tgid_start_ns = tgid_start;
+    __builtin_memcpy(e->comm, c.comm, sizeof(e->comm));
 
     /* Read cmdline after exec - this will have the new program's cmdline */
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    read_cmdline_from_task(task, e.cmdline, e.comm);
+    read_cmdline_from_task(task, e->cmdline, e->comm);
 
     /* metadata update (exec might change creds) */
     u64 uid_gid = bpf_get_current_uid_gid();
-    e.uid = (u32)uid_gid;
-    e.gid = (u32)(uid_gid >> 32);
-    e.cgroup_id = bpf_get_current_cgroup_id();
+    e->uid = (u32)uid_gid;
+    e->gid = (u32)(uid_gid >> 32);
+    e->cgroup_id = bpf_get_current_cgroup_id();
 
-    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
-    if (ret) inc_drop();
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 
@@ -234,34 +258,43 @@ int sched_process_exec(struct trace_event_raw_sched_process_exec *args)
 SEC("tracepoint/task/task_rename")
 int task_rename(struct trace_event_raw_task_rename *args)
 {
-    struct task_event_t e = {};
-    e.event_type = EVENT_TYPE_RENAME;
-
     u64 pt = bpf_get_current_pid_tgid();
-    e.tid  = (u32)(pt & 0xFFFFFFFF);
-    e.tgid = (u32)(pt >> 32);
-    e.tid_start_ns = lookup_start(e.tid);
-    e.tgid_start_ns = lookup_start(e.tgid);
+    u32 tid  = (u32)(pt & 0xFFFFFFFF);
+    u32 tgid = (u32)(pt >> 32);
 
     /* new comm from current */
-    bpf_get_current_comm(e.comm, sizeof(e.comm));
-    cache_comm(e.tid, e.comm);
+    struct comm_t c = {};
+    bpf_get_current_comm(c.comm, sizeof(c.comm));
+    bpf_map_update_elem(&tid_comm, &tid, &c, BPF_ANY);
+
+    /* keep tgid cache warm */
+    bpf_map_update_elem(&tid_tgid, &tid, &tgid, BPF_ANY);
+
+    struct task_event_t *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_drop();
+        return 0;
+    }
+    __builtin_memset(e, 0, sizeof(*e));
+
+    e->event_type = EVENT_TYPE_RENAME;
+    e->tid = tid;
+    e->tgid = tgid;
+    e->tid_start_ns = lookup_start(tid);
+    e->tgid_start_ns = lookup_start(tgid);
+    __builtin_memcpy(e->comm, c.comm, sizeof(e->comm));
 
     /* Read cmdline */
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    read_cmdline_from_task(task, e.cmdline, e.comm);
-
-    /* keep tgid cache warm */
-    bpf_map_update_elem(&tid_tgid, &e.tid, &e.tgid, BPF_ANY);
+    read_cmdline_from_task(task, e->cmdline, e->comm);
 
     /* metadata */
     u64 uid_gid = bpf_get_current_uid_gid();
-    e.uid = (u32)uid_gid;
-    e.gid = (u32)(uid_gid >> 32);
-    e.cgroup_id = bpf_get_current_cgroup_id();
+    e->uid = (u32)uid_gid;
+    e->gid = (u32)(uid_gid >> 32);
+    e->cgroup_id = bpf_get_current_cgroup_id();
 
-    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
-    if (ret) inc_drop();
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 
@@ -272,27 +305,36 @@ int task_rename(struct trace_event_raw_task_rename *args)
 SEC("tracepoint/sched/sched_process_exit")
 int sched_process_exit(struct trace_event_raw_sched_process_exit *args)
 {
-    struct task_event_t e = {};
-    e.event_type = EVENT_TYPE_EXIT;
-
     u64 pt = bpf_get_current_pid_tgid();
-    e.tid  = (u32)pt;
-    e.tgid = (u32)(pt >> 32);
-    e.tid_start_ns = lookup_start(e.tid);
-    e.tgid_start_ns = lookup_start(e.tgid);
+    u32 tid  = (u32)pt;
+    u32 tgid = (u32)(pt >> 32);
+    u64 tid_start = lookup_start(tid);
+    u64 tgid_start = lookup_start(tgid);
 
-    bpf_get_current_comm(e.comm, sizeof(e.comm));
+    /* cleanup caches to avoid map growth */
+    bpf_map_delete_elem(&tid_start_ns, &tid);
+    bpf_map_delete_elem(&tid_tgid, &tid);
+    bpf_map_delete_elem(&tid_comm, &tid);
+
+    struct task_event_t *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_drop();
+        return 0;
+    }
+    __builtin_memset(e, 0, sizeof(*e));
+
+    e->event_type = EVENT_TYPE_EXIT;
+    e->tid = tid;
+    e->tgid = tgid;
+    e->tid_start_ns = tid_start;
+    e->tgid_start_ns = tgid_start;
+
+    bpf_get_current_comm(e->comm, sizeof(e->comm));
 
     /* Read cmdline */
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-    read_cmdline_from_task(task, e.cmdline, e.comm);
+    read_cmdline_from_task(task, e->cmdline, e->comm);
 
-    /* cleanup caches to avoid map growth */
-    bpf_map_delete_elem(&tid_start_ns, &e.tid);
-    bpf_map_delete_elem(&tid_tgid, &e.tid);
-    bpf_map_delete_elem(&tid_comm, &e.tid);
-
-    int ret = bpf_ringbuf_output(&events, &e, sizeof(e), 0);
-    if (ret) inc_drop();
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
