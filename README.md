@@ -28,13 +28,13 @@ Download the wheel from the [releases page](../../releases) and install it as a 
 Python 3.12 if the machine lacks it:
 
 ```bash
-uv tool install ./metrion-0.2.1-cp312-cp312-manylinux_2_28_x86_64.whl
+uv tool install ./metrion-0.2.2-cp312-cp312-manylinux_2_28_x86_64.whl
 ```
 
 Or with pip, in a Python 3.12 environment:
 
 ```bash
-pip install ./metrion-0.2.1-cp312-cp312-manylinux_2_28_x86_64.whl
+pip install ./metrion-0.2.2-cp312-cp312-manylinux_2_28_x86_64.whl
 ```
 
 The wheel brings everything it needs. BCC, kernel headers or a compiler are not required.
