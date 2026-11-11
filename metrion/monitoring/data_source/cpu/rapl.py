@@ -1,6 +1,9 @@
+import re
 from enum import Enum
 from pathlib import Path
 from typing import override
+
+from loguru import logger
 
 from metrion.config_reader.config_schema import EbpfConfig, TimingConfig
 from metrion.data_record import DataRecord
@@ -19,6 +22,11 @@ class PowerDomains(Enum):
     PKG = "package"
     DRAM = "dram"  # PP1
     CORE = "core"  # PP0
+
+
+# Name of a top-level zone that meters a CPU package, package-<physical id>. On CPUs with several
+# dies per package the kernel names one zone per die instead, package-<physical id>-die-<die id>.
+PACKAGE_ZONE_NAME = re.compile(r"package-(\d+)(?:-die-(\d+))?")
 
 
 class RAPLCPU(DataSource):
@@ -73,10 +81,10 @@ class RAPLCPU(DataSource):
                 package_id = entity.cpu.package_id
 
             if package_id not in self._socket_info:
-                socket_path = self.powercap_tree / f"intel-rapl:{package_id}"
+                socket_path = self._package_zone(package_id)
                 self._socket_info[package_id] = {
                     "path": socket_path,
-                    "metrics": self._discover_metrics_per_socket(socket_path, package_id),
+                    "metrics": self._discover_metrics_per_socket(socket_path) if socket_path else {},
                     "entities": [],
                 }
             self._socket_info[package_id]["entities"].append(entity)
@@ -99,27 +107,70 @@ class RAPLCPU(DataSource):
                 return entity_type
         raise ValueError(f"Metric '{metric.name}' is not mapped to any entity type.")
 
-    def _discover_metrics_per_socket(self, socket_path: Path, package_id: int) -> dict[Metric, Path]:
-        """Discover available power domains for a given socket.
+    def _package_zone(self, package_id: int) -> Path | None:
+        """Find the top-level RAPL zone of a CPU package by its name, package-<package_id>.
+
+        The zone number is not the package id: zones are numbered in the order the kernel
+        registers them, so a platform zone (psys) can take intel-rapl:1 and push package-1
+        to intel-rapl:2.
+
+        Parameters
+        ----------
+        package_id : int
+            The physical package id of the socket.
+
+        Returns
+        -------
+        Path or None
+            The zone directory, None (logged as an error) if no zone is named package-<package_id>.
+        """
+        dies = []
+        for zone in sorted(self.powercap_tree.glob("intel-rapl:[0-9]*")):
+            name_file = zone / "name"
+            if zone.name.count(":") != 1 or not name_file.is_file():
+                continue
+            match = PACKAGE_ZONE_NAME.fullmatch(name_file.read_text().strip())
+            if match is None or int(match[1]) != package_id:
+                continue
+            if match[2] is None:
+                return zone
+            dies.append(zone.name)
+
+        if dies:
+            # Every die has its own counter and wraps on its own, while the entities and the wrap
+            # correction downstream expect one counter per package. Summing them is not done here.
+            logger.error(
+                f"RAPL: package {package_id} is metered per die ({', '.join(dies)}), which is not supported; "
+                f"socket {package_id} gets no package or DRAM energy"
+            )
+        else:
+            logger.error(
+                f"RAPL: no zone named package-{package_id} under {self.powercap_tree}; "
+                f"socket {package_id} gets no package or DRAM energy"
+            )
+        return None
+
+    def _discover_metrics_per_socket(self, socket_path: Path) -> dict[Metric, Path]:
+        """Discover the power domains of one package zone.
 
         Parameters
         ----------
         socket_path : Path
-            The path to the RAPL socket directory.
-        package_id : int
-            The ID of the socket.
+            The package zone, one named package-<n> (see _package_zone).
 
         Returns
         -------
-        dict[PowerDomains, Path]
-            A dictionary mapping power domains to their directory paths.
+        dict[Metric, Path]
+            The metrics of the package and its sub-domains, mapped to their directory paths.
         """
         metrics = {}
         socket_name_file = socket_path / "name"
-        if socket_name_file.exists():
-            metrics[CPU_SOCKET_PKG_ENERGY] = socket_path
+        if not socket_name_file.is_file() or not PACKAGE_ZONE_NAME.fullmatch(socket_name_file.read_text().strip()):
+            # psys and other platform zones are no package, nor are their sub-domains.
+            return metrics
+        metrics[CPU_SOCKET_PKG_ENERGY] = socket_path
 
-        for domain_dir in socket_path.glob(f"intel-rapl:{package_id}:*"):
+        for domain_dir in socket_path.glob("intel-rapl:*:*"):
             name_file = domain_dir / "name"
             if name_file.exists():
                 try:
