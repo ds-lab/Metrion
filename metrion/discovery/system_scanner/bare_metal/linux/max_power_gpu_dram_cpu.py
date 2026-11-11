@@ -172,7 +172,7 @@ def rapl_package_caps(pkg: Path) -> RaplPackageCaps:
 
 def rapl_dram_caps(pkg: Path) -> list[RaplDomainCaps]:
     """Collect DRAM domain caps under a package."""
-    pkg_num = pkg.name.split(":", 1)[-1]
+    pkg_num = (pkg / "name").read_text().strip().removeprefix("package-")
     caps: list[RaplDomainCaps] = []
     for sub in pkg.glob("intel-rapl:*:*"):
         name_file = sub / "name"
